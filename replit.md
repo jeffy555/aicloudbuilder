@@ -70,8 +70,10 @@ Preferred communication style: Simple, everyday language.
 
 **AI Integration**:
 - OpenAI GPT-4o-mini for conversational AI and Terraform generation
-- System prompt guides AI to act as DevOps assistant
-- Structured generation of main.tf, variables.tf, and terraform.tfvars files
+- Context-aware system prompts based on current workflow step
+- AI chat only active during Step 4 (Generate) for relevant responses
+- System messages for step transitions without triggering AI
+- Structured generation of main.tf, variables.tf, terraform.tfvars, and README.md files
 
 **Repository Integration**:
 - Model Context Protocol (MCP) client manager for abstracted repository operations
@@ -170,13 +172,15 @@ Preferred communication style: Simple, everyday language.
 ### Known Limitations ⚠️
 
 **GitHub MCP push_files Limitation (RESOLVED)**:
-The GitHub MCP server's `push_files` tool previously had a limitation preventing initial commits to newly created repositories.
+The GitHub MCP server's `push_files` tool cannot commit to empty repositories. 
 
 **Solution Implemented**:
-- Platform now automatically generates a README.md file alongside Terraform files
-- When committing to a new repository, 4 files are committed: main.tf, variables.tf, terraform.tfvars, and README.md
-- The README includes usage instructions and cloud provider information
-- This ensures the first commit initializes the repository properly, avoiding the "empty repository" error
+- Platform detects "repository is empty" errors in MCP response (checks message, stderr, and data fields)
+- Automatically falls back to GitHub REST API (Contents API) when MCP fails on empty repositories
+- Files committed sequentially using `createOrUpdateFileContents` endpoint
+- Works for all newly created repositories
+- 4 files committed: main.tf, variables.tf, terraform.tfvars, and README.md
+- README includes usage instructions and cloud provider information
 
 **Azure DevOps MCP Limitations**:
 The Azure DevOps MCP server (`@azure-devops/mcp`) has significant functional limitations compared to GitHub:
