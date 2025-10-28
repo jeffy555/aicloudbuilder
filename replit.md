@@ -136,7 +136,36 @@ Preferred communication style: Simple, everyday language.
 **Environment Variables Required**:
 - `OPENAI_API_KEY`: OpenAI API authentication
 - `GITHUB_TOKEN`: GitHub API access
+- `GITHUB_OWNER`: GitHub account username
 - `AZURE_DEVOPS_ORG`: Azure DevOps organization name
 - `AZURE_DEVOPS_PAT`: Azure DevOps personal access token
 - `DATABASE_URL`: PostgreSQL connection string (optional, for future use)
 - `NODE_ENV`: Environment mode (development/production)
+
+## Implementation Status
+
+### Working Features ✅
+1. **Session Management**: Create and manage conversation sessions
+2. **Provider Selection**: Choose between GitHub and Azure DevOps
+3. **Repository Listing**: List existing repositories via MCP
+4. **Repository Creation**: Create new repositories via MCP
+5. **AI Conversation**: Natural language interaction with OpenAI
+6. **Terraform Generation**: AI-powered generation of main.tf, variables.tf, and terraform.tfvars
+7. **Code Review**: Monaco editor for reviewing and editing generated files
+8. **File Management**: Store and retrieve generated Terraform files
+
+### Known Limitations ⚠️
+
+**GitHub MCP push_files Limitation**:
+The GitHub MCP server's `push_files` tool has a limitation preventing initial commits to newly created repositories. Testing revealed:
+- Repositories created with `auto_init: true` result in "Git Repository is empty" errors despite waiting for initialization (tested up to 60+ seconds with retry logic)
+- Repositories created with `auto_init: false` (empty) also fail with the same "Git Repository is empty" conflict
+- The MCP tool appears to require an existing branch with at least one commit before it can push files
+
+**Workarounds**:
+- Users can manually create an initial commit via GitHub web UI or git CLI, then use the platform for subsequent Terraform file commits
+- Alternatively, use Azure DevOps provider (untested but may have different behavior)
+- Future enhancement: Investigate direct GitHub REST API usage as fallback for initial commits
+
+**End-to-End Functionality**:
+The platform successfully completes steps 1-4 (Provider Selection → Repository Management → Terraform Generation → Code Review). Only the final commit step is affected by this MCP server limitation.

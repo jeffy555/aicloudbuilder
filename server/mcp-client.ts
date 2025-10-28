@@ -126,12 +126,13 @@ export class MCPClientManager {
   async createRepository(provider: MCPProvider, name: string, description?: string): Promise<any> {
     try {
       if (provider === 'github') {
+        // Create repository WITHOUT auto_init - our Terraform files will be the first commit
         const result = await this.callTool(provider, 'create_repository', {
           owner: process.env.GITHUB_OWNER || '',
           name,
           description: description || '',
           private: false,
-          auto_init: true, // Initialize with README to create main branch
+          auto_init: false, // Don't initialize - we'll make the first commit ourselves
         });
         // Parse MCP content parts
         let repoData = { name };
@@ -142,10 +143,7 @@ export class MCPClientManager {
           }
         }
         
-        // Wait for GitHub to finish initializing the repository
-        console.log(`Waiting for repository ${name} to be fully initialized...`);
-        await this.waitForRepositoryInitialization(provider, name);
-        
+        console.log(`Repository ${name} created (empty, ready for first commit)`);
         return repoData;
       } else {
         // Azure DevOps
@@ -168,114 +166,62 @@ export class MCPClientManager {
     }
   }
 
-  async waitForRepositoryInitialization(provider: MCPProvider, repoName: string): Promise<void> {
-    const maxAttempts = 10;
-    const delay = 2000; // 2 seconds between checks
-    
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        if (provider === 'github') {
-          // Try to get repository info to check if it's initialized
-          const result = await this.callTool(provider, 'get_file_contents', {
-            owner: process.env.GITHUB_OWNER || '',
-            repo: repoName,
-            path: 'README.md',
-            branch: 'main'
-          });
-          
-          // If we can read README.md, the repo is initialized
-          if (result.content && Array.isArray(result.content)) {
-            console.log(`Repository ${repoName} is ready!`);
-            return;
-          }
-        }
-      } catch (error: any) {
-        // Expected to fail until repo is ready
-        console.log(`Repository initialization check ${attempt + 1}/${maxAttempts}...`);
-      }
-      
-      if (attempt < maxAttempts - 1) {
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
-    
-    console.log(`Repository may not be fully initialized, proceeding anyway after ${maxAttempts} checks`);
-  }
-
   async commitFiles(
     provider: MCPProvider,
     repoName: string,
     files: { path: string; content: string }[],
     message: string
   ): Promise<any> {
-    const maxRetries = 5;
-    const baseDelay = 3000; // 3 seconds
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        if (provider === 'github') {
-          const result = await this.callTool(provider, 'push_files', {
-            owner: process.env.GITHUB_OWNER || '',
-            repo: repoName,
-            files: files.map(f => ({
-              path: f.path,
-              content: f.content
-            })),
-            message,
-            branch: 'main',
-          });
-          // Parse MCP content parts
-          if (result.content && Array.isArray(result.content)) {
-            const textContent = result.content.find((item: any) => item.type === 'text');
-            if (textContent && textContent.text) {
-              return JSON.parse(textContent.text);
-            }
+    try {
+      if (provider === 'github') {
+        // Push files to repository (works for both empty and existing repos)
+        console.log(`Committing ${files.length} files to ${repoName}...`);
+        const result = await this.callTool(provider, 'push_files', {
+          owner: process.env.GITHUB_OWNER || '',
+          repo: repoName,
+          files: files.map(f => ({
+            path: f.path,
+            content: f.content
+          })),
+          message,
+          branch: 'main',
+        });
+        // Parse MCP content parts
+        if (result.content && Array.isArray(result.content)) {
+          const textContent = result.content.find((item: any) => item.type === 'text');
+          if (textContent && textContent.text) {
+            const parsed = JSON.parse(textContent.text);
+            console.log(`Successfully committed to ${repoName}`);
+            return parsed;
           }
-          return { success: true };
-        } else {
-          // Azure DevOps - commit files to repository
-          const result = await this.callTool(provider, 'git_create_push', {
-            project: process.env.AZURE_DEVOPS_PROJECT || '',
-            repositoryId: repoName,
-            changes: files.map(f => ({
-              changeType: 'add',
-              item: { path: `/${f.path}` },
-              newContent: { content: f.content, contentType: 'rawtext' }
-            })),
-            comment: message,
-            refName: 'refs/heads/main',
-          });
-          // Parse MCP content parts
-          if (result.content && Array.isArray(result.content)) {
-            const textContent = result.content.find((item: any) => item.type === 'text');
-            if (textContent && textContent.text) {
-              return JSON.parse(textContent.text);
-            }
+        }
+        return { success: true };
+      } else {
+        // Azure DevOps - commit files to repository
+        const result = await this.callTool(provider, 'git_create_push', {
+          project: process.env.AZURE_DEVOPS_PROJECT || '',
+          repositoryId: repoName,
+          changes: files.map(f => ({
+            changeType: 'add',
+            item: { path: `/${f.path}` },
+            newContent: { content: f.content, contentType: 'rawtext' }
+          })),
+          comment: message,
+          refName: 'refs/heads/main',
+        });
+        // Parse MCP content parts
+        if (result.content && Array.isArray(result.content)) {
+          const textContent = result.content.find((item: any) => item.type === 'text');
+          if (textContent && textContent.text) {
+            return JSON.parse(textContent.text);
           }
-          return { success: true };
         }
-      } catch (error: any) {
-        // Check if it's an "empty repository" error
-        const errorMessage = error?.message || String(error);
-        const isEmptyRepoError = errorMessage.includes('Git Repository is empty') || 
-                                  errorMessage.includes('empty') || 
-                                  errorMessage.includes('409') ||
-                                  errorMessage.includes('Conflict');
-        
-        // If it's not an empty repo error or we've exhausted retries, throw
-        if (!isEmptyRepoError || attempt === maxRetries) {
-          console.error(`Error committing files for ${provider} (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
-          throw error;
-        }
-        
-        // Wait before retrying (exponential backoff starting longer)
-        const delay = baseDelay * Math.pow(1.5, attempt);
-        console.log(`Repository not ready yet, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1})...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        return { success: true };
       }
+    } catch (error: any) {
+      console.error(`Error committing files for ${provider}:`, error);
+      throw error;
     }
-    
-    throw new Error('Failed to commit files after maximum retries');
   }
 
   async cleanup() {
