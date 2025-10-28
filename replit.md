@@ -2,7 +2,15 @@
 
 ## Overview
 
-This is an AI-powered DevOps automation platform that enables users to generate and commit Terraform configurations through natural language conversations. The application guides users through a multi-step workflow: selecting a repository provider (GitHub or Azure DevOps), choosing or creating a repository, generating Terraform files via AI, and committing the generated configurations to their selected repository.
+This is an AI-powered DevOps automation platform that enables users to generate and commit Terraform configurations through natural language conversations. The application features a landing page that showcases current and future DevOps automation capabilities (Terraform, Kubernetes, Automation Scripting).
+
+The platform guides users through a five-step workflow:
+1. **Landing Page** - Select automation type (currently Terraform, with Kubernetes and Automation Scripting coming soon)
+2. **Provider Selection** - Choose repository provider (GitHub or Azure DevOps)
+3. **Repository Selection** - Choose or create a repository
+4. **Cloud Provider Selection** - Select target cloud (Azure, AWS, or GCP)
+5. **Terraform Generation** - Describe infrastructure in natural language
+6. **Review & Commit** - Review, edit, and commit generated Terraform files
 
 The platform uses a conversational interface powered by OpenAI's GPT-4o-mini model, integrated with the Model Context Protocol (MCP) for repository management operations.
 
@@ -94,10 +102,12 @@ Preferred communication style: Simple, everyday language.
 
 **Schema Design**:
 - User authentication support (username/password)
-- Session tracking with provider and repository metadata
-- Step progression tracking (currentStep: 1-4)
+- Session tracking with provider, repository, and cloud provider metadata
+- Step progression tracking (currentStep: 1-5)
+- Cloud provider selection (azure/aws/gcp)
 - Conversation history via messages table
 - Generated file versioning with update timestamps
+- Supports 4 generated files: main.tf, variables.tf, terraform.tfvars, README.md
 
 ### External Dependencies
 
@@ -145,26 +155,28 @@ Preferred communication style: Simple, everyday language.
 ## Implementation Status
 
 ### Working Features ✅
-1. **Session Management**: Create and manage conversation sessions
-2. **Provider Selection**: Choose between GitHub and Azure DevOps
-3. **Repository Listing**: List existing repositories via MCP
-4. **Repository Creation**: Create new repositories via MCP
-5. **AI Conversation**: Natural language interaction with OpenAI
-6. **Terraform Generation**: AI-powered generation of main.tf, variables.tf, and terraform.tfvars
-7. **Code Review**: Monaco editor for reviewing and editing generated files
-8. **File Management**: Store and retrieve generated Terraform files
+1. **Landing Page**: Modern landing interface with cards for Terraform, Kubernetes (coming soon), and Automation Scripting (coming soon)
+2. **Session Management**: Create and manage conversation sessions
+3. **Provider Selection**: Choose between GitHub and Azure DevOps
+4. **Repository Listing**: List existing repositories via MCP
+5. **Repository Creation**: Create new GitHub repositories (Azure DevOps requires manual creation)
+6. **Cloud Provider Selection**: Choose target cloud platform (Azure, AWS, or GCP)
+7. **AI Conversation**: Natural language interaction with OpenAI GPT-4o-mini
+8. **Terraform Generation**: AI-powered generation of main.tf, variables.tf, terraform.tfvars, and README.md
+9. **Code Review**: Monaco editor for reviewing and editing generated files
+10. **File Management**: Store and retrieve generated Terraform files
+11. **Auto-README**: Automatically generates README.md with usage instructions to initialize empty repositories
 
 ### Known Limitations ⚠️
 
-**GitHub MCP push_files Limitation**:
-The GitHub MCP server's `push_files` tool has a limitation preventing initial commits to newly created repositories. Testing revealed:
-- Repositories created with `auto_init: true` result in "Git Repository is empty" errors despite waiting for initialization (tested up to 60+ seconds with retry logic)
-- Repositories created with `auto_init: false` (empty) also fail with the same "Git Repository is empty" conflict
-- The MCP tool appears to require an existing branch with at least one commit before it can push files
+**GitHub MCP push_files Limitation (RESOLVED)**:
+The GitHub MCP server's `push_files` tool previously had a limitation preventing initial commits to newly created repositories.
 
-**GitHub Workarounds**:
-- Users can manually create an initial commit via GitHub web UI or git CLI, then use the platform for subsequent Terraform file commits
-- Future enhancement: Investigate direct GitHub REST API usage as fallback for initial commits
+**Solution Implemented**:
+- Platform now automatically generates a README.md file alongside Terraform files
+- When committing to a new repository, 4 files are committed: main.tf, variables.tf, terraform.tfvars, and README.md
+- The README includes usage instructions and cloud provider information
+- This ensures the first commit initializes the repository properly, avoiding the "empty repository" error
 
 **Azure DevOps MCP Limitations**:
 The Azure DevOps MCP server (`@azure-devops/mcp`) has significant functional limitations compared to GitHub:
@@ -190,5 +202,5 @@ The Azure DevOps MCP server (`@azure-devops/mcp`) has significant functional lim
 **Recommendation**: Use GitHub provider for full end-to-end functionality. Azure DevOps integration is limited to repository listing and Terraform generation only.
 
 **End-to-End Functionality**:
-- **GitHub**: Completes steps 1-4 (Provider → Repository → Generate → Review). Commit step requires manual initialization.
-- **Azure DevOps**: Completes steps 1-3 (Provider → Repository → Generate). Repository creation and commit steps not supported via MCP.
+- **GitHub**: ✅ Full end-to-end workflow (Landing → Provider → Repository → Cloud → Generate → Review → Commit)
+- **Azure DevOps**: ⚠️ Partial workflow (Landing → Provider → Repository → Cloud → Generate → Review). Repository creation and commit steps not supported via MCP - users must manually create repositories and commit generated files.
