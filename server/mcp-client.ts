@@ -134,13 +134,19 @@ export class MCPClientManager {
           auto_init: true, // Initialize with README to create main branch
         });
         // Parse MCP content parts
+        let repoData = { name };
         if (result.content && Array.isArray(result.content)) {
           const textContent = result.content.find((item: any) => item.type === 'text');
           if (textContent && textContent.text) {
-            return JSON.parse(textContent.text);
+            repoData = JSON.parse(textContent.text);
           }
         }
-        return { name };
+        
+        // Wait for GitHub to finish initializing the repository
+        console.log(`Waiting for repository ${name} to be fully initialized...`);
+        await this.waitForRepositoryInitialization(provider, name);
+        
+        return repoData;
       } else {
         // Azure DevOps
         const result = await this.callTool(provider, 'git_create_repository', {
@@ -160,6 +166,40 @@ export class MCPClientManager {
       console.error(`Error creating repository for ${provider}:`, error);
       throw error;
     }
+  }
+
+  async waitForRepositoryInitialization(provider: MCPProvider, repoName: string): Promise<void> {
+    const maxAttempts = 10;
+    const delay = 2000; // 2 seconds between checks
+    
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (provider === 'github') {
+          // Try to get repository info to check if it's initialized
+          const result = await this.callTool(provider, 'get_file_contents', {
+            owner: process.env.GITHUB_OWNER || '',
+            repo: repoName,
+            path: 'README.md',
+            branch: 'main'
+          });
+          
+          // If we can read README.md, the repo is initialized
+          if (result.content && Array.isArray(result.content)) {
+            console.log(`Repository ${repoName} is ready!`);
+            return;
+          }
+        }
+      } catch (error: any) {
+        // Expected to fail until repo is ready
+        console.log(`Repository initialization check ${attempt + 1}/${maxAttempts}...`);
+      }
+      
+      if (attempt < maxAttempts - 1) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
+    console.log(`Repository may not be fully initialized, proceeding anyway after ${maxAttempts} checks`);
   }
 
   async commitFiles(

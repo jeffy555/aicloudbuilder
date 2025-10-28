@@ -214,9 +214,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
 
       res.json({ success: true, commitMessage, result });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error committing files:', error);
-      res.status(500).json({ error: 'Failed to commit files' });
+      const errorMessage = error?.message || 'Failed to commit files';
+      res.status(500).json({ error: errorMessage });
     }
   });
 
