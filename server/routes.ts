@@ -54,7 +54,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Send a chat message
+  // Create system message (without AI response)
+  app.post("/api/sessions/:id/messages/system", async (req, res) => {
+    try {
+      const { message } = req.body;
+      const sessionId = req.params.id;
+
+      const aiMessage = await storage.createMessage({
+        sessionId,
+        type: 'ai',
+        content: message,
+      });
+
+      res.json({ aiMessage });
+    } catch (error) {
+      console.error('Error creating system message:', error);
+      res.status(500).json({ error: 'Failed to create system message' });
+    }
+  });
+
+  // Send a chat message (with AI response based on session state)
   app.post("/api/sessions/:id/chat", async (req, res) => {
     try {
       const { message } = req.body;
@@ -67,6 +86,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         content: message,
       });
 
+      // Get session to understand context
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
       // Get conversation history
       const messages = await storage.getMessagesBySession(sessionId);
       const chatHistory: ChatMessage[] = messages.map(m => ({
@@ -74,8 +99,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
         content: m.content
       }));
 
-      // Get AI response
-      const aiResponse = await openaiService.chat(chatHistory);
+      // Build context-aware system prompt
+      let contextPrompt = `You are an AI DevOps assistant. The user is at step ${session.currentStep} of the Terraform workflow.`;
+      
+      if (session.currentStep === '1') {
+        contextPrompt += `\n\nStep 1: Provider Selection - Help user choose between GitHub or Azure DevOps. Keep it brief.`;
+      } else if (session.currentStep === '2') {
+        contextPrompt += `\n\nStep 2: Repository Selection - Help user select an existing repository or create a new one. Keep it brief.`;
+      } else if (session.currentStep === '3') {
+        contextPrompt += `\n\nStep 3: Cloud Provider Selection - Help user choose Azure, AWS, or GCP. Keep it brief.`;
+      } else if (session.currentStep === '4') {
+        contextPrompt += `\n\nStep 4: Generate Terraform - User describes infrastructure they want to create. Acknowledge and encourage them to be specific about resources, configurations, and requirements.`;
+      } else if (session.currentStep === '5') {
+        contextPrompt += `\n\nStep 5: Review & Commit - User is reviewing generated Terraform files. Answer questions about the code or configurations.`;
+      }
+
+      // Get AI response with context
+      const aiResponse = await openaiService.chatWithContext(contextPrompt, chatHistory);
 
       // Save AI message
       const aiMessage = await storage.createMessage({

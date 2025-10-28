@@ -44,11 +44,10 @@ export default function TerraformWorkflow() {
       const session = await response.json() as Session;
       setSessionId(session.id);
       
-      // Send initial AI message
-      const chatResponse = await apiRequest('POST', `/api/sessions/${session.id}/chat`, { 
-        message: 'Hello' 
+      // Create initial welcome message without AI chat
+      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
+        message: 'Welcome! Let\'s start by selecting your repository provider. Choose GitHub or Azure DevOps.' 
       });
-      await chatResponse.json();
     };
     createSession();
   }, []);
@@ -160,8 +159,18 @@ export default function TerraformWorkflow() {
     });
 
     const providerName = selectedProvider === 'github' ? 'GitHub' : 'Azure DevOps';
-    chatMutation.mutate(`I'd like to use ${providerName}`);
     
+    // User confirmation
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: `Selected ${providerName}` 
+    });
+    
+    // System guidance for next step
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: 'Great! Now select an existing repository or create a new one.' 
+    });
+    
+    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     setCurrentStep(2);
   };
 
@@ -175,7 +184,17 @@ export default function TerraformWorkflow() {
       currentStep: '3'
     });
 
-    chatMutation.mutate(`Use repository: ${repo?.name}`);
+    // User confirmation
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: `Selected repository: ${repo?.name}` 
+    });
+    
+    // System guidance for next step
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: 'Perfect! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+    });
+    
+    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     setCurrentStep(3);
   };
 
@@ -187,7 +206,17 @@ export default function TerraformWorkflow() {
       currentStep: '3'
     });
 
-    chatMutation.mutate(`Create repo '${name}'`);
+    // User confirmation  
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: `Created new repository: ${name}` 
+    });
+    
+    // System guidance for next step
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: 'Excellent! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+    });
+    
+    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     setCurrentStep(3);
   };
 
@@ -202,8 +231,18 @@ export default function TerraformWorkflow() {
     const cloudName = selectedCloudProvider === 'azure' ? 'Microsoft Azure' : 
                       selectedCloudProvider === 'aws' ? 'Amazon Web Services (AWS)' : 
                       'Google Cloud Platform (GCP)';
-    chatMutation.mutate(`I want to use ${cloudName}`);
     
+    // User confirmation
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: `Selected ${cloudName}` 
+    });
+    
+    // System guidance for next step
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: `Now describe the infrastructure you want to create for ${cloudName}. Be specific about resources, configurations, and requirements.` 
+    });
+    
+    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     setCurrentStep(4);
   };
 

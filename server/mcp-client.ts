@@ -196,9 +196,20 @@ export class MCPClientManager {
           }
           return { success: true };
         } catch (mcpError: any) {
-          // If MCP fails with "Repository is empty" error, use GitHub REST API
-          if (mcpError.message && mcpError.message.includes('Repository is empty')) {
-            console.log(`MCP failed (empty repo), falling back to GitHub REST API for initial commit...`);
+          // Check if MCP fails with "Repository is empty" error
+          // The error could be in message, data.stderr, or data fields
+          const errorMessage = mcpError.message || '';
+          const errorStderr = mcpError.data?.stderr || '';
+          const errorData = typeof mcpError.data === 'string' ? mcpError.data : '';
+          
+          const isEmptyRepoError = 
+            errorMessage.toLowerCase().includes('repository is empty') ||
+            errorStderr.toLowerCase().includes('repository is empty') ||
+            errorData.toLowerCase().includes('repository is empty');
+          
+          if (isEmptyRepoError) {
+            console.log(`MCP failed (empty repo detected), falling back to GitHub REST API for initial commit...`);
+            console.log(`Error details - Message: ${errorMessage}, Stderr: ${errorStderr}`);
             return await this.commitFilesViaGitHubAPI(repoName, files, message);
           }
           // Re-throw if it's a different error

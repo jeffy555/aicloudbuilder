@@ -40,6 +40,20 @@ Keep responses conversational and helpful. Always confirm actions before they're
     return completion.choices[0]?.message?.content || '';
   }
 
+  async chatWithContext(contextPrompt: string, messages: ChatMessage[]): Promise<string> {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: contextPrompt },
+        ...messages
+      ],
+      temperature: 0.7,
+      max_tokens: 500,
+    });
+
+    return completion.choices[0]?.message?.content || '';
+  }
+
   async generateTerraform(description: string): Promise<{
     mainTf: string;
     variablesTf: string;
