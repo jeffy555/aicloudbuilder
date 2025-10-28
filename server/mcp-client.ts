@@ -131,6 +131,7 @@ export class MCPClientManager {
           name,
           description: description || '',
           private: false,
+          auto_init: true, // Initialize with README to create main branch
         });
         // Parse MCP content parts
         if (result.content && Array.isArray(result.content)) {
