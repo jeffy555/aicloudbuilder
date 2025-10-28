@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { queryClient, apiRequest } from "@/lib/queryClient";
 import Header from "@/components/Header";
 import AIMessage from "@/components/AIMessage";
 import UserMessage from "@/components/UserMessage";
@@ -13,66 +15,17 @@ import { CodeIcon } from "@radix-ui/react-icons";
 import { Cloud } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
+import type { Session, Message, GeneratedFile, Repository } from "@shared/schema";
 
 type Step = 1 | 2 | 3 | 4;
 type Provider = 'github' | 'azure' | null;
 
-interface Message {
-  id: string;
-  type: 'ai' | 'user';
-  content: string;
-}
-
 export default function Home() {
   const { toast } = useToast();
+  const [sessionId, setSessionId] = useState<string>('');
   const [currentStep, setCurrentStep] = useState<Step>(1);
   const [provider, setProvider] = useState<Provider>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>('');
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      type: 'ai',
-      content: "Hey! Before we dive into your Terraform setup, which repository provider would you like to use — GitHub or Azure DevOps? I'll route everything accordingly."
-    }
-  ]);
-  
-  // Mock data - will be replaced with real data
-  const mockRepos = [
-    { id: '1', name: 'infrastructure-prod', branch: 'main', lastUpdated: '2 hours ago' },
-    { id: '2', name: 'terraform-modules', branch: 'develop', lastUpdated: '1 day ago' },
-    { id: '3', name: 'devops-automation', branch: 'main', lastUpdated: '3 days ago' },
-  ];
-
-  const [files, setFiles] = useState([
-    {
-      name: 'main.tf',
-      content: `resource "azurerm_resource_group" "example" {
-  name     = "example-resources"
-  location = "East US"
-}
-
-resource "azurerm_storage_account" "example" {
-  name                     = "examplestorageacct"
-  resource_group_name      = azurerm_resource_group.example.name
-  location                 = azurerm_resource_group.example.location
-  account_tier             = "Standard"
-  account_replication_type = "LRS"
-}`
-    },
-    {
-      name: 'variables.tf',
-      content: `variable "resource_group_name" {
-  description = "Name of the resource group"
-  type        = string
-  default     = "example-resources"
-}`
-    },
-    {
-      name: 'terraform.tfvars',
-      content: `resource_group_name = "example-resources"
-location           = "East US"`
-    }
-  ]);
 
   const steps = [
     { number: 1, title: 'Provider' },
@@ -81,100 +34,173 @@ location           = "East US"`
     { number: 4, title: 'Review' },
   ];
 
-  const handleProviderSelect = (selectedProvider: Provider) => {
+  // Create session on mount
+  useEffect(() => {
+    const createSession = async () => {
+      const response = await apiRequest('POST', '/api/sessions');
+      const session = await response.json() as Session;
+      setSessionId(session.id);
+      
+      // Send initial AI message
+      const chatResponse = await apiRequest('POST', `/api/sessions/${session.id}/chat`, { 
+        message: 'Hello' 
+      });
+      await chatResponse.json();
+    };
+    createSession();
+  }, []);
+
+  // Fetch messages
+  const { data: messages = [] } = useQuery<Message[]>({
+    queryKey: ['/api/sessions', sessionId, 'messages'],
+    enabled: !!sessionId,
+    refetchInterval: 2000, // Poll for new messages
+  });
+
+  // Fetch session
+  const { data: session } = useQuery<Session>({
+    queryKey: ['/api/sessions', sessionId],
+    enabled: !!sessionId,
+  });
+
+  // Fetch repositories
+  const { data: repositories = [] } = useQuery<Repository[]>({
+    queryKey: ['/api/repositories', provider],
+    enabled: !!provider && currentStep === 2,
+  });
+
+  // Fetch generated files
+  const { data: generatedFiles = [] } = useQuery<GeneratedFile[]>({
+    queryKey: ['/api/sessions', sessionId, 'files'],
+    enabled: !!sessionId && currentStep === 4,
+  });
+
+  // Send chat message mutation
+  const chatMutation = useMutation({
+    mutationFn: async (message: string) => {
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/chat`, { message });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+    }
+  });
+
+  // Create repository mutation
+  const createRepoMutation = useMutation({
+    mutationFn: async ({ name, description }: { name: string; description: string }) => {
+      const res = await apiRequest('POST', `/api/repositories/${provider}`, { name, description });
+      return res.json();
+    },
+    onSuccess: (data: any, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/repositories', provider] });
+      toast({
+        title: "Repository Created",
+        description: `Successfully created repository: ${variables.name}`,
+      });
+    }
+  });
+
+  // Generate Terraform mutation
+  const generateTerraformMutation = useMutation({
+    mutationFn: async (description: string) => {
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/generate-terraform`, { description });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+      setCurrentStep(4);
+    }
+  });
+
+  // Update file mutation
+  const updateFileMutation = useMutation({
+    mutationFn: async ({ id, content }: { id: string; content: string }) => {
+      const res = await apiRequest('PATCH', `/api/files/${id}`, { content });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+    }
+  });
+
+  // Commit files mutation
+  const commitMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/commit`);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      toast({
+        title: "Success!",
+        description: `Your Terraform configuration has been committed: ${data.commitMessage}`,
+      });
+      
+      chatMutation.mutate(`Files committed successfully with message: "${data.commitMessage}"`);
+    },
+    onError: (error) => {
+      toast({
+        title: "Error",
+        description: "Failed to commit files. Please try again.",
+        variant: "destructive"
+      });
+    }
+  });
+
+  const handleProviderSelect = async (selectedProvider: Provider) => {
     setProvider(selectedProvider);
-    const providerName = selectedProvider === 'github' ? 'GitHub' : 'Azure DevOps';
     
-    setMessages(prev => [
-      ...prev,
-      { id: Date.now().toString(), type: 'user', content: `I'd like to use ${providerName}` },
-      { 
-        id: (Date.now() + 1).toString(), 
-        type: 'ai', 
-        content: `Great choice! I'll connect to ${providerName} for you. Would you like to select an existing repository or create a new one?`
-      }
-    ]);
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+      provider: selectedProvider, 
+      currentStep: '2' 
+    });
+
+    const providerName = selectedProvider === 'github' ? 'GitHub' : 'Azure DevOps';
+    chatMutation.mutate(`I'd like to use ${providerName}`);
     
     setCurrentStep(2);
   };
 
-  const handleRepoSelect = (repoId: string) => {
+  const handleRepoSelect = async (repoId: string) => {
     setSelectedRepo(repoId);
-    const repo = mockRepos.find(r => r.id === repoId);
+    const repo = repositories.find(r => r.id === repoId);
     
-    setMessages(prev => [
-      ...prev,
-      { id: Date.now().toString(), type: 'user', content: `Use repository: ${repo?.name}` },
-      { 
-        id: (Date.now() + 1).toString(), 
-        type: 'ai', 
-        content: `Perfect! Now, let's build your Terraform setup. Just describe the resources you want — for example: 'Create Terraform for Azure Storage Account and Resource Group'. I'll generate the necessary files and let you review them before we commit.`
-      }
-    ]);
-    
-    setCurrentStep(3);
-  };
-
-  const handleCreateRepo = (name: string, description: string) => {
-    toast({
-      title: "Repository Created",
-      description: `Successfully created repository: ${name}`,
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+      repositoryId: repoId,
+      repositoryName: repo?.name,
+      currentStep: '3'
     });
-    
-    setMessages(prev => [
-      ...prev,
-      { id: Date.now().toString(), type: 'user', content: `Create repo '${name}'` },
-      { 
-        id: (Date.now() + 1).toString(), 
-        type: 'ai', 
-        content: `Got it — creating a new repo called ${name} for you now... ✅ Done! You're all set. Now, describe the Terraform resources you'd like to generate.`
-      }
-    ]);
-    
+
+    chatMutation.mutate(`Use repository: ${repo?.name}`);
     setCurrentStep(3);
   };
 
-  const handleGenerateRequest = (message: string) => {
-    setMessages(prev => [
-      ...prev,
-      { id: Date.now().toString(), type: 'user', content: message },
-      { 
-        id: (Date.now() + 1).toString(), 
-        type: 'ai', 
-        content: `I've generated your Terraform files based on your description. Here are the files — feel free to tweak anything before we push them to your repo.`
-      }
-    ]);
+  const handleCreateRepo = async (name: string, description: string) => {
+    await createRepoMutation.mutateAsync({ name, description });
     
-    setCurrentStep(4);
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+      repositoryName: name,
+      currentStep: '3'
+    });
+
+    chatMutation.mutate(`Create repo '${name}'`);
+    setCurrentStep(3);
+  };
+
+  const handleGenerateRequest = async (message: string) => {
+    await chatMutation.mutateAsync(message);
+    await generateTerraformMutation.mutateAsync(message);
   };
 
   const handleFileChange = (fileName: string, content: string) => {
-    setFiles(files.map(f => f.name === fileName ? { ...f, content } : f));
+    const file = generatedFiles.find(f => f.fileName === fileName);
+    if (file) {
+      updateFileMutation.mutate({ id: file.id, content });
+    }
   };
 
   const handleApprove = () => {
-    const repo = mockRepos.find(r => r.id === selectedRepo);
-    
-    toast({
-      title: "Committing Changes",
-      description: "Pushing your Terraform configuration to the repository...",
-    });
-
-    setTimeout(() => {
-      setMessages(prev => [
-        ...prev,
-        { 
-          id: Date.now().toString(), 
-          type: 'ai', 
-          content: `Awesome — committing your Terraform setup to ${repo?.name || 'your repository'} with the message: 'Added Terraform for Azure Storage Account and Resource Group'\n\n✅ Done! Your code is now live.`
-        }
-      ]);
-
-      toast({
-        title: "Success!",
-        description: "Your Terraform configuration has been committed successfully.",
-      });
-    }, 2000);
+    commitMutation.mutate();
   };
 
   const handleCancel = () => {
@@ -184,6 +210,14 @@ location           = "East US"`
       description: "You can continue editing your Terraform files.",
     });
   };
+
+  if (!sessionId) {
+    return (
+      <div className="h-screen flex items-center justify-center">
+        <p className="text-muted-foreground">Loading...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex flex-col bg-background">
@@ -231,21 +265,28 @@ location           = "East US"`
             {currentStep === 2 && (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <RepositoryList
-                  repositories={mockRepos}
+                  repositories={repositories}
                   selectedId={selectedRepo}
                   onSelect={handleRepoSelect}
                 />
-                <CreateRepoForm onSubmit={handleCreateRepo} />
+                <CreateRepoForm 
+                  onSubmit={handleCreateRepo}
+                  loading={createRepoMutation.isPending}
+                />
               </div>
             )}
 
             {/* Step 4: Review & Edit */}
-            {currentStep === 4 && (
+            {currentStep === 4 && generatedFiles.length > 0 && (
               <div className="space-y-6">
-                <CodeEditor files={files} onFileChange={handleFileChange} />
+                <CodeEditor 
+                  files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
+                  onFileChange={handleFileChange} 
+                />
                 <ActionButtons
                   onApprove={handleApprove}
                   onCancel={handleCancel}
+                  loading={commitMutation.isPending}
                 />
               </div>
             )}
@@ -257,6 +298,7 @@ location           = "East US"`
           <ChatInput
             onSend={handleGenerateRequest}
             placeholder="Describe your Terraform setup... e.g., 'Create Terraform for Azure Storage Account and Resource Group'"
+            disabled={chatMutation.isPending || generateTerraformMutation.isPending}
           />
         )}
       </main>
