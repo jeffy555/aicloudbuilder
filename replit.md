@@ -162,10 +162,33 @@ The GitHub MCP server's `push_files` tool has a limitation preventing initial co
 - Repositories created with `auto_init: false` (empty) also fail with the same "Git Repository is empty" conflict
 - The MCP tool appears to require an existing branch with at least one commit before it can push files
 
-**Workarounds**:
+**GitHub Workarounds**:
 - Users can manually create an initial commit via GitHub web UI or git CLI, then use the platform for subsequent Terraform file commits
-- Alternatively, use Azure DevOps provider (untested but may have different behavior)
 - Future enhancement: Investigate direct GitHub REST API usage as fallback for initial commits
 
+**Azure DevOps MCP Limitations**:
+The Azure DevOps MCP server (`@azure-devops/mcp`) has significant functional limitations compared to GitHub:
+
+**Available Tools**:
+- `repo_list_repos_by_project` - List repositories in a project ✅
+- `repo_create_pull_request` - Create pull requests
+- `repo_create_branch` - Create branches
+- `repo_get_repo_by_name_or_id` - Get repository details
+- Pull request management and review operations
+
+**NOT Supported**:
+- ❌ Creating repositories (no `create_repository` tool)
+- ❌ Committing files directly (no `push_files` or equivalent)
+- ❌ Direct file operations
+
+**Azure DevOps Workflow**:
+1. Users must manually create repositories in Azure DevOps first
+2. The platform can list existing repositories
+3. Users can select a repository and generate Terraform files
+4. **Commit step is NOT supported** - users must manually commit generated files via Azure DevOps web UI or git CLI
+
+**Recommendation**: Use GitHub provider for full end-to-end functionality. Azure DevOps integration is limited to repository listing and Terraform generation only.
+
 **End-to-End Functionality**:
-The platform successfully completes steps 1-4 (Provider Selection → Repository Management → Terraform Generation → Code Review). Only the final commit step is affected by this MCP server limitation.
+- **GitHub**: Completes steps 1-4 (Provider → Repository → Generate → Review). Commit step requires manual initialization.
+- **Azure DevOps**: Completes steps 1-3 (Provider → Repository → Generate). Repository creation and commit steps not supported via MCP.

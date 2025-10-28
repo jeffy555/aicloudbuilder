@@ -238,6 +238,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Debug endpoint to list available MCP tools
+  app.get("/api/debug/tools/:provider", async (req, res) => {
+    try {
+      const provider = req.params.provider as MCPProvider;
+      const tools = await mcpClient.listTools(provider);
+      res.json(tools);
+    } catch (error) {
+      console.error('Error listing tools:', error);
+      res.status(500).json({ error: 'Failed to list tools' });
+    }
+  });
+
   const httpServer = createServer(app);
 
   return httpServer;

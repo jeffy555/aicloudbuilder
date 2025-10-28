@@ -74,6 +74,12 @@ export class MCPClientManager {
     return client;
   }
 
+  async listTools(provider: MCPProvider): Promise<any> {
+    const client = await this.getClient(provider);
+    const result = await client.listTools();
+    return result;
+  }
+
   async callTool(provider: MCPProvider, toolName: string, args: Record<string, any>): Promise<any> {
     const client = await this.getClient(provider);
     
@@ -105,7 +111,7 @@ export class MCPClientManager {
         return [];
       } else {
         // Azure DevOps
-        const result = await this.callTool(provider, 'git_list_repositories', {
+        const result = await this.callTool(provider, 'repo_list_repos_by_project', {
           project: process.env.AZURE_DEVOPS_PROJECT || ''
         });
         // Parse MCP content parts
@@ -146,19 +152,8 @@ export class MCPClientManager {
         console.log(`Repository ${name} created (empty, ready for first commit)`);
         return repoData;
       } else {
-        // Azure DevOps
-        const result = await this.callTool(provider, 'git_create_repository', {
-          project: process.env.AZURE_DEVOPS_PROJECT || '',
-          name,
-        });
-        // Parse MCP content parts
-        if (result.content && Array.isArray(result.content)) {
-          const textContent = result.content.find((item: any) => item.type === 'text');
-          if (textContent && textContent.text) {
-            return JSON.parse(textContent.text);
-          }
-        }
-        return { name };
+        // Azure DevOps - MCP server doesn't support creating repositories
+        throw new Error('Azure DevOps MCP server does not support creating repositories. Please create the repository manually in Azure DevOps, then select it from the list.');
       }
     } catch (error) {
       console.error(`Error creating repository for ${provider}:`, error);
@@ -197,26 +192,8 @@ export class MCPClientManager {
         }
         return { success: true };
       } else {
-        // Azure DevOps - commit files to repository
-        const result = await this.callTool(provider, 'git_create_push', {
-          project: process.env.AZURE_DEVOPS_PROJECT || '',
-          repositoryId: repoName,
-          changes: files.map(f => ({
-            changeType: 'add',
-            item: { path: `/${f.path}` },
-            newContent: { content: f.content, contentType: 'rawtext' }
-          })),
-          comment: message,
-          refName: 'refs/heads/main',
-        });
-        // Parse MCP content parts
-        if (result.content && Array.isArray(result.content)) {
-          const textContent = result.content.find((item: any) => item.type === 'text');
-          if (textContent && textContent.text) {
-            return JSON.parse(textContent.text);
-          }
-        }
-        return { success: true };
+        // Azure DevOps - MCP server doesn't support direct file commits
+        throw new Error('Azure DevOps MCP server does not support committing files directly. The server only supports pull request and branch operations.');
       }
     } catch (error: any) {
       console.error(`Error committing files for ${provider}:`, error);

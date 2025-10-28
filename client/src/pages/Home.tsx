@@ -272,10 +272,21 @@ export default function Home() {
                   selectedId={selectedRepo}
                   onSelect={handleRepoSelect}
                 />
-                <CreateRepoForm 
-                  onSubmit={handleCreateRepo}
-                  loading={createRepoMutation.isPending}
-                />
+                {provider === 'github' && (
+                  <CreateRepoForm 
+                    onSubmit={handleCreateRepo}
+                    loading={createRepoMutation.isPending}
+                  />
+                )}
+                {provider === 'azure' && (
+                  <div className="rounded-lg border border-border bg-card p-6">
+                    <h3 className="text-lg font-semibold mb-2">Azure DevOps Limitation</h3>
+                    <p className="text-sm text-muted-foreground">
+                      The Azure DevOps MCP server does not support creating repositories. 
+                      Please create your repository manually in Azure DevOps, then select it from the list.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
