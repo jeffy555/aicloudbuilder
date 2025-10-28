@@ -12,26 +12,29 @@ import CodeEditor from "@/components/CodeEditor";
 import StepIndicator from "@/components/StepIndicator";
 import ActionButtons from "@/components/ActionButtons";
 import { CodeIcon } from "@radix-ui/react-icons";
-import { Cloud } from "lucide-react";
+import { Cloud, CloudCog, Package } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import type { Session, Message, GeneratedFile, Repository } from "@shared/schema";
 
-type Step = 1 | 2 | 3 | 4;
+type Step = 1 | 2 | 3 | 4 | 5;
 type Provider = 'github' | 'azure' | null;
+type CloudProvider = 'azure' | 'aws' | 'gcp' | null;
 
-export default function Home() {
+export default function TerraformWorkflow() {
   const { toast } = useToast();
   const [sessionId, setSessionId] = useState<string>('');
   const [currentStep, setCurrentStep] = useState<Step>(1);
   const [provider, setProvider] = useState<Provider>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>('');
+  const [cloudProvider, setCloudProvider] = useState<CloudProvider>(null);
 
   const steps = [
     { number: 1, title: 'Provider' },
     { number: 2, title: 'Repository' },
-    { number: 3, title: 'Generate' },
-    { number: 4, title: 'Review' },
+    { number: 3, title: 'Cloud' },
+    { number: 4, title: 'Generate' },
+    { number: 5, title: 'Review' },
   ];
 
   // Create session on mount
@@ -72,7 +75,7 @@ export default function Home() {
   // Fetch generated files
   const { data: generatedFiles = [] } = useQuery<GeneratedFile[]>({
     queryKey: ['/api/sessions', sessionId, 'files'],
-    enabled: !!sessionId && currentStep === 4,
+    enabled: !!sessionId && currentStep === 5,
   });
 
   // Send chat message mutation
@@ -109,7 +112,7 @@ export default function Home() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      setCurrentStep(4);
+      setCurrentStep(5);
     }
   });
 
@@ -188,6 +191,22 @@ export default function Home() {
     setCurrentStep(3);
   };
 
+  const handleCloudProviderSelect = async (selectedCloudProvider: CloudProvider) => {
+    setCloudProvider(selectedCloudProvider);
+    
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+      cloudProvider: selectedCloudProvider,
+      currentStep: '4' 
+    });
+
+    const cloudName = selectedCloudProvider === 'azure' ? 'Microsoft Azure' : 
+                      selectedCloudProvider === 'aws' ? 'Amazon Web Services (AWS)' : 
+                      'Google Cloud Platform (GCP)';
+    chatMutation.mutate(`I want to use ${cloudName}`);
+    
+    setCurrentStep(4);
+  };
+
   const handleGenerateRequest = async (message: string) => {
     await chatMutation.mutateAsync(message);
     await generateTerraformMutation.mutateAsync(message);
@@ -205,7 +224,7 @@ export default function Home() {
   };
 
   const handleCancel = () => {
-    setCurrentStep(3);
+    setCurrentStep(4);
     toast({
       title: "Cancelled",
       description: "You can continue editing your Terraform files.",
@@ -290,8 +309,38 @@ export default function Home() {
               </div>
             )}
 
-            {/* Step 4: Review & Edit */}
-            {currentStep === 4 && generatedFiles.length > 0 && (
+            {/* Step 3: Cloud Provider Selection */}
+            {currentStep === 3 && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                <ProviderCard
+                  icon={<Cloud className="w-6 h-6" />}
+                  title="Microsoft Azure"
+                  description="Generate Terraform for Azure cloud resources"
+                  onClick={() => handleCloudProviderSelect('azure')}
+                  selected={cloudProvider === 'azure'}
+                  data-testid="card-cloud-azure"
+                />
+                <ProviderCard
+                  icon={<CloudCog className="w-6 h-6" />}
+                  title="Amazon Web Services"
+                  description="Generate Terraform for AWS cloud resources"
+                  onClick={() => handleCloudProviderSelect('aws')}
+                  selected={cloudProvider === 'aws'}
+                  data-testid="card-cloud-aws"
+                />
+                <ProviderCard
+                  icon={<Package className="w-6 h-6" />}
+                  title="Google Cloud"
+                  description="Generate Terraform for GCP cloud resources"
+                  onClick={() => handleCloudProviderSelect('gcp')}
+                  selected={cloudProvider === 'gcp'}
+                  data-testid="card-cloud-gcp"
+                />
+              </div>
+            )}
+
+            {/* Step 5: Review & Edit */}
+            {currentStep === 5 && generatedFiles.length > 0 && (
               <div className="space-y-6">
                 <CodeEditor 
                   files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
@@ -307,8 +356,8 @@ export default function Home() {
           </div>
         </ScrollArea>
 
-        {/* Chat Input - Only show in step 3 */}
-        {currentStep === 3 && (
+        {/* Chat Input - Only show in step 4 */}
+        {currentStep === 4 && (
           <ChatInput
             onSend={handleGenerateRequest}
             placeholder="Describe your Terraform setup... e.g., 'Create Terraform for Azure Storage Account and Resource Group'"

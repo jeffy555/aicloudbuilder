@@ -76,6 +76,7 @@ export class MemStorage implements IStorage {
       provider: insertSession.provider ?? null,
       repositoryId: insertSession.repositoryId ?? null,
       repositoryName: insertSession.repositoryName ?? null,
+      cloudProvider: insertSession.cloudProvider ?? null,
       currentStep: insertSession.currentStep ?? '1',
       createdAt: now,
       updatedAt: now,

@@ -14,6 +14,7 @@ export const sessions = pgTable("sessions", {
   provider: text("provider"), // 'github' | 'azure' | null
   repositoryId: text("repository_id"),
   repositoryName: text("repository_name"),
+  cloudProvider: text("cloud_provider"), // 'azure' | 'aws' | 'gcp' | null
   currentStep: text("current_step").notNull().default('1'), // '1' | '2' | '3' | '4'
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
