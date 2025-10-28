@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn, type ChildProcess } from "child_process";
+import { Octokit } from "@octokit/rest";
 
 export type MCPProvider = 'github' | 'azure';
 
@@ -169,28 +170,40 @@ export class MCPClientManager {
   ): Promise<any> {
     try {
       if (provider === 'github') {
-        // Push files to repository (works for both empty and existing repos)
         console.log(`Committing ${files.length} files to ${repoName}...`);
-        const result = await this.callTool(provider, 'push_files', {
-          owner: process.env.GITHUB_OWNER || '',
-          repo: repoName,
-          files: files.map(f => ({
-            path: f.path,
-            content: f.content
-          })),
-          message,
-          branch: 'main',
-        });
-        // Parse MCP content parts
-        if (result.content && Array.isArray(result.content)) {
-          const textContent = result.content.find((item: any) => item.type === 'text');
-          if (textContent && textContent.text) {
-            const parsed = JSON.parse(textContent.text);
-            console.log(`Successfully committed to ${repoName}`);
-            return parsed;
+        
+        // Try MCP push_files first
+        try {
+          const result = await this.callTool(provider, 'push_files', {
+            owner: process.env.GITHUB_OWNER || '',
+            repo: repoName,
+            files: files.map(f => ({
+              path: f.path,
+              content: f.content
+            })),
+            message,
+            branch: 'main',
+          });
+          
+          // Parse MCP content parts
+          if (result.content && Array.isArray(result.content)) {
+            const textContent = result.content.find((item: any) => item.type === 'text');
+            if (textContent && textContent.text) {
+              const parsed = JSON.parse(textContent.text);
+              console.log(`Successfully committed to ${repoName} via MCP`);
+              return parsed;
+            }
           }
+          return { success: true };
+        } catch (mcpError: any) {
+          // If MCP fails with "Repository is empty" error, use GitHub REST API
+          if (mcpError.message && mcpError.message.includes('Repository is empty')) {
+            console.log(`MCP failed (empty repo), falling back to GitHub REST API for initial commit...`);
+            return await this.commitFilesViaGitHubAPI(repoName, files, message);
+          }
+          // Re-throw if it's a different error
+          throw mcpError;
         }
-        return { success: true };
       } else {
         // Azure DevOps - MCP server doesn't support direct file commits
         throw new Error('Azure DevOps MCP server does not support committing files directly. The server only supports pull request and branch operations.');
@@ -198,6 +211,72 @@ export class MCPClientManager {
     } catch (error: any) {
       console.error(`Error committing files for ${provider}:`, error);
       throw error;
+    }
+  }
+
+  private async commitFilesViaGitHubAPI(
+    repoName: string,
+    files: { path: string; content: string }[],
+    message: string
+  ): Promise<any> {
+    const octokit = new Octokit({
+      auth: process.env.GITHUB_TOKEN,
+    });
+
+    const owner = process.env.GITHUB_OWNER || '';
+
+    try {
+      // Create blobs for all files
+      const blobs = await Promise.all(
+        files.map(async (file) => {
+          const blob = await octokit.git.createBlob({
+            owner,
+            repo: repoName,
+            content: Buffer.from(file.content).toString('base64'),
+            encoding: 'base64',
+          });
+          return {
+            path: file.path,
+            mode: '100644' as const,
+            type: 'blob' as const,
+            sha: blob.data.sha,
+          };
+        })
+      );
+
+      // Create tree
+      const tree = await octokit.git.createTree({
+        owner,
+        repo: repoName,
+        tree: blobs,
+      });
+
+      // Create commit
+      const commit = await octokit.git.createCommit({
+        owner,
+        repo: repoName,
+        message,
+        tree: tree.data.sha,
+        parents: [], // No parents for initial commit
+      });
+
+      // Update main branch reference
+      await octokit.git.createRef({
+        owner,
+        repo: repoName,
+        ref: 'refs/heads/main',
+        sha: commit.data.sha,
+      });
+
+      console.log(`Successfully created initial commit via GitHub REST API: ${commit.data.sha}`);
+      return {
+        success: true,
+        commit: commit.data,
+        method: 'github-rest-api',
+      };
+    } catch (error: any) {
+      console.error('Error committing via GitHub REST API:', error);
+      throw new Error(`Failed to commit via GitHub REST API: ${error.message}`);
     }
   }
 
