@@ -104,8 +104,12 @@ export class MCPClientManager {
           const textContent = result.content.find((item: any) => item.type === 'text');
           if (textContent && textContent.text) {
             const parsed = JSON.parse(textContent.text);
-            // Handle search results format
-            return parsed.items || parsed || [];
+            const repos = parsed.items || parsed || [];
+            // Convert repository IDs to strings for schema compatibility
+            return repos.map((repo: any) => ({
+              ...repo,
+              id: String(repo.id)
+            }));
           }
         }
         return [];
@@ -141,11 +145,15 @@ export class MCPClientManager {
           auto_init: false, // Don't initialize - we'll make the first commit ourselves
         });
         // Parse MCP content parts
-        let repoData = { name };
+        let repoData: any = { name };
         if (result.content && Array.isArray(result.content)) {
           const textContent = result.content.find((item: any) => item.type === 'text');
           if (textContent && textContent.text) {
             repoData = JSON.parse(textContent.text);
+            // Convert repository ID to string for schema compatibility
+            if (repoData.id) {
+              repoData.id = String(repoData.id);
+            }
           }
         }
         

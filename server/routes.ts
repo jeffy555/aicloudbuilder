@@ -177,8 +177,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const repo = await mcpClient.createRepository(provider, name, description);
       res.json(repo);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error creating repository:', error);
+      
+      // Check if repository already exists
+      if (error.message && error.message.includes('already exists')) {
+        return res.status(409).json({ 
+          error: `A repository named "${name}" already exists. Please choose a different name or select the existing repository.` 
+        });
+      }
+      
       res.status(500).json({ error: 'Failed to create repository' });
     }
   });
