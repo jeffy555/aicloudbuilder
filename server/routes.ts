@@ -95,6 +95,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/repositories/:provider", async (req, res) => {
     try {
       const provider = req.params.provider as MCPProvider;
+      
+      // Validate provider credentials
+      if (provider === 'azure' && (!process.env.AZURE_DEVOPS_ORG || !process.env.AZURE_DEVOPS_PAT || !process.env.AZURE_DEVOPS_PROJECT)) {
+        return res.status(400).json({ error: 'Azure DevOps credentials not configured. Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT environment variables.' });
+      }
+      if (provider === 'github' && (!process.env.GITHUB_TOKEN || !process.env.GITHUB_OWNER)) {
+        return res.status(400).json({ error: 'GitHub credentials not configured. Please set GITHUB_TOKEN and GITHUB_OWNER environment variables.' });
+      }
+      
       const repos = await mcpClient.listRepositories(provider);
       
       // Transform to common format
@@ -117,6 +126,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const provider = req.params.provider as MCPProvider;
       const { name, description } = req.body;
+      
+      // Validate provider credentials
+      if (provider === 'azure' && (!process.env.AZURE_DEVOPS_ORG || !process.env.AZURE_DEVOPS_PAT || !process.env.AZURE_DEVOPS_PROJECT)) {
+        return res.status(400).json({ error: 'Azure DevOps credentials not configured. Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT environment variables.' });
+      }
+      if (provider === 'github' && (!process.env.GITHUB_TOKEN || !process.env.GITHUB_OWNER)) {
+        return res.status(400).json({ error: 'GitHub credentials not configured. Please set GITHUB_TOKEN and GITHUB_OWNER environment variables.' });
+      }
 
       const repo = await mcpClient.createRepository(provider, name, description);
       res.json(repo);

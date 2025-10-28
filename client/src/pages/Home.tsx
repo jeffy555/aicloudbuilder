@@ -251,13 +251,7 @@ export default function Home() {
                   description="Use GitHub repositories for your Terraform configurations"
                   onClick={() => handleProviderSelect('github')}
                   selected={provider === 'github'}
-                />
-                <ProviderCard
-                  icon={<Cloud className="w-6 h-6" />}
-                  title="Azure DevOps"
-                  description="Use Azure DevOps repositories for your infrastructure code"
-                  onClick={() => handleProviderSelect('azure')}
-                  selected={provider === 'azure'}
+                  data-testid="card-provider-github"
                 />
               </div>
             )}
