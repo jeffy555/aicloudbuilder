@@ -88,14 +88,18 @@ export class MCPClientManager {
   async listRepositories(provider: MCPProvider): Promise<any[]> {
     try {
       if (provider === 'github') {
+        const owner = process.env.GITHUB_OWNER || '';
         const result = await this.callTool(provider, 'list_repositories', {
-          owner: process.env.GITHUB_OWNER || ''
+          query: `user:${owner}`,
+          minimal_output: true
         });
         // Parse MCP content parts
         if (result.content && Array.isArray(result.content)) {
           const textContent = result.content.find((item: any) => item.type === 'text');
           if (textContent && textContent.text) {
-            return JSON.parse(textContent.text);
+            const parsed = JSON.parse(textContent.text);
+            // Handle search results format
+            return parsed.items || parsed || [];
           }
         }
         return [];
