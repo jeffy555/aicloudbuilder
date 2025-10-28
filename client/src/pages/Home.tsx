@@ -253,6 +253,14 @@ export default function Home() {
                   selected={provider === 'github'}
                   data-testid="card-provider-github"
                 />
+                <ProviderCard
+                  icon={<Cloud className="w-6 h-6" />}
+                  title="Azure DevOps"
+                  description="Use Azure DevOps repositories for your infrastructure code"
+                  onClick={() => handleProviderSelect('azure')}
+                  selected={provider === 'azure'}
+                  data-testid="card-provider-azure"
+                />
               </div>
             )}
 
