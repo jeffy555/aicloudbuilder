@@ -28,6 +28,7 @@ export default function TerraformWorkflow() {
   const [provider, setProvider] = useState<Provider>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>('');
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>(null);
+  const [isCommitted, setIsCommitted] = useState<boolean>(false);
 
   const steps = [
     { number: 1, title: 'Provider' },
@@ -133,6 +134,7 @@ export default function TerraformWorkflow() {
       return res.json();
     },
     onSuccess: (data: any) => {
+      setIsCommitted(true);
       toast({
         title: "Success!",
         description: `Your Terraform configuration has been committed: ${data.commitMessage}`,
@@ -389,6 +391,7 @@ export default function TerraformWorkflow() {
                   onApprove={handleApprove}
                   onCancel={handleCancel}
                   loading={commitMutation.isPending}
+                  disabled={isCommitted}
                 />
               </div>
             )}
