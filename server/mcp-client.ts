@@ -168,52 +168,74 @@ export class MCPClientManager {
     files: { path: string; content: string }[],
     message: string
   ): Promise<any> {
-    try {
-      if (provider === 'github') {
-        const result = await this.callTool(provider, 'push_files', {
-          owner: process.env.GITHUB_OWNER || '',
-          repo: repoName,
-          files: files.map(f => ({
-            path: f.path,
-            content: f.content
-          })),
-          message,
-          branch: 'main',
-        });
-        // Parse MCP content parts
-        if (result.content && Array.isArray(result.content)) {
-          const textContent = result.content.find((item: any) => item.type === 'text');
-          if (textContent && textContent.text) {
-            return JSON.parse(textContent.text);
+    const maxRetries = 5;
+    const baseDelay = 3000; // 3 seconds
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (provider === 'github') {
+          const result = await this.callTool(provider, 'push_files', {
+            owner: process.env.GITHUB_OWNER || '',
+            repo: repoName,
+            files: files.map(f => ({
+              path: f.path,
+              content: f.content
+            })),
+            message,
+            branch: 'main',
+          });
+          // Parse MCP content parts
+          if (result.content && Array.isArray(result.content)) {
+            const textContent = result.content.find((item: any) => item.type === 'text');
+            if (textContent && textContent.text) {
+              return JSON.parse(textContent.text);
+            }
           }
-        }
-        return { success: true };
-      } else {
-        // Azure DevOps - commit files to repository
-        const result = await this.callTool(provider, 'git_create_push', {
-          project: process.env.AZURE_DEVOPS_PROJECT || '',
-          repositoryId: repoName,
-          changes: files.map(f => ({
-            changeType: 'add',
-            item: { path: `/${f.path}` },
-            newContent: { content: f.content, contentType: 'rawtext' }
-          })),
-          comment: message,
-          refName: 'refs/heads/main',
-        });
-        // Parse MCP content parts
-        if (result.content && Array.isArray(result.content)) {
-          const textContent = result.content.find((item: any) => item.type === 'text');
-          if (textContent && textContent.text) {
-            return JSON.parse(textContent.text);
+          return { success: true };
+        } else {
+          // Azure DevOps - commit files to repository
+          const result = await this.callTool(provider, 'git_create_push', {
+            project: process.env.AZURE_DEVOPS_PROJECT || '',
+            repositoryId: repoName,
+            changes: files.map(f => ({
+              changeType: 'add',
+              item: { path: `/${f.path}` },
+              newContent: { content: f.content, contentType: 'rawtext' }
+            })),
+            comment: message,
+            refName: 'refs/heads/main',
+          });
+          // Parse MCP content parts
+          if (result.content && Array.isArray(result.content)) {
+            const textContent = result.content.find((item: any) => item.type === 'text');
+            if (textContent && textContent.text) {
+              return JSON.parse(textContent.text);
+            }
           }
+          return { success: true };
         }
-        return { success: true };
+      } catch (error: any) {
+        // Check if it's an "empty repository" error
+        const errorMessage = error?.message || String(error);
+        const isEmptyRepoError = errorMessage.includes('Git Repository is empty') || 
+                                  errorMessage.includes('empty') || 
+                                  errorMessage.includes('409') ||
+                                  errorMessage.includes('Conflict');
+        
+        // If it's not an empty repo error or we've exhausted retries, throw
+        if (!isEmptyRepoError || attempt === maxRetries) {
+          console.error(`Error committing files for ${provider} (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
+          throw error;
+        }
+        
+        // Wait before retrying (exponential backoff starting longer)
+        const delay = baseDelay * Math.pow(1.5, attempt);
+        console.log(`Repository not ready yet, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
-    } catch (error) {
-      console.error(`Error committing files for ${provider}:`, error);
-      throw error;
     }
+    
+    throw new Error('Failed to commit files after maximum retries');
   }
 
   async cleanup() {

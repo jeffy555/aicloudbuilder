@@ -138,10 +138,11 @@ export default function Home() {
       
       chatMutation.mutate(`Files committed successfully with message: "${data.commitMessage}"`);
     },
-    onError: (error) => {
+    onError: (error: any) => {
+      const errorMessage = error?.message || "Failed to commit files. Please try again.";
       toast({
-        title: "Error",
-        description: "Failed to commit files. Please try again.",
+        title: "Commit Failed",
+        description: errorMessage,
         variant: "destructive"
       });
     }
