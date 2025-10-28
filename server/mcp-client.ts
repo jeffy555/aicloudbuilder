@@ -96,9 +96,8 @@ export class MCPClientManager {
     try {
       if (provider === 'github') {
         const owner = process.env.GITHUB_OWNER || '';
-        const result = await this.callTool(provider, 'list_repositories', {
+        const result = await this.callTool(provider, 'search_repositories', {
           query: `user:${owner}`,
-          minimal_output: true
         });
         // Parse MCP content parts
         if (result.content && Array.isArray(result.content)) {
@@ -237,56 +236,33 @@ export class MCPClientManager {
     const owner = process.env.GITHUB_OWNER || '';
 
     try {
-      // Create blobs for all files
-      const blobs = await Promise.all(
-        files.map(async (file) => {
-          const blob = await octokit.git.createBlob({
-            owner,
-            repo: repoName,
-            content: Buffer.from(file.content).toString('base64'),
-            encoding: 'base64',
-          });
-          return {
-            path: file.path,
-            mode: '100644' as const,
-            type: 'blob' as const,
-            sha: blob.data.sha,
-          };
-        })
-      );
+      console.log(`Creating initial commit for empty repository ${repoName} with ${files.length} files...`);
+      
+      // Use Contents API to create files one by one
+      // This works on empty repositories unlike the Git Data API
+      const results = [];
+      for (const file of files) {
+        console.log(`Creating file: ${file.path}`);
+        const result = await octokit.repos.createOrUpdateFileContents({
+          owner,
+          repo: repoName,
+          path: file.path,
+          message: `${message} - ${file.path}`,
+          content: Buffer.from(file.content).toString('base64'),
+          branch: 'main',
+        });
+        results.push(result.data);
+      }
 
-      // Create tree
-      const tree = await octokit.git.createTree({
-        owner,
-        repo: repoName,
-        tree: blobs,
-      });
-
-      // Create commit
-      const commit = await octokit.git.createCommit({
-        owner,
-        repo: repoName,
-        message,
-        tree: tree.data.sha,
-        parents: [], // No parents for initial commit
-      });
-
-      // Update main branch reference
-      await octokit.git.createRef({
-        owner,
-        repo: repoName,
-        ref: 'refs/heads/main',
-        sha: commit.data.sha,
-      });
-
-      console.log(`Successfully created initial commit via GitHub REST API: ${commit.data.sha}`);
+      console.log(`Successfully created ${results.length} files via GitHub REST API`);
       return {
         success: true,
-        commit: commit.data,
-        method: 'github-rest-api',
+        files: results,
+        method: 'github-contents-api',
       };
     } catch (error: any) {
       console.error('Error committing via GitHub REST API:', error);
+      console.error('Error response:', error.response?.data);
       throw new Error(`Failed to commit via GitHub REST API: ${error.message}`);
     }
   }
