@@ -111,9 +111,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } else if (session.currentStep === '4') {
         contextPrompt += `\n\nStep 4: Module Approach Selection - Help user choose between child module, standalone root module, or aggregated root module. Keep it brief.`;
       } else if (session.currentStep === '5') {
-        contextPrompt += `\n\nStep 5: Generate Terraform - User describes infrastructure they want to create. Acknowledge and encourage them to be specific about resources, configurations, and requirements.`;
+        contextPrompt += `\n\nStep 5: Generate Terraform - User describes infrastructure they want to create. 
+        
+IMPORTANT: Provide concise, step-by-step guidance and encouragement. Do NOT create bundled "Breakdown of what to create" sections. Instead:
+- Acknowledge their request briefly
+- Encourage them to be specific about resources and configurations
+- Ask clarifying questions if needed
+- Keep responses conversational and focused
+
+Avoid creating structured breakdowns or lists unless specifically asked.`;
       } else if (session.currentStep === '6') {
-        contextPrompt += `\n\nStep 6: Review & Commit - User is reviewing generated Terraform files. Answer questions about the code or configurations.`;
+        contextPrompt += `\n\nStep 6: Review & Commit - User is reviewing generated Terraform files. Answer questions about the code or configurations. Be concise and helpful.`;
       }
 
       // Get AI response with context
@@ -206,11 +214,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // Generate Terraform files with context
-      const files = await openaiService.generateTerraform(
+      const result = await openaiService.generateTerraform(
         description, 
         session.cloudProvider, 
         session.moduleApproach
       );
+
+      // Validate child module structure
+      if (session.moduleApproach === 'child-module') {
+        // Check for forbidden blocks in child modules
+        for (const file of result.files) {
+          const content = file.content.toLowerCase();
+          
+          // Check for module blocks (forbidden in child modules)
+          if (content.includes('module "') || content.includes("module '")) {
+            throw new Error(`Child module validation failed: File "${file.path}" contains a "module" block. Child modules must use "resource" blocks only. Module blocks are only allowed in aggregated root modules.`);
+          }
+          
+          // Check for provider blocks (forbidden in child modules)
+          if (content.includes('provider "') || content.includes("provider '")) {
+            throw new Error(`Child module validation failed: File "${file.path}" contains a "provider" block. Child modules should not include provider configuration.`);
+          }
+          
+          // Check for terraform blocks (typically not in child modules)
+          if (content.includes('terraform {')) {
+            throw new Error(`Child module validation failed: File "${file.path}" contains a "terraform" block. Child modules should not include terraform configuration blocks.`);
+          }
+        }
+        
+        // Ensure we have actual files generated
+        if (result.files.length === 0) {
+          throw new Error('Child module validation failed: No files were generated. Expected resource-type folders with main.tf, variables.tf, and outputs.tf files.');
+        }
+        
+        // Group files by folder and validate structure
+        const folderMap = new Map<string, Set<string>>();
+        for (const file of result.files) {
+          const parts = file.path.split('/');
+          if (parts.length < 2) {
+            throw new Error(`Child module validation failed: File "${file.path}" is not in a folder. Child modules must be organized in folders by resource type (e.g., ResourceGroup/main.tf).`);
+          }
+          
+          const folder = parts[0];
+          const fileName = parts[parts.length - 1];
+          
+          if (!folderMap.has(folder)) {
+            folderMap.set(folder, new Set());
+          }
+          folderMap.get(folder)!.add(fileName);
+        }
+        
+        // Validate each folder has required files
+        const requiredFiles = ['main.tf', 'variables.tf', 'outputs.tf'];
+        for (const [folder, files] of Array.from(folderMap.entries())) {
+          for (const required of requiredFiles) {
+            if (!files.has(required)) {
+              throw new Error(`Child module validation failed: Folder "${folder}" is missing required file "${required}". Each child module folder must contain: main.tf, variables.tf, and outputs.tf.`);
+            }
+          }
+        }
+        
+        console.log(`✓ Child module validation passed: ${folderMap.size} module(s) with ${result.files.length} files generated`);
+      }
 
       // Delete existing files for this session
       await storage.deleteFilesBySession(sessionId);
@@ -224,15 +289,49 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ? 'Aggregated Root Module (composed from child modules)'
         : 'Not specified';
 
-      const readmeContent = `# Terraform Infrastructure
+      const isChildModule = session.moduleApproach === 'child-module';
+
+      const readmeContent = isChildModule
+        ? `# Terraform Child Modules
+
+This repository contains reusable Terraform child modules for managing cloud infrastructure.
+
+## Structure
+
+Each folder represents a separate child module for a specific resource type:
+
+${result.files.map(f => `- \`${f.path}\``).join('\n')}
+
+## Configuration
+
+- **Cloud Provider**: ${session.cloudProvider ? session.cloudProvider.toUpperCase() : 'Not specified'}
+- **Module Approach**: ${moduleApproachText}
+
+## Usage
+
+These child modules can be called from a parent/root module:
+
+\`\`\`hcl
+module "example" {
+  source = "./ModuleName"
+  
+  # Pass required variables
+  name     = "example"
+  location = "eastus"
+}
+\`\`\`
+
+## Generated by AI-Driven DevOps Platform
+
+These modules were generated using natural language descriptions and AI assistance.
+`
+        : `# Terraform Infrastructure
 
 This repository contains Terraform configuration files for managing cloud infrastructure.
 
 ## Files
 
-- \`main.tf\` - Main resource definitions
-- \`variables.tf\` - Variable declarations
-- \`terraform.tfvars\` - Variable values
+${result.files.map(f => `- \`${f.path}\``).join('\n')}
 
 ## Configuration
 
@@ -257,29 +356,21 @@ terraform apply
 This infrastructure was generated using natural language descriptions and AI assistance.
 `;
 
-      // Save generated files
-      const savedFiles = await Promise.all([
-        storage.createFile({
-          sessionId,
-          fileName: 'main.tf',
-          content: files.mainTf,
-        }),
-        storage.createFile({
-          sessionId,
-          fileName: 'variables.tf',
-          content: files.variablesTf,
-        }),
-        storage.createFile({
-          sessionId,
-          fileName: 'terraform.tfvars',
-          content: files.tfvars,
-        }),
-        storage.createFile({
-          sessionId,
-          fileName: 'README.md',
-          content: readmeContent,
-        }),
-      ]);
+      // Save generated files including README
+      const allFiles = [
+        ...result.files,
+        { path: 'README.md', content: readmeContent }
+      ];
+
+      const savedFiles = await Promise.all(
+        allFiles.map(file => 
+          storage.createFile({
+            sessionId,
+            fileName: file.path,
+            content: file.content,
+          })
+        )
+      );
 
       // Update session to Review step (Step 6)
       await storage.updateSession(sessionId, { currentStep: '6' });
