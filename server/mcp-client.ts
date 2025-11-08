@@ -502,7 +502,8 @@ export class MCPClientManager {
 
   async createAzureContainer(
     storageAccountName: string,
-    containerName: string
+    containerName: string,
+    resourceGroupName: string
   ): Promise<{ success: boolean; error?: string }> {
     try {
       const client = await this.getClient('azure', 'resources');
@@ -511,7 +512,8 @@ export class MCPClientManager {
         name: 'azure_create_blob_container',
         arguments: {
           storage_account_name: storageAccountName,
-          container_name: containerName
+          container_name: containerName,
+          resource_group_name: resourceGroupName
         }
       });
 

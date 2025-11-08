@@ -394,33 +394,98 @@ Avoid creating structured breakdowns or lists unless specifically asked.`;
 
       // Scenario 3: Missing backend - create with defaults or provided config
       if (action === 'create') {
-        // Use provided config or generate sensible defaults
-        const defaults = {
-          storageAccount: backendConfig?.storageAccount || `tfstate${Date.now().toString().slice(-8)}`,
-          resourceGroup: backendConfig?.resourceGroup || 'terraform-state-rg',
-          container: backendConfig?.container || 'tfstate',
-          location: backendConfig?.location || 'eastus',
-          stateKey: backendConfig?.stateKey || 'terraform.tfstate'
-        };
+        try {
+          // Use provided config or generate sensible defaults
+          const defaults = {
+            storageAccount: backendConfig?.storageAccount || `tfstate${Date.now().toString().slice(-8)}`,
+            resourceGroup: backendConfig?.resourceGroup || 'terraform-state-rg',
+            container: backendConfig?.container || 'tfstate',
+            location: backendConfig?.location || 'eastus',
+            stateKey: backendConfig?.stateKey || 'terraform.tfstate'
+          };
 
-        // Update session with backend configuration
-        await storage.updateSession(sessionId, {
-          hasBackend: 'true',
-          backendType: 'azurerm',
-          backendStorageAccount: defaults.storageAccount,
-          backendResourceGroup: defaults.resourceGroup,
-          backendContainer: defaults.container,
-          backendLocation: defaults.location,
-          backendStateKey: defaults.stateKey,
-          backendValidated: 'pending',
-          workflowStep: 'terraform_generation'
-        });
+          // CRITICAL: Create actual Azure resources using Azure MCP
+          // These resources MUST exist before terraform init can run
+          console.log('Creating Azure backend resources...');
+          console.log('Storage Account:', defaults.storageAccount);
+          console.log('Resource Group:', defaults.resourceGroup);
+          console.log('Container:', defaults.container);
+          console.log('Location:', defaults.location);
 
-        return res.json({
-          status: 'configured',
-          message: 'Backend configuration set. Resources will be created during Terraform apply.',
-          details: defaults
-        });
+          // Step 1: Validate or create storage account
+          const storageValidation = await mcpClient.validateAzureStorageAccount(
+            defaults.storageAccount,
+            defaults.resourceGroup
+          );
+
+          if (!storageValidation.exists) {
+            console.log('Storage account does not exist. Creating...');
+            const createResult = await mcpClient.createAzureStorageAccount(
+              defaults.storageAccount,
+              defaults.resourceGroup,
+              defaults.location
+            );
+
+            if (!createResult.success) {
+              throw new Error(`Failed to create storage account: ${createResult.error}`);
+            }
+            console.log('Storage account created successfully');
+          } else {
+            console.log('Storage account already exists');
+          }
+
+          // Step 2: Validate or create container
+          const containerValidation = await mcpClient.validateAzureContainer(
+            defaults.storageAccount,
+            defaults.resourceGroup,
+            defaults.container
+          );
+
+          if (!containerValidation.exists) {
+            console.log('Container does not exist. Creating...');
+            const createResult = await mcpClient.createAzureContainer(
+              defaults.storageAccount,
+              defaults.container,
+              defaults.resourceGroup
+            );
+
+            if (!createResult.success) {
+              throw new Error(`Failed to create container: ${createResult.error}`);
+            }
+            console.log('Container created successfully');
+          } else {
+            console.log('Container already exists');
+          }
+
+          // Update session with backend configuration
+          await storage.updateSession(sessionId, {
+            hasBackend: 'true',
+            backendType: 'azurerm',
+            backendStorageAccount: defaults.storageAccount,
+            backendResourceGroup: defaults.resourceGroup,
+            backendContainer: defaults.container,
+            backendLocation: storageValidation.location || defaults.location,
+            backendStateKey: defaults.stateKey,
+            backendValidated: 'true', // Mark as validated since we just created/verified resources
+            workflowStep: 'terraform_generation'
+          });
+
+          return res.json({
+            status: 'configured',
+            message: 'Backend resources created successfully in Azure. You can now run terraform init.',
+            details: {
+              ...defaults,
+              actualLocation: storageValidation.location || defaults.location
+            }
+          });
+        } catch (error: any) {
+          console.error('Error creating Azure backend resources:', error);
+          return res.status(500).json({
+            status: 'creation_error',
+            error: error.message || 'Failed to create Azure backend resources',
+            suggestion: 'Ensure you are authenticated with Azure CLI (run: az login) and have proper permissions to create storage accounts'
+          });
+        }
       }
 
       res.status(400).json({ error: 'Invalid action. Use: validate, create, or decline' });
