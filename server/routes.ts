@@ -210,10 +210,10 @@ Avoid creating structured breakdowns or lists unless specifically asked.`;
 
   // Create repository
   app.post("/api/repositories/:provider", async (req, res) => {
+    const provider = req.params.provider as MCPProvider;
+    const { name, description } = req.body;
+    
     try {
-      const provider = req.params.provider as MCPProvider;
-      const { name, description } = req.body;
-      
       // Validate provider credentials
       if (provider === 'azure' && (!process.env.AZURE_DEVOPS_ORG || !process.env.AZURE_DEVOPS_PAT || !process.env.AZURE_DEVOPS_PROJECT)) {
         return res.status(400).json({ error: 'Azure DevOps credentials not configured. Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT environment variables.' });
