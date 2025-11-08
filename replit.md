@@ -4,13 +4,14 @@
 
 This is an AI-powered DevOps automation platform that enables users to generate and commit Terraform configurations through natural language conversations. The application features a landing page that showcases current and future DevOps automation capabilities (Terraform, Kubernetes, Automation Scripting).
 
-The platform guides users through a five-step workflow:
+The platform guides users through a six-step workflow:
 1. **Landing Page** - Select automation type (currently Terraform, with Kubernetes and Automation Scripting coming soon)
 2. **Provider Selection** - Choose repository provider (GitHub or Azure DevOps)
 3. **Repository Selection** - Choose or create a repository
 4. **Cloud Provider Selection** - Select target cloud (Azure, AWS, or GCP)
-5. **Terraform Generation** - Describe infrastructure in natural language
-6. **Review & Commit** - Review, edit, and commit generated Terraform files
+5. **Module Approach Selection** - Choose module approach (child module, standalone root, or aggregated root)
+6. **Terraform Generation** - Describe infrastructure in natural language
+7. **Review & Commit** - Review, edit, and commit generated Terraform files
 
 The platform uses a conversational interface powered by OpenAI's GPT-4o-mini model, integrated with the Model Context Protocol (MCP) for repository management operations.
 
@@ -44,10 +45,11 @@ Preferred communication style: Simple, everyday language.
 - Responsive layout with mobile-first considerations
 
 **Key UI Patterns**:
-- Step-based workflow (Provider → Repository → Generate → Review)
+- Step-based workflow (Provider → Repository → Cloud → Module → Generate → Review)
 - Conversational chat interface with AI and user message components
 - Code editor with multi-file tabs for Terraform configuration
 - Repository selection with radio group pattern
+- Module approach selection with three options
 - Action confirmation buttons for commit operations
 
 ### Backend Architecture
@@ -71,9 +73,11 @@ Preferred communication style: Simple, everyday language.
 **AI Integration**:
 - OpenAI GPT-4o-mini for conversational AI and Terraform generation
 - Context-aware system prompts based on current workflow step
-- AI chat only active during Step 4 (Generate) for relevant responses
+- Module approach-aware Terraform generation (child module, standalone root, aggregated root)
+- AI chat only active during Step 5 (Generate) for relevant responses
 - System messages for step transitions without triggering AI
 - Structured generation of main.tf, variables.tf, terraform.tfvars, and README.md files
+- README includes cloud provider and module approach metadata
 
 **Repository Integration**:
 - Model Context Protocol (MCP) client manager for abstracted repository operations
@@ -104,9 +108,10 @@ Preferred communication style: Simple, everyday language.
 
 **Schema Design**:
 - User authentication support (username/password)
-- Session tracking with provider, repository, and cloud provider metadata
-- Step progression tracking (currentStep: 1-5)
+- Session tracking with provider, repository, cloud provider, and module approach metadata
+- Step progression tracking (currentStep: 1-6)
 - Cloud provider selection (azure/aws/gcp)
+- Module approach selection (child-module/standalone-root/aggregated-root)
 - Conversation history via messages table
 - Generated file versioning with update timestamps
 - Supports 4 generated files: main.tf, variables.tf, terraform.tfvars, README.md
@@ -163,11 +168,12 @@ Preferred communication style: Simple, everyday language.
 4. **Repository Listing**: List existing repositories via MCP
 5. **Repository Creation**: Create new GitHub repositories (Azure DevOps requires manual creation)
 6. **Cloud Provider Selection**: Choose target cloud platform (Azure, AWS, or GCP)
-7. **AI Conversation**: Natural language interaction with OpenAI GPT-4o-mini
-8. **Terraform Generation**: AI-powered generation of main.tf, variables.tf, terraform.tfvars, and README.md
-9. **Code Review**: Monaco editor for reviewing and editing generated files
-10. **File Management**: Store and retrieve generated Terraform files
-11. **Auto-README**: Automatically generates README.md with usage instructions to initialize empty repositories
+7. **Module Approach Selection**: Choose between child module, standalone root module, or aggregated root module
+8. **AI Conversation**: Natural language interaction with OpenAI GPT-4o-mini
+9. **Context-Aware Terraform Generation**: AI-powered generation of main.tf, variables.tf, terraform.tfvars, and README.md based on selected module approach
+10. **Code Review**: Monaco editor for reviewing and editing generated files
+11. **File Management**: Store and retrieve generated Terraform files
+12. **Auto-README**: Automatically generates README.md with usage instructions, cloud provider, and module approach information
 
 ### Known Limitations ⚠️
 
@@ -206,5 +212,38 @@ The Azure DevOps MCP server (`@azure-devops/mcp`) has significant functional lim
 **Recommendation**: Use GitHub provider for full end-to-end functionality. Azure DevOps integration is limited to repository listing and Terraform generation only.
 
 **End-to-End Functionality**:
-- **GitHub**: ✅ Full end-to-end workflow (Landing → Provider → Repository → Cloud → Generate → Review → Commit)
-- **Azure DevOps**: ⚠️ Partial workflow (Landing → Provider → Repository → Cloud → Generate → Review). Repository creation and commit steps not supported via MCP - users must manually create repositories and commit generated files.
+- **GitHub**: ✅ Full end-to-end workflow (Landing → Provider → Repository → Cloud → Module → Generate → Review → Commit)
+- **Azure DevOps**: ⚠️ Partial workflow (Landing → Provider → Repository → Cloud → Module → Generate → Review). Repository creation and commit steps not supported via MCP - users must manually create repositories and commit generated files.
+
+## Recent Changes
+
+### Module Approach Selection (Latest)
+Added a new Step 4 in the workflow to select the module approach before generating Terraform code. This enables:
+
+**Three Module Approaches**:
+1. **Child Module** - Generates reusable module code that:
+   - Accepts input variables for flexibility
+   - Creates specific resources
+   - Outputs important values for parent modules
+   - Follows module best practices (no provider configuration)
+   - Can be called multiple times with different values
+
+2. **Standalone Root Module** - Generates a complete, self-contained configuration that:
+   - Defines all resources needed for the infrastructure
+   - Includes provider configuration
+   - Uses variables for customization
+   - Is ready to be applied directly
+
+3. **Aggregated Root Module** - Generates a root module that:
+   - Calls multiple child modules (assumes they exist)
+   - Includes provider configuration
+   - Passes variables to child modules
+   - Aggregates outputs from child modules
+   - Coordinates the overall infrastructure
+
+**Technical Implementation**:
+- Added `moduleApproach` field to session schema ('child-module' | 'standalone-root' | 'aggregated-root')
+- Updated step progression from 5 to 6 steps
+- Enhanced OpenAI prompts with module-specific context
+- Updated generated README.md to include module approach information
+- Backend state properly advances to step 6 after Terraform generation
