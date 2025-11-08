@@ -595,6 +595,16 @@ ${result.files.map(f => `- \`${f.path}\``).join('\n')}
 
 - **Cloud Provider**: ${session.cloudProvider ? session.cloudProvider.toUpperCase() : 'Not specified'}
 - **Module Approach**: ${moduleApproachText}
+${session.hasBackend === 'true' ? `- **Backend**: Configured for remote state management using ${session.backendType}` : '- **Backend**: Local state management'}
+
+## File Structure
+
+${session.hasBackend === 'true' ? '- **backend.tf**: Backend configuration for state storage' : ''}
+${result.files.some(f => f.path === 'provider.tf') ? '- **provider.tf**: Provider configuration and version requirements' : ''}
+- **main.tf**: Resource definitions
+- **variables.tf**: Input variable declarations
+- **terraform.tfvars**: Variable values
+- **outputs.tf**: Output values
 
 ## Usage
 

@@ -15,10 +15,11 @@ import CheckovScanner from "@/components/CheckovScanner";
 import { CodeIcon } from "@radix-ui/react-icons";
 import { Cloud, CloudCog, Package } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import type { Session, Message, GeneratedFile, Repository, RepositoryScanResult } from "@shared/schema";
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6;
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 type Provider = 'github' | 'azure' | null;
 type CloudProvider = 'azure' | 'aws' | 'gcp' | null;
 type ModuleApproach = 'child-module' | 'standalone-root' | 'aggregated-root' | null;
@@ -34,14 +35,16 @@ export default function TerraformWorkflow() {
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
   const [scanCompleted, setScanCompleted] = useState<boolean>(false);
   const [repositoryScanResult, setRepositoryScanResult] = useState<RepositoryScanResult | null>(null);
+  const [backendConfigured, setBackendConfigured] = useState<boolean>(false);
 
   const steps = [
     { number: 1, title: 'Provider' },
     { number: 2, title: 'Repository' },
     { number: 3, title: 'Cloud' },
     { number: 4, title: 'Module' },
-    { number: 5, title: 'Generate' },
-    { number: 6, title: 'Review' },
+    { number: 5, title: 'Backend' },
+    { number: 6, title: 'Generate' },
+    { number: 7, title: 'Review' },
   ];
 
   // Create session on mount
@@ -81,7 +84,7 @@ export default function TerraformWorkflow() {
   // Fetch generated files
   const { data: generatedFiles = [] } = useQuery<GeneratedFile[]>({
     queryKey: ['/api/sessions', sessionId, 'files'],
-    enabled: !!sessionId && currentStep === 6,
+    enabled: !!sessionId && currentStep === 7,
   });
 
   // Send chat message mutation
@@ -110,6 +113,18 @@ export default function TerraformWorkflow() {
     }
   });
 
+  // Backend configuration mutation
+  const configureBackendMutation = useMutation({
+    mutationFn: async (params: { action: 'decline' | 'create' | 'validate'; backendConfig?: any }) => {
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/configure-backend`, params);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+      setBackendConfigured(true);
+    }
+  });
+
   // Generate Terraform mutation
   const generateTerraformMutation = useMutation({
     mutationFn: async (description: string) => {
@@ -118,8 +133,18 @@ export default function TerraformWorkflow() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      setCurrentStep(6);
+      setCurrentStep(7);
       setScanCompleted(false); // Reset scan state for new files
+    },
+    onError: (error: any) => {
+      if (error?.requiresBackendConfiguration) {
+        toast({
+          title: "Backend Configuration Required",
+          description: "Please configure or decline backend setup before generating Terraform.",
+          variant: "destructive"
+        });
+        setCurrentStep(5); // Go back to backend step
+      }
     }
   });
 
@@ -347,22 +372,56 @@ export default function TerraformWorkflow() {
                          selectedApproach === 'standalone-root' ? 'Standalone Root Module' : 
                          'Aggregated Root Module';
     
-    const cloudName = cloudProvider === 'azure' ? 'Microsoft Azure' : 
-                      cloudProvider === 'aws' ? 'Amazon Web Services (AWS)' : 
-                      'Google Cloud Platform (GCP)';
-    
     // User confirmation
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
       message: `Selected ${approachName}` 
     });
     
     // System guidance for next step
-    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: `Now describe the infrastructure you want to create for ${cloudName}. Be specific about resources, configurations, and requirements.` 
-    });
+    if (selectedApproach === 'child-module') {
+      // Child modules don't need backend configuration
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Child modules don\'t require backend configuration. Now describe the infrastructure components you want to create.' 
+      });
+      setBackendConfigured(true); // Mark as configured (skipped for child modules)
+      setCurrentStep(6); // Skip to Generate step
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
+    } else {
+      // Root modules need backend configuration
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Before generating Terraform, let\'s configure the backend for state management. You can use an existing backend, create a new one with sensible defaults, or skip this step to use local state.' 
+      });
+      setCurrentStep(5); // Move to Backend configuration step
+    }
     
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
-    setCurrentStep(5);
+  };
+
+  const handleBackendConfiguration = async (action: 'decline' | 'create' | 'validate', customConfig?: any) => {
+    try {
+      const result = await configureBackendMutation.mutateAsync({ action, backendConfig: customConfig });
+      
+      // Show result message
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: result.message || 'Backend configured successfully.' 
+      });
+      
+      // System guidance for next step
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Perfect! Now describe the infrastructure you want to create. Be specific about resources, configurations, and requirements.' 
+      });
+      
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+      setCurrentStep(6);
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
+    } catch (error: any) {
+      toast({
+        title: "Backend Configuration Failed",
+        description: error?.message || "Failed to configure backend. Please try again.",
+        variant: "destructive"
+      });
+      // Stay on current step (5) to allow retry
+    }
   };
 
   const handleGenerateRequest = async (message: string) => {
@@ -382,7 +441,7 @@ export default function TerraformWorkflow() {
   };
 
   const handleCancel = () => {
-    setCurrentStep(5);
+    setCurrentStep(6);
     toast({
       title: "Cancelled",
       description: "You can continue editing your Terraform files.",
@@ -527,8 +586,67 @@ export default function TerraformWorkflow() {
               </div>
             )}
 
-            {/* Step 6: Review & Edit */}
-            {currentStep === 6 && generatedFiles.length > 0 && (
+            {/* Step 5: Backend Configuration */}
+            {currentStep === 5 && (
+              <div className="max-w-2xl mx-auto space-y-6">
+                <div className="rounded-lg border border-border bg-card p-6">
+                  <h3 className="text-lg font-semibold mb-4">Configure Terraform Backend</h3>
+                  <p className="text-sm text-muted-foreground mb-6">
+                    Terraform uses a backend to store state files. Choose how you want to configure the backend for this project:
+                  </p>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <Button
+                      onClick={() => handleBackendConfiguration('create')}
+                      disabled={configureBackendMutation.isPending}
+                      variant="outline"
+                      className="h-auto p-4 text-left flex flex-col items-start justify-start"
+                      data-testid="button-backend-create"
+                    >
+                      <div className="font-medium mb-1">Create with Defaults</div>
+                      <div className="text-sm text-muted-foreground">
+                        Auto-generate backend configuration with sensible defaults
+                      </div>
+                    </Button>
+                    
+                    <Button
+                      onClick={() => handleBackendConfiguration('decline')}
+                      disabled={configureBackendMutation.isPending}
+                      variant="outline"
+                      className="h-auto p-4 text-left flex flex-col items-start justify-start"
+                      data-testid="button-backend-decline"
+                    >
+                      <div className="font-medium mb-1">Skip Backend</div>
+                      <div className="text-sm text-muted-foreground">
+                        Use local state management (not recommended for production)
+                      </div>
+                    </Button>
+                    
+                    <Button
+                      onClick={() => handleBackendConfiguration('validate')}
+                      disabled={configureBackendMutation.isPending || cloudProvider !== 'azure'}
+                      variant="outline"
+                      className="h-auto p-4 text-left flex flex-col items-start justify-start"
+                      data-testid="button-backend-validate"
+                    >
+                      <div className="font-medium mb-1">Validate Existing</div>
+                      <div className="text-sm text-muted-foreground">
+                        Validate existing backend.tf configuration
+                      </div>
+                    </Button>
+                  </div>
+                  
+                  {cloudProvider !== 'azure' && (
+                    <p className="text-sm text-muted-foreground mt-4">
+                      Note: Backend validation is currently only supported for Azure.
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Step 7: Review & Edit */}
+            {currentStep === 7 && generatedFiles.length > 0 && (
               <div className="space-y-6">
                 <CodeEditor 
                   files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
@@ -554,8 +672,8 @@ export default function TerraformWorkflow() {
           </div>
         </ScrollArea>
 
-        {/* Chat Input - Only show in step 5 (Generate) */}
-        {currentStep === 5 && (
+        {/* Chat Input - Only show in step 6 (Generate) */}
+        {currentStep === 6 && (
           <ChatInput
             onSend={handleGenerateRequest}
             placeholder="Describe your Terraform setup... e.g., 'Create Terraform for Azure Storage Account and Resource Group'"
