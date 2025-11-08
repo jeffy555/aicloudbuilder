@@ -412,6 +412,26 @@ Avoid creating structured breakdowns or lists unless specifically asked.`;
           console.log('Container:', defaults.container);
           console.log('Location:', defaults.location);
 
+          // Step 0: Validate or create resource group FIRST
+          const rgValidation = await mcpClient.validateAzureResourceGroup(
+            defaults.resourceGroup
+          );
+
+          if (!rgValidation.exists) {
+            console.log('Resource group does not exist. Creating...');
+            const createRgResult = await mcpClient.createAzureResourceGroup(
+              defaults.resourceGroup,
+              defaults.location
+            );
+
+            if (!createRgResult.success) {
+              throw new Error(`Failed to create resource group: ${createRgResult.error}`);
+            }
+            console.log('Resource group created successfully');
+          } else {
+            console.log('Resource group already exists at location:', rgValidation.location);
+          }
+
           // Step 1: Validate or create storage account
           const storageValidation = await mcpClient.validateAzureStorageAccount(
             defaults.storageAccount,
