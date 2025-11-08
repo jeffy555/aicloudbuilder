@@ -405,6 +405,107 @@ This infrastructure was generated using natural language descriptions and AI ass
     }
   });
 
+  // Run Checkov security scan on generated files
+  app.post("/api/sessions/:id/scan", async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+      const files = await storage.getFilesBySession(sessionId);
+      
+      if (files.length === 0) {
+        return res.status(400).json({ error: 'No files to scan' });
+      }
+
+      // Import required modules
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const { execFile } = await import('child_process');
+      const { promisify } = await import('util');
+      const execFileAsync = promisify(execFile);
+      const os = await import('os');
+
+      // Create a temporary directory for scanning
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'checkov-'));
+      
+      try {
+        // Write all Terraform files to temp directory
+        for (const file of files) {
+          const filePath = path.join(tempDir, file.fileName);
+          const fileDir = path.dirname(filePath);
+          
+          // Create directory if it doesn't exist
+          await fs.mkdir(fileDir, { recursive: true });
+          await fs.writeFile(filePath, file.content, 'utf-8');
+        }
+
+        // Run Checkov with JSON output
+        let scanResult;
+        try {
+          const { stdout, stderr } = await execFileAsync('checkov', [
+            '-d', tempDir,
+            '--framework', 'terraform',
+            '--output', 'json',
+            '--compact',
+            '--quiet'
+          ], { maxBuffer: 1024 * 1024 * 10 }); // 10MB buffer
+
+          scanResult = JSON.parse(stdout);
+        } catch (execError: any) {
+          // Checkov exits with non-zero code if there are failures
+          // But still outputs JSON, so we can parse it
+          if (execError.stdout) {
+            scanResult = JSON.parse(execError.stdout);
+          } else {
+            throw execError;
+          }
+        }
+
+        // Parse results
+        const summary = scanResult.summary || {};
+        const passed = summary.passed || 0;
+        const failed = summary.failed || 0;
+        const skipped = summary.skipped || 0;
+        const total = passed + failed + skipped;
+        const passPercentage = total > 0 ? Math.round((passed / total) * 100) : 0;
+
+        // Get detailed check results
+        const checks = scanResult.results?.failed_checks || [];
+        const passedChecks = scanResult.results?.passed_checks || [];
+
+        res.json({
+          success: true,
+          summary: {
+            passed,
+            failed,
+            skipped,
+            total,
+            passPercentage
+          },
+          failedChecks: checks.map((check: any) => ({
+            checkId: check.check_id,
+            checkName: check.check_name,
+            resource: check.resource,
+            file: check.file_path?.replace(tempDir, ''),
+            guideline: check.guideline
+          })),
+          passedChecks: passedChecks.slice(0, 10).map((check: any) => ({
+            checkId: check.check_id,
+            checkName: check.check_name,
+            resource: check.resource
+          }))
+        });
+      } finally {
+        // Clean up temp directory
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    } catch (error: any) {
+      console.error('Error running Checkov scan:', error);
+      res.status(500).json({ 
+        error: 'Failed to run security scan',
+        details: error.message 
+      });
+    }
+  });
+
   // Commit files to repository
   app.post("/api/sessions/:id/commit", async (req, res) => {
     try {

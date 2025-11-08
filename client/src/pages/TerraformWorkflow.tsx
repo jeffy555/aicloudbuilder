@@ -11,6 +11,7 @@ import CreateRepoForm from "@/components/CreateRepoForm";
 import CodeEditor from "@/components/CodeEditor";
 import StepIndicator from "@/components/StepIndicator";
 import ActionButtons from "@/components/ActionButtons";
+import CheckovScanner from "@/components/CheckovScanner";
 import { CodeIcon } from "@radix-ui/react-icons";
 import { Cloud, CloudCog, Package } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -31,6 +32,7 @@ export default function TerraformWorkflow() {
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>(null);
   const [moduleApproach, setModuleApproach] = useState<ModuleApproach>(null);
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
+  const [scanCompleted, setScanCompleted] = useState<boolean>(false);
 
   const steps = [
     { number: 1, title: 'Provider' },
@@ -116,6 +118,7 @@ export default function TerraformWorkflow() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
       setCurrentStep(6);
+      setScanCompleted(false); // Reset scan state for new files
     }
   });
 
@@ -127,6 +130,7 @@ export default function TerraformWorkflow() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+      setScanCompleted(false); // Reset scan state when files are edited
     }
   });
 
@@ -450,12 +454,21 @@ export default function TerraformWorkflow() {
                   files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
                   onFileChange={handleFileChange} 
                 />
+                <CheckovScanner 
+                  sessionId={sessionId}
+                  onScanComplete={() => setScanCompleted(true)}
+                />
                 <ActionButtons
                   onApprove={handleApprove}
                   onCancel={handleCancel}
                   loading={commitMutation.isPending}
-                  disabled={isCommitted}
+                  disabled={isCommitted || !scanCompleted}
                 />
+                {!scanCompleted && !isCommitted && (
+                  <p className="text-sm text-muted-foreground text-center">
+                    Please run the security scan before committing
+                  </p>
+                )}
               </div>
             )}
           </div>
