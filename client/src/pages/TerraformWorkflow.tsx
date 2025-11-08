@@ -407,10 +407,10 @@ export default function TerraformWorkflow() {
           });
           setCurrentStep(5); // Stay on Backend configuration step to show options
         }
-      } else {
-        // No existing backend - auto-create with defaults
+      } else if (!hasExistingBackend && cloudProvider === 'azure') {
+        // No existing backend + Azure - auto-create with defaults
         await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-          message: 'No existing backend detected. Creating backend configuration with sensible defaults...' 
+          message: 'No existing backend detected. Creating Azure backend resources with sensible defaults...' 
         });
         queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
         
@@ -420,10 +420,16 @@ export default function TerraformWorkflow() {
         } catch (error) {
           // Creation failed - show manual options
           await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-            message: 'Auto-configuration failed. Please choose how to configure the backend.' 
+            message: 'Azure backend creation failed. Please choose how to configure the backend.' 
           });
           setCurrentStep(5); // Stay on Backend configuration step to show options
         }
+      } else {
+        // Non-Azure cloud or manual intervention needed - show manual options
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+          message: 'Please configure the backend for state management. You can create a new backend, skip this step to use local state, or validate an existing backend.tf if available.' 
+        });
+        setCurrentStep(5); // Show Backend configuration step with manual options
       }
     }
     

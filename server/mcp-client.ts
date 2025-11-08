@@ -472,6 +472,78 @@ export class MCPClientManager {
     }
   }
 
+  async createAzureResourceGroup(
+    resourceGroupName: string,
+    location: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const client = await this.getClient('azure', 'resources');
+      
+      await client.callTool({
+        name: 'azure_create_resource_group',
+        arguments: {
+          name: resourceGroupName,
+          location: location
+        }
+      });
+
+      return { success: true };
+    } catch (error: any) {
+      console.error(`Error creating resource group:`, error);
+      return {
+        success: false,
+        error: error.message || 'Failed to create resource group'
+      };
+    }
+  }
+
+  async validateAzureResourceGroup(
+    resourceGroupName: string
+  ): Promise<{ exists: boolean; location?: string; error?: string }> {
+    try {
+      const client = await this.getClient('azure', 'resources');
+      
+      const result = await client.callTool({
+        name: 'azure_list_resource_groups',
+        arguments: {}
+      });
+
+      const content = result.content as any[];
+      if (!content || content.length === 0) {
+        throw new Error('No content returned from Azure MCP server');
+      }
+
+      let resourceGroups: any[] = [];
+      
+      for (const item of content) {
+        if (item.type === 'text' && item.text) {
+          try {
+            const parsed = JSON.parse(item.text);
+            resourceGroups = resourceGroups.concat(Array.isArray(parsed) ? parsed : [parsed]);
+          } catch (parseError) {
+            console.warn('Failed to parse text content as JSON:', item.text);
+          }
+        } else if (item.type === 'application/json' && item.data) {
+          const parsed = typeof item.data === 'string' ? JSON.parse(item.data) : item.data;
+          resourceGroups = resourceGroups.concat(Array.isArray(parsed) ? parsed : [parsed]);
+        }
+      }
+
+      const rg = resourceGroups.find((r: any) => r.name === resourceGroupName);
+      if (rg) {
+        return {
+          exists: true,
+          location: rg.location
+        };
+      }
+
+      return { exists: false };
+    } catch (error: any) {
+      console.error(`Error validating resource group ${resourceGroupName}:`, error);
+      throw new Error(`Failed to validate resource group: ${error.message || 'Unknown error'}`);
+    }
+  }
+
   async createAzureStorageAccount(
     storageAccountName: string,
     resourceGroupName: string,
