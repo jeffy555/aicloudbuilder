@@ -59,10 +59,10 @@ Implemented automatic repository scanning to detect existing Terraform configura
 **Repository Scanning**:
 - After selecting a repository, automatically scans for existing Terraform files
 - Detects cloud provider from provider blocks (azurerm → Azure, aws → AWS, google → GCP)
-- Determines module type:
-  - Child module: Contains only `resource` blocks
-  - Root module: Contains `module` blocks
-  - Empty: No Terraform files found
+- Determines module type based on directory structure:
+  - **Child module**: Directory structure with separate folders for each resource/module (e.g., ResourceGroup/, StorageAccount/, FunctionApp/) where each folder contains its own .tf files
+  - **Standalone/Aggregated Root module**: Resource blocks or module blocks directly in root directory without modular folder structure
+  - **Empty**: No Terraform files found
 - Stores detected configuration in session for AI context
 
 **Adaptive Workflow**:

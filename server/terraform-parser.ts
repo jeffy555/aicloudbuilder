@@ -11,11 +11,24 @@ export function analyzeTerraformFiles(files: { path: string; content: string }[]
   let hasResources = false;
   let hasModules = false;
   const providerBlocks: Set<string> = new Set();
+  const subdirectories: Set<string> = new Set();
+  const rootFiles: string[] = [];
 
   for (const file of files) {
     if (!file.path.endsWith('.tf')) continue;
 
     const content = file.content;
+
+    // Track directory structure
+    // Check if file is in a subdirectory (e.g., ResourceGroup/main.tf, StorageAccount/variables.tf)
+    const pathParts = file.path.split('/');
+    if (pathParts.length > 1) {
+      // File is in a subdirectory
+      subdirectories.add(pathParts[0]);
+    } else {
+      // File is in root directory
+      rootFiles.push(file.path);
+    }
 
     const providerMatches = content.match(/provider\s+"([^"]+)"/g);
     if (providerMatches) {
@@ -46,13 +59,29 @@ export function analyzeTerraformFiles(files: { path: string; content: string }[]
     }
   }
 
+  // Determine module type based on directory structure and content
   let moduleType: 'child' | 'root' | 'empty' = 'empty';
-  if (hasResources || hasModules) {
+  
+  if (files.length === 0) {
+    moduleType = 'empty';
+  } else if (subdirectories.size > 0 && rootFiles.length === 0) {
+    // Directory structure with separate folders for each resource/module (e.g., ResourceGroup/, StorageAccount/)
+    // This represents a child module structure
+    moduleType = 'child';
+  } else if (rootFiles.length > 0 && subdirectories.size === 0) {
+    // Files directly in root directory without modular folder structure
     if (hasModules) {
+      // Has module blocks referencing other modules - aggregated root module
       moduleType = 'root';
     } else if (hasResources) {
-      moduleType = 'child';
+      // Has resource blocks only - standalone root module
+      moduleType = 'root';
     }
+  } else if (subdirectories.size > 0 && rootFiles.length > 0) {
+    // Mixed structure - has both root files and subdirectories
+    // If root files contain module blocks, it's an aggregated root
+    // Otherwise, it's ambiguous - default to root
+    moduleType = hasModules ? 'root' : 'root';
   }
 
   return {
