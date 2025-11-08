@@ -630,8 +630,11 @@ This infrastructure was generated using natural language descriptions and AI ass
         )
       );
 
-      // Update session to Review step (Step 6)
-      await storage.updateSession(sessionId, { currentStep: '6' });
+      // Update session to Review step (Step 6) and mark workflow as completed
+      await storage.updateSession(sessionId, { 
+        currentStep: '6',
+        workflowStep: 'terraform_generation'
+      });
 
       res.json(savedFiles);
     } catch (error) {
