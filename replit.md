@@ -217,7 +217,39 @@ The Azure DevOps MCP server (`@azure-devops/mcp`) has significant functional lim
 
 ## Recent Changes
 
-### Module Approach Selection (Latest)
+### Child Module Folder Organization & Validation (Latest - Nov 8, 2025)
+Fixed critical bug where child modules incorrectly generated `module` blocks instead of `resource` blocks. Implemented folder-based organization and comprehensive validation:
+
+**Critical Bug Fixes**:
+1. **Resource vs Module Blocks** - Child modules now correctly generate `resource` blocks only
+   - `module` blocks are forbidden in child modules (only allowed in aggregated root)
+   - OpenAI prompts explicitly forbid module blocks with examples
+   - Server-side validation rejects any child module containing module blocks
+
+2. **Folder-Based Organization** - Child modules organized by resource type:
+   - Example structure: `ResourceGroup/`, `StorageAccount/`, `FunctionApp/`, `LogicApp/`
+   - Each folder contains: `main.tf` (resources), `variables.tf` (inputs), `outputs.tf` (exports)
+   - Standalone/aggregated root modules maintain flat structure (backward compatible)
+
+3. **Comprehensive Validation**:
+   - Forbidden block detection: Rejects `module`, `provider`, `terraform` blocks in child modules
+   - Structural validation: Ensures folder organization and required files per folder
+   - Clear error messages guide users if validation fails
+   - Validation runs before saving to prevent invalid configurations
+
+**AI Response Improvements**:
+- Removed "Breakdown of what to create" bundled sections from chat
+- Step-by-step guidance instead of structured lists
+- More conversational and focused responses
+
+**Technical Implementation**:
+- Changed OpenAI return type from `{mainTf, variablesTf, tfvars}` to `{files: Array<{path, content}>}`
+- Server-side validation enforces child module requirements deterministically
+- Frontend CodeEditor displays nested paths (e.g., "ResourceGroup/main.tf")
+- README generation adapted for child modules vs root modules
+- Added validation logging for debugging
+
+### Module Approach Selection (Nov 8, 2025)
 Added a new Step 4 in the workflow to select the module approach before generating Terraform code. This enables:
 
 **Three Module Approaches**:
