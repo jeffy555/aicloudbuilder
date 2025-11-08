@@ -387,11 +387,44 @@ export default function TerraformWorkflow() {
       setCurrentStep(6); // Skip to Generate step
       await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
     } else {
-      // Root modules need backend configuration
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'Before generating Terraform, let\'s configure the backend for state management. You can use an existing backend, create a new one with sensible defaults, or skip this step to use local state.' 
-      });
-      setCurrentStep(5); // Move to Backend configuration step
+      // Root modules need backend configuration - automatically detect and configure
+      const hasExistingBackend = repositoryScanResult?.terraformFiles?.includes('backend.tf') || false;
+      
+      if (hasExistingBackend && cloudProvider === 'azure' && provider === 'github') {
+        // Existing backend detected - auto-validate
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+          message: 'Detected existing backend.tf in repository. Validating backend configuration...' 
+        });
+        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+        
+        // Auto-trigger validation
+        try {
+          await handleBackendConfiguration('validate');
+        } catch (error) {
+          // Validation failed - show manual options
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+            message: 'Backend validation failed. Please choose how to proceed with backend configuration.' 
+          });
+          setCurrentStep(5); // Stay on Backend configuration step to show options
+        }
+      } else {
+        // No existing backend - auto-create with defaults
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+          message: 'No existing backend detected. Creating backend configuration with sensible defaults...' 
+        });
+        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+        
+        // Auto-trigger creation
+        try {
+          await handleBackendConfiguration('create');
+        } catch (error) {
+          // Creation failed - show manual options
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+            message: 'Auto-configuration failed. Please choose how to configure the backend.' 
+          });
+          setCurrentStep(5); // Stay on Backend configuration step to show options
+        }
+      }
     }
     
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
@@ -600,11 +633,11 @@ export default function TerraformWorkflow() {
                       onClick={() => handleBackendConfiguration('create')}
                       disabled={configureBackendMutation.isPending}
                       variant="outline"
-                      className="h-auto p-4 text-left flex flex-col items-start justify-start"
+                      className="h-auto p-4 text-left flex flex-col items-start justify-start gap-2"
                       data-testid="button-backend-create"
                     >
-                      <div className="font-medium mb-1">Create with Defaults</div>
-                      <div className="text-sm text-muted-foreground">
+                      <div className="font-medium leading-tight">Create with Defaults</div>
+                      <div className="text-sm text-muted-foreground leading-relaxed">
                         Auto-generate backend configuration with sensible defaults
                       </div>
                     </Button>
@@ -613,11 +646,11 @@ export default function TerraformWorkflow() {
                       onClick={() => handleBackendConfiguration('decline')}
                       disabled={configureBackendMutation.isPending}
                       variant="outline"
-                      className="h-auto p-4 text-left flex flex-col items-start justify-start"
+                      className="h-auto p-4 text-left flex flex-col items-start justify-start gap-2"
                       data-testid="button-backend-decline"
                     >
-                      <div className="font-medium mb-1">Skip Backend</div>
-                      <div className="text-sm text-muted-foreground">
+                      <div className="font-medium leading-tight">Skip Backend</div>
+                      <div className="text-sm text-muted-foreground leading-relaxed">
                         Use local state management (not recommended for production)
                       </div>
                     </Button>
@@ -626,11 +659,11 @@ export default function TerraformWorkflow() {
                       onClick={() => handleBackendConfiguration('validate')}
                       disabled={configureBackendMutation.isPending || cloudProvider !== 'azure'}
                       variant="outline"
-                      className="h-auto p-4 text-left flex flex-col items-start justify-start"
+                      className="h-auto p-4 text-left flex flex-col items-start justify-start gap-2"
                       data-testid="button-backend-validate"
                     >
-                      <div className="font-medium mb-1">Validate Existing</div>
-                      <div className="text-sm text-muted-foreground">
+                      <div className="font-medium leading-tight">Validate Existing</div>
+                      <div className="text-sm text-muted-foreground leading-relaxed">
                         Validate existing backend.tf configuration
                       </div>
                     </Button>
