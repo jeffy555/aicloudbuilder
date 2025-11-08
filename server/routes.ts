@@ -109,9 +109,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } else if (session.currentStep === '3') {
         contextPrompt += `\n\nStep 3: Cloud Provider Selection - Help user choose Azure, AWS, or GCP. Keep it brief.`;
       } else if (session.currentStep === '4') {
-        contextPrompt += `\n\nStep 4: Generate Terraform - User describes infrastructure they want to create. Acknowledge and encourage them to be specific about resources, configurations, and requirements.`;
+        contextPrompt += `\n\nStep 4: Module Approach Selection - Help user choose between child module, standalone root module, or aggregated root module. Keep it brief.`;
       } else if (session.currentStep === '5') {
-        contextPrompt += `\n\nStep 5: Review & Commit - User is reviewing generated Terraform files. Answer questions about the code or configurations.`;
+        contextPrompt += `\n\nStep 5: Generate Terraform - User describes infrastructure they want to create. Acknowledge and encourage them to be specific about resources, configurations, and requirements.`;
+      } else if (session.currentStep === '6') {
+        contextPrompt += `\n\nStep 6: Review & Commit - User is reviewing generated Terraform files. Answer questions about the code or configurations.`;
       }
 
       // Get AI response with context
@@ -197,14 +199,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { description } = req.body;
       const sessionId = req.params.id;
 
-      // Generate Terraform files
-      const files = await openaiService.generateTerraform(description);
+      // Get session to access cloudProvider and moduleApproach
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      // Generate Terraform files with context
+      const files = await openaiService.generateTerraform(
+        description, 
+        session.cloudProvider, 
+        session.moduleApproach
+      );
 
       // Delete existing files for this session
       await storage.deleteFilesBySession(sessionId);
 
       // Generate README content
-      const session = await storage.getSession(sessionId);
+      const moduleApproachText = session.moduleApproach === 'child-module' 
+        ? 'Child Module (reusable component)'
+        : session.moduleApproach === 'standalone-root'
+        ? 'Standalone Root Module (complete infrastructure)'
+        : session.moduleApproach === 'aggregated-root'
+        ? 'Aggregated Root Module (composed from child modules)'
+        : 'Not specified';
+
       const readmeContent = `# Terraform Infrastructure
 
 This repository contains Terraform configuration files for managing cloud infrastructure.
@@ -215,9 +234,10 @@ This repository contains Terraform configuration files for managing cloud infras
 - \`variables.tf\` - Variable declarations
 - \`terraform.tfvars\` - Variable values
 
-## Cloud Provider
+## Configuration
 
-${session?.cloudProvider ? `Target cloud provider: **${session.cloudProvider.toUpperCase()}**` : ''}
+- **Cloud Provider**: ${session.cloudProvider ? session.cloudProvider.toUpperCase() : 'Not specified'}
+- **Module Approach**: ${moduleApproachText}
 
 ## Usage
 
@@ -260,6 +280,9 @@ This infrastructure was generated using natural language descriptions and AI ass
           content: readmeContent,
         }),
       ]);
+
+      // Update session to Review step (Step 6)
+      await storage.updateSession(sessionId, { currentStep: '6' });
 
       res.json(savedFiles);
     } catch (error) {

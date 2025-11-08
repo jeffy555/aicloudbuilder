@@ -15,7 +15,8 @@ export const sessions = pgTable("sessions", {
   repositoryId: text("repository_id"),
   repositoryName: text("repository_name"),
   cloudProvider: text("cloud_provider"), // 'azure' | 'aws' | 'gcp' | null
-  currentStep: text("current_step").notNull().default('1'), // '1' | '2' | '3' | '4'
+  moduleApproach: text("module_approach"), // 'child-module' | 'standalone-root' | 'aggregated-root' | null
+  currentStep: text("current_step").notNull().default('1'), // '1' | '2' | '3' | '4' | '5' | '6'
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

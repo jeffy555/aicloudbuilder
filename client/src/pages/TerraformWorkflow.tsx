@@ -17,9 +17,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import type { Session, Message, GeneratedFile, Repository } from "@shared/schema";
 
-type Step = 1 | 2 | 3 | 4 | 5;
+type Step = 1 | 2 | 3 | 4 | 5 | 6;
 type Provider = 'github' | 'azure' | null;
 type CloudProvider = 'azure' | 'aws' | 'gcp' | null;
+type ModuleApproach = 'child-module' | 'standalone-root' | 'aggregated-root' | null;
 
 export default function TerraformWorkflow() {
   const { toast } = useToast();
@@ -28,14 +29,16 @@ export default function TerraformWorkflow() {
   const [provider, setProvider] = useState<Provider>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>('');
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>(null);
+  const [moduleApproach, setModuleApproach] = useState<ModuleApproach>(null);
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
 
   const steps = [
     { number: 1, title: 'Provider' },
     { number: 2, title: 'Repository' },
     { number: 3, title: 'Cloud' },
-    { number: 4, title: 'Generate' },
-    { number: 5, title: 'Review' },
+    { number: 4, title: 'Module' },
+    { number: 5, title: 'Generate' },
+    { number: 6, title: 'Review' },
   ];
 
   // Create session on mount
@@ -75,7 +78,7 @@ export default function TerraformWorkflow() {
   // Fetch generated files
   const { data: generatedFiles = [] } = useQuery<GeneratedFile[]>({
     queryKey: ['/api/sessions', sessionId, 'files'],
-    enabled: !!sessionId && currentStep === 5,
+    enabled: !!sessionId && currentStep === 6,
   });
 
   // Send chat message mutation
@@ -112,7 +115,7 @@ export default function TerraformWorkflow() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      setCurrentStep(5);
+      setCurrentStep(6);
     }
   });
 
@@ -241,11 +244,41 @@ export default function TerraformWorkflow() {
     
     // System guidance for next step
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: `Now describe the infrastructure you want to create for ${cloudName}. Be specific about resources, configurations, and requirements.` 
+      message: 'Great! Now choose your module approach: child module, standalone root module, or aggregated root module.' 
     });
     
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     setCurrentStep(4);
+  };
+
+  const handleModuleApproachSelect = async (selectedApproach: ModuleApproach) => {
+    setModuleApproach(selectedApproach);
+    
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+      moduleApproach: selectedApproach,
+      currentStep: '5' 
+    });
+
+    const approachName = selectedApproach === 'child-module' ? 'Child Module' : 
+                         selectedApproach === 'standalone-root' ? 'Standalone Root Module' : 
+                         'Aggregated Root Module';
+    
+    const cloudName = cloudProvider === 'azure' ? 'Microsoft Azure' : 
+                      cloudProvider === 'aws' ? 'Amazon Web Services (AWS)' : 
+                      'Google Cloud Platform (GCP)';
+    
+    // User confirmation
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: `Selected ${approachName}` 
+    });
+    
+    // System guidance for next step
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+      message: `Now describe the infrastructure you want to create for ${cloudName}. Be specific about resources, configurations, and requirements.` 
+    });
+    
+    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+    setCurrentStep(5);
   };
 
   const handleGenerateRequest = async (message: string) => {
@@ -265,7 +298,7 @@ export default function TerraformWorkflow() {
   };
 
   const handleCancel = () => {
-    setCurrentStep(4);
+    setCurrentStep(5);
     toast({
       title: "Cancelled",
       description: "You can continue editing your Terraform files.",
@@ -380,8 +413,38 @@ export default function TerraformWorkflow() {
               </div>
             )}
 
-            {/* Step 5: Review & Edit */}
-            {currentStep === 5 && generatedFiles.length > 0 && (
+            {/* Step 4: Module Approach Selection */}
+            {currentStep === 4 && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                <ProviderCard
+                  icon={<Package className="w-6 h-6" />}
+                  title="Child Module"
+                  description="Generate configuration specific to a child module"
+                  onClick={() => handleModuleApproachSelect('child-module')}
+                  selected={moduleApproach === 'child-module'}
+                  data-testid="card-module-child"
+                />
+                <ProviderCard
+                  icon={<CodeIcon className="w-6 h-6" />}
+                  title="Standalone Root"
+                  description="Create a standalone root module configuration"
+                  onClick={() => handleModuleApproachSelect('standalone-root')}
+                  selected={moduleApproach === 'standalone-root'}
+                  data-testid="card-module-standalone"
+                />
+                <ProviderCard
+                  icon={<CloudCog className="w-6 h-6" />}
+                  title="Aggregated Root"
+                  description="Build root module by aggregating child modules"
+                  onClick={() => handleModuleApproachSelect('aggregated-root')}
+                  selected={moduleApproach === 'aggregated-root'}
+                  data-testid="card-module-aggregated"
+                />
+              </div>
+            )}
+
+            {/* Step 6: Review & Edit */}
+            {currentStep === 6 && generatedFiles.length > 0 && (
               <div className="space-y-6">
                 <CodeEditor 
                   files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
@@ -398,8 +461,8 @@ export default function TerraformWorkflow() {
           </div>
         </ScrollArea>
 
-        {/* Chat Input - Only show in step 4 */}
-        {currentStep === 4 && (
+        {/* Chat Input - Only show in step 5 (Generate) */}
+        {currentStep === 5 && (
           <ChatInput
             onSend={handleGenerateRequest}
             placeholder="Describe your Terraform setup... e.g., 'Create Terraform for Azure Storage Account and Resource Group'"
