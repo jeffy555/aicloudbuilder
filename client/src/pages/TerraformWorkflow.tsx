@@ -16,7 +16,7 @@ import { CodeIcon } from "@radix-ui/react-icons";
 import { Cloud, CloudCog, Package } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
-import type { Session, Message, GeneratedFile, Repository } from "@shared/schema";
+import type { Session, Message, GeneratedFile, Repository, RepositoryScanResult } from "@shared/schema";
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6;
 type Provider = 'github' | 'azure' | null;
@@ -33,6 +33,7 @@ export default function TerraformWorkflow() {
   const [moduleApproach, setModuleApproach] = useState<ModuleApproach>(null);
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
   const [scanCompleted, setScanCompleted] = useState<boolean>(false);
+  const [repositoryScanResult, setRepositoryScanResult] = useState<RepositoryScanResult | null>(null);
 
   const steps = [
     { number: 1, title: 'Provider' },
@@ -134,6 +135,29 @@ export default function TerraformWorkflow() {
     }
   });
 
+  // Scan repository mutation
+  const scanRepositoryMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/scan-repository`);
+      return res.json() as Promise<RepositoryScanResult>;
+    },
+    onSuccess: (data: RepositoryScanResult) => {
+      setRepositoryScanResult(data);
+      
+      if (data.cloudProvider) {
+        setCloudProvider(data.cloudProvider);
+      }
+    },
+    onError: (error: any) => {
+      console.error('Error scanning repository:', error);
+      toast({
+        title: "Scan Failed",
+        description: "Failed to scan repository. Continuing with manual configuration.",
+        variant: "destructive"
+      });
+    }
+  });
+
   // Commit files mutation
   const commitMutation = useMutation({
     mutationFn: async () => {
@@ -190,21 +214,77 @@ export default function TerraformWorkflow() {
     await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
       repositoryId: repoId,
       repositoryName: repo?.name,
-      currentStep: '3'
     });
 
     // User confirmation
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
       message: `Selected repository: ${repo?.name}` 
     });
-    
-    // System guidance for next step
+
+    // Scan the repository for existing configuration
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: 'Perfect! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+      message: 'Scanning repository for existing Terraform configuration...' 
     });
-    
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
-    setCurrentStep(3);
+
+    const scanResult = await scanRepositoryMutation.mutateAsync();
+
+    // Handle Azure DevOps limitation (cannot scan files)
+    if (provider === 'azure' && !scanResult.isExisting) {
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Note: Azure DevOps repository scanning is limited. You\'ll need to manually configure the cloud provider and module type.' 
+      });
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
+      setCurrentStep(3);
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Let\'s start by choosing your target cloud provider (Azure, AWS, or GCP).' 
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+      return;
+    }
+
+    if (scanResult.isExisting && scanResult.terraformFiles.length > 0) {
+      // Existing repo with Terraform files
+      const moduleTypeText = scanResult.moduleType === 'child' ? 'child module' :
+                            scanResult.moduleType === 'root' ? 'root module' : 
+                            'configuration';
+      const providerText = scanResult.cloudProvider ? 
+        ` for ${scanResult.cloudProvider.toUpperCase()}` : '';
+
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: `Found existing ${moduleTypeText}${providerText} with ${scanResult.terraformFiles.length} Terraform files.`
+      });
+
+      if (scanResult.cloudProvider && !cloudProvider) {
+        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { cloudProvider: scanResult.cloudProvider });
+        setCloudProvider(scanResult.cloudProvider);
+      }
+
+      // Skip to step 5 for existing repos - let AI validate and guide the user
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '5' });
+      setCurrentStep(5);
+
+      // AI message with context about detected config
+      const contextMessage = scanResult.moduleType === 'child' 
+        ? 'I see this is a child module. Would you like me to help you create additional child modules, or modify the existing ones?'
+        : 'I see this is a root module. Would you like to add additional resources to this configuration?';
+
+      await chatMutation.mutateAsync(contextMessage);
+    } else {
+      // New/empty repo
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'This appears to be a new repository. Let\'s configure it from scratch.' 
+      });
+
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
+      setCurrentStep(3);
+
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Perfect! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+      });
+    }
+
+    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
   };
 
   const handleCreateRepo = async (name: string, description: string) => {

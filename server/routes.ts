@@ -3,7 +3,8 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { mcpClient, type MCPProvider } from "./mcp-client";
 import { openaiService, type ChatMessage } from "./openai-service";
-import { insertMessageSchema, insertGeneratedFileSchema, insertSessionSchema, type Repository } from "@shared/schema";
+import { insertMessageSchema, insertGeneratedFileSchema, insertSessionSchema, type Repository, type InsertSession } from "@shared/schema";
+import { analyzeTerraformFiles } from "./terraform-parser";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Create a new session
@@ -99,8 +100,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
         content: m.content
       }));
 
+      // Prepare session context for AI
+      const sessionContext = {
+        isExistingRepo: session.isExistingRepo === 'true',
+        detectedCloudProvider: session.detectedCloudProvider,
+        detectedModuleType: session.detectedModuleType,
+        terraformFiles: session.detectedTerraformFiles ? (session.detectedTerraformFiles as unknown as string[]) : [],
+      };
+
       // Build context-aware system prompt
       let contextPrompt = `You are an AI DevOps assistant. The user is at step ${session.currentStep} of the Terraform workflow.`;
+      
+      // Add detected repository information if available
+      if (sessionContext.isExistingRepo && sessionContext.terraformFiles.length > 0) {
+        const moduleTypeText = sessionContext.detectedModuleType === 'child' ? 'child module' :
+                              sessionContext.detectedModuleType === 'root' ? 'root module' :
+                              'Terraform configuration';
+        contextPrompt += `\n\nDETECTED REPOSITORY: This is an existing ${moduleTypeText}`;
+        if (sessionContext.detectedCloudProvider) {
+          contextPrompt += ` for ${sessionContext.detectedCloudProvider.toUpperCase()}`;
+        }
+        contextPrompt += ` with ${sessionContext.terraformFiles.length} Terraform files.`;
+      }
       
       if (session.currentStep === '1') {
         contextPrompt += `\n\nStep 1: Provider Selection - Help user choose between GitHub or Azure DevOps. Keep it brief.`;
@@ -111,15 +132,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } else if (session.currentStep === '4') {
         contextPrompt += `\n\nStep 4: Module Approach Selection - Help user choose between child module, standalone root module, or aggregated root module. Keep it brief.`;
       } else if (session.currentStep === '5') {
-        contextPrompt += `\n\nStep 5: Generate Terraform - User describes infrastructure they want to create. 
+        let step5Prompt = `\n\nStep 5: Generate Terraform - User describes infrastructure they want to create.`;
         
-IMPORTANT: Provide concise, step-by-step guidance and encouragement. Do NOT create bundled "Breakdown of what to create" sections. Instead:
+        if (sessionContext.isExistingRepo && sessionContext.terraformFiles.length > 0) {
+          // For existing repos, guide them on how to extend the existing configuration
+          if (sessionContext.detectedModuleType === 'child') {
+            step5Prompt += `\n\nThe repository already contains a child module. Help the user:
+- Create additional child modules following the same folder structure
+- Ensure new modules use "resource" blocks (not "module" blocks)
+- Maintain consistency with existing patterns`;
+          } else if (sessionContext.detectedModuleType === 'root') {
+            step5Prompt += `\n\nThe repository already contains a root module. Help the user:
+- Add additional resources to the existing configuration
+- Maintain compatibility with existing provider configuration
+- Suggest improvements while respecting existing structure`;
+          }
+        }
+        
+        step5Prompt += `\n\nIMPORTANT: Provide concise, step-by-step guidance and encouragement. Do NOT create bundled "Breakdown of what to create" sections. Instead:
 - Acknowledge their request briefly
 - Encourage them to be specific about resources and configurations
 - Ask clarifying questions if needed
 - Keep responses conversational and focused
 
 Avoid creating structured breakdowns or lists unless specifically asked.`;
+        contextPrompt += step5Prompt;
       } else if (session.currentStep === '6') {
         contextPrompt += `\n\nStep 6: Review & Commit - User is reviewing generated Terraform files. Answer questions about the code or configurations. Be concise and helpful.`;
       }
@@ -198,6 +235,58 @@ Avoid creating structured breakdowns or lists unless specifically asked.`;
       }
       
       res.status(500).json({ error: 'Failed to create repository' });
+    }
+  });
+
+  // Scan repository for existing Terraform configuration
+  app.post("/api/sessions/:id/scan-repository", async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+      const session = await storage.getSession(sessionId);
+      
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      if (!session.provider || !session.repositoryName) {
+        return res.status(400).json({ error: 'Provider and repository must be selected before scanning' });
+      }
+
+      const files = await mcpClient.scanRepositoryFiles(
+        session.provider as MCPProvider,
+        session.repositoryName,
+        'main'
+      );
+
+      const analysis = analyzeTerraformFiles(files);
+
+      const updates: Partial<InsertSession> = {
+        isExistingRepo: files.length > 0 ? 'true' : 'false',
+        detectedCloudProvider: analysis.cloudProvider,
+        detectedModuleType: analysis.moduleType,
+        detectedTerraformFiles: files.map(f => f.path),
+      };
+
+      if (analysis.cloudProvider) {
+        updates.cloudProvider = analysis.cloudProvider;
+      }
+
+      await storage.updateSession(sessionId, updates);
+
+      const result = {
+        isExisting: files.length > 0,
+        cloudProvider: analysis.cloudProvider,
+        moduleType: analysis.moduleType,
+        terraformFiles: files.map(f => f.path),
+        hasResources: analysis.hasResources,
+        hasModules: analysis.hasModules,
+        providerBlocks: analysis.providerBlocks,
+      };
+
+      res.json(result);
+    } catch (error: any) {
+      console.error('Error scanning repository:', error);
+      res.status(500).json({ error: 'Failed to scan repository' });
     }
   });
 

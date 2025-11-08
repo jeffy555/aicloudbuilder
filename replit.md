@@ -53,7 +53,40 @@ Key features include context-aware Terraform generation (main.tf, variables.tf, 
 -   `OPENAI_API_KEY`, `GITHUB_TOKEN`, `GITHUB_OWNER`, `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, `DATABASE_URL` (optional), `NODE_ENV`.
 ## Recent Changes
 
-### Improved File UI & Checkov Security Scanning (Latest - Nov 8, 2025)
+### Repository Scanning & Auto-Detection (Latest - Nov 8, 2025)
+Implemented automatic repository scanning to detect existing Terraform configurations and adapt the workflow accordingly:
+
+**Repository Scanning**:
+- After selecting a repository, automatically scans for existing Terraform files
+- Detects cloud provider from provider blocks (azurerm → Azure, aws → AWS, google → GCP)
+- Determines module type:
+  - Child module: Contains only `resource` blocks
+  - Root module: Contains `module` blocks
+  - Empty: No Terraform files found
+- Stores detected configuration in session for AI context
+
+**Adaptive Workflow**:
+- **Existing Repositories**: Skips cloud provider and module approach steps, jumps directly to Step 5 (Generate)
+- **New Repositories**: Follows standard workflow (Cloud → Module → Generate)
+- AI prompts adapt based on detected configuration:
+  - Child modules: Offers to create additional child modules
+  - Root modules: Offers to add resources to existing configuration
+  - New repos: Standard Terraform generation prompts
+
+**Technical Implementation**:
+- `server/terraform-parser.ts`: Analyzes Terraform files to detect providers and module types
+- `server/mcp-client.ts`: Scans GitHub repositories using Octokit REST API
+- `server/routes.ts`: New `/api/sessions/:id/scan-repository` endpoint
+- `shared/schema.ts`: Added session fields for detected configuration tracking
+- `server/openai-service.ts`: Adaptive AI prompts based on repository state
+- `client/src/pages/TerraformWorkflow.tsx`: Trigger scan after repo selection, skip steps for existing repos
+
+**Known Limitations**:
+- GitHub: Full scanning support via Octokit REST API
+- Azure DevOps: Repository scanning not available due to MCP limitations (no file content reading tools)
+  - Azure DevOps users will follow standard workflow with manual configuration
+
+### Improved File UI & Checkov Security Scanning (Nov 8, 2025)
 Enhanced the review workflow (Step 6) with better file visibility and integrated security scanning:
 
 **File Browser Improvements**:
@@ -145,6 +178,7 @@ Added a new Step 4 in the workflow to select the module approach before generati
 ### Repository Operations
 - `GET /api/repositories/:provider` - List repositories
 - `POST /api/repositories/:provider` - Create repository (GitHub only)
+- `POST /api/sessions/:id/scan-repository` - Scan repository for existing Terraform configuration
 
 ### Terraform Generation
 - `POST /api/sessions/:id/generate-terraform` - Generate Terraform files

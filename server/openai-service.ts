@@ -10,7 +10,49 @@ export interface ChatMessage {
 }
 
 export class OpenAIService {
-  private systemPrompt = `You are an AI DevOps assistant helping users create and manage Terraform configurations. 
+  private getSystemPrompt(sessionContext?: {
+    isExistingRepo?: boolean;
+    detectedCloudProvider?: string | null;
+    detectedModuleType?: string | null;
+    terraformFiles?: string[];
+  }): string {
+    let basePrompt = `You are an AI DevOps assistant helping users create and manage Terraform configurations.`;
+
+    if (sessionContext?.isExistingRepo && sessionContext.terraformFiles && sessionContext.terraformFiles.length > 0) {
+      // Existing repository with Terraform files
+      const moduleTypeText = sessionContext.detectedModuleType === 'child' ? 'child module' :
+                            sessionContext.detectedModuleType === 'root' ? 'root module' :
+                            'Terraform configuration';
+      const providerText = sessionContext.detectedCloudProvider ? 
+        ` for ${sessionContext.detectedCloudProvider.toUpperCase()}` : '';
+
+      basePrompt += `
+
+DETECTED REPOSITORY CONFIGURATION:
+- Module Type: ${moduleTypeText}
+- Cloud Provider: ${sessionContext.detectedCloudProvider || 'Not detected'}
+- Terraform Files: ${sessionContext.terraformFiles.join(', ')}
+
+Your role is to:
+1. Validate the existing Terraform configuration
+2. Help users understand what's already in their repository
+3. Guide them in adding new resources or child modules as needed
+4. Ensure any new code follows the same patterns as existing code
+
+For child modules:
+- Help create additional child modules following the same folder structure
+- Ensure new modules use "resource" blocks (not "module" blocks)
+- Maintain consistency with existing variable and output patterns
+
+For root modules:
+- Help add additional resources to the configuration
+- Maintain compatibility with existing provider configuration
+- Suggest improvements while respecting existing structure
+
+Keep responses conversational and validate existing configuration before suggesting changes.`;
+    } else {
+      // New repository
+      basePrompt += `
 
 Your role is to:
 1. Guide users through selecting a repository provider (GitHub or Azure DevOps)
@@ -25,12 +67,23 @@ When generating Terraform code:
 - Format code properly
 
 Keep responses conversational and helpful. Always confirm actions before they're executed.`;
+    }
 
-  async chat(messages: ChatMessage[]): Promise<string> {
+    return basePrompt;
+  }
+
+  async chat(messages: ChatMessage[], sessionContext?: {
+    isExistingRepo?: boolean;
+    detectedCloudProvider?: string | null;
+    detectedModuleType?: string | null;
+    terraformFiles?: string[];
+  }): Promise<string> {
+    const systemPrompt = this.getSystemPrompt(sessionContext);
+
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: this.systemPrompt },
+        { role: 'system', content: systemPrompt },
         ...messages
       ],
       temperature: 0.7,

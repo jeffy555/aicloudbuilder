@@ -275,6 +275,80 @@ export class MCPClientManager {
     }
   }
 
+  async scanRepositoryFiles(
+    provider: MCPProvider,
+    repoName: string,
+    branch: string = 'main'
+  ): Promise<{ path: string; content: string }[]> {
+    try {
+      if (provider === 'github') {
+        const octokit = new Octokit({
+          auth: process.env.GITHUB_TOKEN,
+        });
+
+        const owner = process.env.GITHUB_OWNER || '';
+
+        try {
+          const { data: tree } = await octokit.rest.git.getTree({
+            owner,
+            repo: repoName,
+            tree_sha: branch,
+            recursive: 'true',
+          });
+
+          const tfFiles = tree.tree.filter(
+            (item) => item.path?.endsWith('.tf') && item.type === 'blob'
+          );
+
+          const fileContents = await Promise.all(
+            tfFiles.map(async (file) => {
+              if (!file.path) return null;
+
+              try {
+                const { data } = await octokit.rest.repos.getContent({
+                  owner,
+                  repo: repoName,
+                  path: file.path,
+                  ref: branch,
+                });
+
+                if ('content' in data && data.content) {
+                  const content = Buffer.from(data.content, 'base64').toString('utf-8');
+                  return { path: file.path, content };
+                }
+                return null;
+              } catch (error) {
+                console.error(`Error reading file ${file.path}:`, error);
+                return null;
+              }
+            })
+          );
+
+          return fileContents.filter((f): f is { path: string; content: string } => f !== null);
+        } catch (error: any) {
+          if (error.status === 409 || error.message?.includes('Git Repository is empty')) {
+            console.log(`Repository ${repoName} is empty`);
+            return [];
+          }
+          throw error;
+        }
+      } else {
+        // Azure DevOps - MCP server limitations
+        // The Azure DevOps MCP server does not provide file content reading tools
+        // Unlike GitHub's MCP which has get_file_contents, Azure DevOps MCP only supports:
+        // - Repository listing
+        // - Branch/PR management
+        // - No direct file content access
+        console.log('Azure DevOps MCP does not support file content reading. Repository scanning unavailable for Azure DevOps.');
+        console.log('Users with Azure DevOps repos will need to manually configure cloud provider and module type.');
+        return [];
+      }
+    } catch (error) {
+      console.error(`Error scanning repository ${repoName}:`, error);
+      throw error;
+    }
+  }
+
   async cleanup() {
     const entries = Array.from(this.clients.entries());
     for (const [key, { client, process: childProcess }] of entries) {
