@@ -21,12 +21,16 @@ The platform supports a structured seven-step workflow:
 3.  **Repository Selection**: Option to choose or create a repository, with automatic scanning for existing Terraform configurations to adapt the workflow.
 4.  **Cloud Provider Selection**: Selection among Azure, AWS, or GCP.
 5.  **Module Approach Selection**: Choose from Child Module, Standalone Root Module, or Aggregated Root Module for Terraform generation, with specific validation rules for each (e.g., Child Modules generate `resource` blocks and are organized by resource type in folders).
-6.  **Backend Configuration** (Root Modules Only): Configure Terraform backend for state management. Users can choose to:
-    -   **Create with Defaults**: Auto-generate backend.tf with sensible defaults (storage account, resource group, container, key file)
-    -   **Skip Backend**: Use local state management (not recommended for production)
-    -   **Validate Existing**: Validate existing backend.tf configuration (Azure + GitHub only)
+6.  **Backend Configuration** (Root Modules Only): Configure Terraform backend for state management. The system now features automatic backend detection and provisioning:
+    -   **Automatic Detection**: Scans repository for existing backend.tf during repository selection
+    -   **Auto-Validation** (Azure + GitHub): If backend.tf exists, automatically validates that all Azure resources (resource group, storage account, container) exist using Azure MCP
+    -   **Auto-Creation** (Azure only): If backend.tf doesn't exist and Azure is the cloud provider, automatically provisions real Azure resources in the correct order:
+        1. Resource Group (e.g., `terraform-state-rg`)
+        2. Storage Account (e.g., `tfstate12345678`)
+        3. Blob Container (e.g., `tfstate`)
+    -   **Manual Options** (AWS/GCP or fallback): For non-Azure clouds or if auto-actions fail, shows manual options to create, skip, or validate
     
-    This step is skipped for child modules, which inherit backend configuration from their parent. Backend configuration is validated/created before Terraform generation, with workflow gating that prevents generation until backend is properly configured or explicitly declined.
+    This step is skipped for child modules, which inherit backend configuration from their parent. The generated backend.tf references actual provisioned Azure resources, allowing users to run `terraform init` immediately after commit. Backend configuration is validated/created before Terraform generation, with workflow gating that prevents generation until backend is properly configured or explicitly declined.
 7.  **Terraform Generation**: Natural language description for infrastructure. Generated files are organized into separate files:
     -   **backend.tf**: Backend configuration (if configured in step 6)
     -   **provider.tf**: Provider configuration and version requirements
