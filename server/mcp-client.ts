@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { Octokit } from "@octokit/rest";
 
 export type MCPProvider = 'github' | 'azure';
+export type MCPServerType = 'devops' | 'resources';
 
 interface MCPClientConfig {
   command: string;
@@ -14,7 +15,7 @@ interface MCPClientConfig {
 export class MCPClientManager {
   private clients: Map<string, { client: Client; process: ChildProcess }> = new Map();
 
-  private getConfig(provider: MCPProvider): MCPClientConfig {
+  private getConfig(provider: MCPProvider, serverType: MCPServerType = 'devops'): MCPClientConfig {
     if (provider === 'github') {
       return {
         command: 'npx',
@@ -23,8 +24,18 @@ export class MCPClientManager {
           GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_TOKEN || '',
         }
       };
+    } else if (provider === 'azure' && serverType === 'resources') {
+      // Azure MCP Server for resource management (storage accounts, etc.)
+      return {
+        command: 'npx',
+        args: ['-y', '@azure/mcp@latest'],
+        env: {
+          // Uses Azure CLI authentication by default
+          // Or can use AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID, etc.
+        }
+      };
     } else {
-      // Azure DevOps
+      // Azure DevOps MCP Server for repository operations
       return {
         command: 'npx',
         args: [
@@ -42,16 +53,16 @@ export class MCPClientManager {
     }
   }
 
-  async getClient(provider: MCPProvider): Promise<Client> {
-    const clientKey = provider;
+  async getClient(provider: MCPProvider, serverType: MCPServerType = 'devops'): Promise<Client> {
+    const clientKey = `${provider}-${serverType}`;
     
     if (this.clients.has(clientKey)) {
       return this.clients.get(clientKey)!.client;
     }
 
-    const config = this.getConfig(provider);
+    const config = this.getConfig(provider, serverType);
     const client = new Client({
-      name: `ai-devops-${provider}`,
+      name: `ai-devops-${provider}-${serverType}`,
       version: '1.0.0',
     }, {
       capabilities: {}
@@ -346,6 +357,171 @@ export class MCPClientManager {
     } catch (error) {
       console.error(`Error scanning repository ${repoName}:`, error);
       throw error;
+    }
+  }
+
+  // Azure Resource Management via Azure MCP Server
+  async validateAzureStorageAccount(storageAccountName: string, resourceGroupName: string): Promise<{
+    exists: boolean;
+    location?: string;
+    error?: string;
+  }> {
+    try {
+      const client = await this.getClient('azure', 'resources');
+      
+      // Use Azure MCP Server to check if storage account exists
+      const result = await client.callTool({
+        name: 'azure_list_storage_accounts',
+        arguments: {}
+      });
+
+      // Robustly parse MCP response - handle text, JSON, or multiple content items
+      const content = result.content as any[];
+      if (!content || content.length === 0) {
+        throw new Error('No content returned from Azure MCP server');
+      }
+
+      let storageAccounts: any[] = [];
+      
+      // Iterate through all content items and parse each
+      for (const item of content) {
+        if (item.type === 'text' && item.text) {
+          try {
+            const parsed = JSON.parse(item.text);
+            storageAccounts = storageAccounts.concat(Array.isArray(parsed) ? parsed : [parsed]);
+          } catch (parseError) {
+            console.warn('Failed to parse text content as JSON:', item.text);
+          }
+        } else if (item.type === 'application/json' && item.data) {
+          const parsed = typeof item.data === 'string' ? JSON.parse(item.data) : item.data;
+          storageAccounts = storageAccounts.concat(Array.isArray(parsed) ? parsed : [parsed]);
+        }
+      }
+
+      // Check if our storage account exists
+      const account = storageAccounts.find((sa: any) => 
+        sa.name === storageAccountName && 
+        (sa.resourceGroup === resourceGroupName || sa.resource_group === resourceGroupName)
+      );
+
+      if (account) {
+        return {
+          exists: true,
+          location: account.location
+        };
+      }
+
+      return { exists: false };
+    } catch (error: any) {
+      console.error(`Error validating storage account ${storageAccountName}:`, error);
+      // Don't mask real errors as "not found"
+      throw new Error(`Failed to validate storage account: ${error.message || 'Unknown error'}`);
+    }
+  }
+
+  async validateAzureContainer(
+    storageAccountName: string, 
+    resourceGroupName: string,
+    containerName: string
+  ): Promise<{
+    exists: boolean;
+    error?: string;
+  }> {
+    try {
+      const client = await this.getClient('azure', 'resources');
+      
+      // Use Azure MCP Server to list containers in the storage account
+      // Note: Requires both storage_account_name AND resource_group_name
+      const result = await client.callTool({
+        name: 'azure_list_blob_containers',
+        arguments: {
+          storage_account_name: storageAccountName,
+          resource_group_name: resourceGroupName
+        }
+      });
+
+      // Robustly parse MCP response - handle text, JSON, or multiple content items
+      const content = result.content as any[];
+      if (!content || content.length === 0) {
+        throw new Error('No content returned from Azure MCP server');
+      }
+
+      let containers: any[] = [];
+      
+      // Iterate through all content items and parse each
+      for (const item of content) {
+        if (item.type === 'text' && item.text) {
+          try {
+            const parsed = JSON.parse(item.text);
+            containers = containers.concat(Array.isArray(parsed) ? parsed : [parsed]);
+          } catch (parseError) {
+            console.warn('Failed to parse text content as JSON:', item.text);
+          }
+        } else if (item.type === 'application/json' && item.data) {
+          const parsed = typeof item.data === 'string' ? JSON.parse(item.data) : item.data;
+          containers = containers.concat(Array.isArray(parsed) ? parsed : [parsed]);
+        }
+      }
+
+      const containerExists = containers.some((c: any) => c.name === containerName);
+      return { exists: containerExists };
+    } catch (error: any) {
+      console.error(`Error validating container ${containerName}:`, error);
+      // Don't mask real errors as "not found"
+      throw new Error(`Failed to validate container: ${error.message || 'Unknown error'}`);
+    }
+  }
+
+  async createAzureStorageAccount(
+    storageAccountName: string,
+    resourceGroupName: string,
+    location: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const client = await this.getClient('azure', 'resources');
+      
+      await client.callTool({
+        name: 'azure_create_storage_account',
+        arguments: {
+          name: storageAccountName,
+          resource_group: resourceGroupName,
+          location: location,
+          sku: 'Standard_LRS'
+        }
+      });
+
+      return { success: true };
+    } catch (error: any) {
+      console.error(`Error creating storage account:`, error);
+      return {
+        success: false,
+        error: error.message || 'Failed to create storage account'
+      };
+    }
+  }
+
+  async createAzureContainer(
+    storageAccountName: string,
+    containerName: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const client = await this.getClient('azure', 'resources');
+      
+      await client.callTool({
+        name: 'azure_create_blob_container',
+        arguments: {
+          storage_account_name: storageAccountName,
+          container_name: containerName
+        }
+      });
+
+      return { success: true };
+    } catch (error: any) {
+      console.error(`Error creating container:`, error);
+      return {
+        success: false,
+        error: error.message || 'Failed to create container'
+      };
     }
   }
 
