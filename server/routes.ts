@@ -36,6 +36,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.patch("/api/sessions/:id", async (req, res) => {
     try {
       const parsed = insertSessionSchema.partial().parse(req.body);
+      
+      // Workflow gating: advance to backend_configuration after module approach is selected
+      if (parsed.moduleApproach && !parsed.workflowStep) {
+        parsed.workflowStep = 'backend_configuration';
+      }
+      
       const session = await storage.updateSession(req.params.id, parsed);
       res.json(session);
     } catch (error) {
@@ -298,6 +304,133 @@ Avoid creating structured breakdowns or lists unless specifically asked.`;
     }
   });
 
+  // Configure/validate backend for Terraform
+  app.post("/api/sessions/:id/configure-backend", async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+      const { action, backendConfig } = req.body; // action: 'validate' | 'create' | 'decline'
+      
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      // Scenario 1: User declines backend
+      if (action === 'decline') {
+        await storage.updateSession(sessionId, {
+          backendDeclined: 'true',
+          backendValidated: 'skipped',
+          workflowStep: 'terraform_generation'
+        });
+        return res.json({ 
+          status: 'declined',
+          message: 'Backend configuration skipped. Terraform will use local state management.'
+        });
+      }
+
+      // Scenario 2: Existing backend - validate only
+      if (session.hasBackend === 'true' && action === 'validate') {
+        if (!session.backendStorageAccount || !session.backendResourceGroup || !session.backendContainer) {
+          return res.status(400).json({ error: 'Backend configuration incomplete in session' });
+        }
+
+        try {
+          // Validate storage account exists
+          const storageValidation = await mcpClient.validateAzureStorageAccount(
+            session.backendStorageAccount,
+            session.backendResourceGroup
+          );
+
+          if (!storageValidation.exists) {
+            return res.json({
+              status: 'validation_failed',
+              error: `Storage account "${session.backendStorageAccount}" not found in resource group "${session.backendResourceGroup}"`,
+              suggestion: 'Create the storage account or update backend configuration'
+            });
+          }
+
+          // Validate container exists
+          const containerValidation = await mcpClient.validateAzureContainer(
+            session.backendStorageAccount,
+            session.backendResourceGroup,
+            session.backendContainer
+          );
+
+          if (!containerValidation.exists) {
+            return res.json({
+              status: 'validation_failed',
+              error: `Container "${session.backendContainer}" not found in storage account "${session.backendStorageAccount}"`,
+              suggestion: 'Create the container or update backend configuration'
+            });
+          }
+
+          // Validation passed
+          await storage.updateSession(sessionId, {
+            backendValidated: 'true',
+            backendLocation: storageValidation.location,
+            workflowStep: 'terraform_generation'
+          });
+
+          return res.json({
+            status: 'validated',
+            message: 'Backend configuration validated successfully',
+            details: {
+              storageAccount: session.backendStorageAccount,
+              resourceGroup: session.backendResourceGroup,
+              container: session.backendContainer,
+              location: storageValidation.location
+            }
+          });
+
+        } catch (error: any) {
+          console.error('Backend validation error:', error);
+          return res.json({
+            status: 'validation_error',
+            error: error.message || 'Failed to validate backend configuration',
+            suggestion: 'Check Azure CLI authentication and permissions'
+          });
+        }
+      }
+
+      // Scenario 3: Missing backend - create with defaults or provided config
+      if (action === 'create') {
+        // Use provided config or generate sensible defaults
+        const defaults = {
+          storageAccount: backendConfig?.storageAccount || `tfstate${Date.now().toString().slice(-8)}`,
+          resourceGroup: backendConfig?.resourceGroup || 'terraform-state-rg',
+          container: backendConfig?.container || 'tfstate',
+          location: backendConfig?.location || 'eastus',
+          stateKey: backendConfig?.stateKey || 'terraform.tfstate'
+        };
+
+        // Update session with backend configuration
+        await storage.updateSession(sessionId, {
+          hasBackend: 'true',
+          backendType: 'azurerm',
+          backendStorageAccount: defaults.storageAccount,
+          backendResourceGroup: defaults.resourceGroup,
+          backendContainer: defaults.container,
+          backendLocation: defaults.location,
+          backendStateKey: defaults.stateKey,
+          backendValidated: 'pending',
+          workflowStep: 'terraform_generation'
+        });
+
+        return res.json({
+          status: 'configured',
+          message: 'Backend configuration set. Resources will be created during Terraform apply.',
+          details: defaults
+        });
+      }
+
+      res.status(400).json({ error: 'Invalid action. Use: validate, create, or decline' });
+
+    } catch (error: any) {
+      console.error('Error configuring backend:', error);
+      res.status(500).json({ error: 'Failed to configure backend' });
+    }
+  });
+
   // Generate Terraform files
   app.post("/api/sessions/:id/generate-terraform", async (req, res) => {
     try {
@@ -310,11 +443,39 @@ Avoid creating structured breakdowns or lists unless specifically asked.`;
         return res.status(404).json({ error: 'Session not found' });
       }
 
+      // Workflow gating: ensure backend configuration step has been completed
+      if (session.moduleApproach && session.moduleApproach !== 'child-module') {
+        // Root modules must have backend configured (validated, created, or declined)
+        const backendConfigured = session.backendValidated === 'true' ||     // Existing backend validated
+                                  session.backendValidated === 'pending' ||  // New backend configured (to be created)
+                                  session.backendValidated === 'skipped' ||  // User declined backend
+                                  session.backendDeclined === 'true';        // Alternative decline tracking
+        
+        if (!backendConfigured) {
+          return res.status(400).json({ 
+            error: 'Backend configuration required before generating Terraform. Please configure or decline backend setup.',
+            requiresBackendConfiguration: true
+          });
+        }
+      }
+
+      // Prepare backend configuration
+      const backendConfig = session.hasBackend === 'true' ? {
+        hasBackend: true,
+        backendType: session.backendType || undefined,
+        storageAccount: session.backendStorageAccount || undefined,
+        resourceGroup: session.backendResourceGroup || undefined,
+        container: session.backendContainer || undefined,
+        stateKey: session.backendStateKey || undefined,
+        location: session.backendLocation || undefined,
+      } : { hasBackend: false };
+
       // Generate Terraform files with context
       const result = await openaiService.generateTerraform(
         description, 
         session.cloudProvider, 
-        session.moduleApproach
+        session.moduleApproach,
+        backendConfig
       );
 
       // Validate child module structure

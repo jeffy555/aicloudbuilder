@@ -107,10 +107,88 @@ Keep responses conversational and helpful. Always confirm actions before they're
     return completion.choices[0]?.message?.content || '';
   }
 
+  private generateBackendTf(backendConfig: {
+    backendType?: string;
+    storageAccount?: string;
+    resourceGroup?: string;
+    container?: string;
+    stateKey?: string;
+  }): string {
+    if (backendConfig.backendType === 'azurerm') {
+      return `terraform {
+  backend "azurerm" {
+    resource_group_name  = "${backendConfig.resourceGroup || 'terraform-state-rg'}"
+    storage_account_name = "${backendConfig.storageAccount || 'tfstate'}"
+    container_name       = "${backendConfig.container || 'tfstate'}"
+    key                  = "${backendConfig.stateKey || 'terraform.tfstate'}"
+    use_azuread_auth     = true
+  }
+}`;
+    }
+    return '';
+  }
+
+  private generateProviderTf(cloudProvider: string): string {
+    if (cloudProvider === 'azure') {
+      return `terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}`;
+    } else if (cloudProvider === 'aws') {
+      return `terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}`;
+    } else if (cloudProvider === 'gcp') {
+      return `terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "google" {
+  project = var.project_id
+  region  = var.region
+}`;
+    }
+    return '';
+  }
+
   async generateTerraform(
     description: string, 
     cloudProvider: string | null, 
-    moduleApproach: string | null
+    moduleApproach: string | null,
+    backendConfig?: {
+      hasBackend: boolean;
+      backendType?: string;
+      storageAccount?: string;
+      resourceGroup?: string;
+      container?: string;
+      stateKey?: string;
+      location?: string;
+    }
   ): Promise<{
     files: Array<{ path: string; content: string }>;
   }> {
@@ -179,23 +257,27 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       // Standalone root modules use flat structure
       const prompt = `Generate Terraform standalone root module for ${cloudName} based on this description: "${description}"
 
-This is a STANDALONE ROOT MODULE. Generate a complete, self-contained configuration that:
-- Defines all resources needed for this infrastructure using "resource" blocks
-- Includes provider configuration
-- Uses variables for customization
-- Is ready to be applied directly with terraform apply
+This is a STANDALONE ROOT MODULE. Generate concise, production-ready configuration with sensible defaults:
+- Use opinionated resource names (don't ask user for names, generate appropriate ones)
+- Infer reasonable configurations from the description
+- Define all resources using "resource" blocks
+- Create variables ONLY for values that truly need customization (regions, sizes, not names)
+- Use consistent naming patterns (e.g., "my-resource-group", "my-storage-account")
+
+CRITICAL: DO NOT include provider configuration or terraform blocks in main.tf - those will be in separate files.
 
 Please provide files:
-1. main.tf - Provider configuration and resource definitions
-2. variables.tf - Variable declarations
-3. terraform.tfvars - Variable values
+1. main.tf - Resource definitions ONLY (no provider blocks, no terraform blocks)
+2. variables.tf - Variable declarations (minimal, only for customizable values)
+3. terraform.tfvars - Variable values with sensible defaults
+4. outputs.tf - Outputs for important resource attributes (optional but recommended)
 
 Format your response as JSON with a "files" array. Each file has "path" and "content" keys.`;
 
       const completion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: [
-          { role: 'system', content: 'You are a Terraform expert. Generate well-structured, production-ready standalone root modules with provider configuration and resource definitions.' },
+          { role: 'system', content: 'You are a Terraform expert. Generate concise, production-ready configurations with opinionated defaults. Avoid over-parameterization. Generate sensible resource names without prompting the user.' },
           { role: 'user', content: prompt }
         ],
         temperature: 0.3,
@@ -206,31 +288,51 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       const response = completion.choices[0]?.message?.content || '{}';
       const parsed = JSON.parse(response);
       
+      // Add backend.tf and provider.tf for root modules
+      const allFiles = [...(parsed.files || [])];
+      
+      if (cloudProvider) {
+        allFiles.unshift({
+          path: 'provider.tf',
+          content: this.generateProviderTf(cloudProvider)
+        });
+      }
+      
+      if (backendConfig?.hasBackend && backendConfig.backendType) {
+        allFiles.unshift({
+          path: 'backend.tf',
+          content: this.generateBackendTf(backendConfig)
+        });
+      }
+      
       return {
-        files: parsed.files || []
+        files: allFiles
       };
     } else if (moduleApproach === 'aggregated-root') {
       // Aggregated root modules use module blocks to call child modules
       const prompt = `Generate Terraform aggregated root module for ${cloudName} based on this description: "${description}"
 
-This is an AGGREGATED ROOT MODULE. Generate a root module that:
-- Uses "module" blocks to call child modules (assume they exist in subfolders)
-- Includes provider configuration
-- Passes variables to child modules
-- Aggregates outputs from child modules
-- Coordinates the overall infrastructure
+This is an AGGREGATED ROOT MODULE. Generate concise configuration with opinionated defaults:
+- Use "module" blocks to call child modules (assume they exist in subfolders)
+- Use sensible module names and paths
+- Pass variables to child modules with reasonable defaults
+- Aggregate outputs from child modules
+- Minimal parameterization - only variables that truly need customization
+
+CRITICAL: DO NOT include provider configuration or terraform blocks in main.tf - those will be in separate files.
 
 Please provide files:
-1. main.tf - Provider configuration and module calls
-2. variables.tf - Variable declarations
-3. terraform.tfvars - Variable values
+1. main.tf - Module calls ONLY (no provider blocks, no terraform blocks)
+2. variables.tf - Variable declarations (minimal)
+3. terraform.tfvars - Variable values with sensible defaults
+4. outputs.tf - Aggregated outputs from child modules
 
 Format your response as JSON with a "files" array. Each file has "path" and "content" keys.`;
 
       const completion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: [
-          { role: 'system', content: 'You are a Terraform expert. Generate well-structured aggregated root modules that orchestrate multiple child modules using module blocks.' },
+          { role: 'system', content: 'You are a Terraform expert. Generate concise aggregated root modules with opinionated defaults. Avoid asking users for every detail.' },
           { role: 'user', content: prompt }
         ],
         temperature: 0.3,
@@ -241,8 +343,25 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       const response = completion.choices[0]?.message?.content || '{}';
       const parsed = JSON.parse(response);
       
+      // Add backend.tf and provider.tf for root modules
+      const allFiles = [...(parsed.files || [])];
+      
+      if (cloudProvider) {
+        allFiles.unshift({
+          path: 'provider.tf',
+          content: this.generateProviderTf(cloudProvider)
+        });
+      }
+      
+      if (backendConfig?.hasBackend && backendConfig.backendType) {
+        allFiles.unshift({
+          path: 'backend.tf',
+          content: this.generateBackendTf(backendConfig)
+        });
+      }
+      
       return {
-        files: parsed.files || []
+        files: allFiles
       };
     } else {
       // Default fallback

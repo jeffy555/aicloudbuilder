@@ -16,7 +16,8 @@ export const sessions = pgTable("sessions", {
   repositoryName: text("repository_name"),
   cloudProvider: text("cloud_provider"), // 'azure' | 'aws' | 'gcp' | null
   moduleApproach: text("module_approach"), // 'child-module' | 'standalone-root' | 'aggregated-root' | null
-  currentStep: text("current_step").notNull().default('1'), // '1' | '2' | '3' | '4' | '5' | '6'
+  currentStep: text("current_step").notNull().default('1'), // '1' | '2' | '3' | '4' | '5' | '6' | '7'
+  workflowStep: text("workflow_step").notNull().default('landing'), // 'landing' | 'provider_selection' | 'repository_selection' | 'cloud_provider_selection' | 'module_approach_selection' | 'backend_configuration' | 'terraform_generation'
   isExistingRepo: text("is_existing_repo"), // 'true' | 'false' | null (null = not scanned yet)
   detectedCloudProvider: text("detected_cloud_provider"), // 'azure' | 'aws' | 'gcp' | null
   detectedModuleType: text("detected_module_type"), // 'child' | 'root' | 'empty' | null
@@ -29,7 +30,8 @@ export const sessions = pgTable("sessions", {
   backendContainer: text("backend_container"), // Azure container name or AWS S3 bucket
   backendStateKey: text("backend_state_key"), // State file key/path
   backendLocation: text("backend_location"), // Azure location for storage account
-  backendValidated: text("backend_validated"), // 'true' | 'false' | 'pending' | null
+  backendValidated: text("backend_validated"), // 'true' | 'false' | 'pending' | 'skipped' | null
+  backendDeclined: text("backend_declined"), // 'true' | 'false' | null (user chose to skip backend)
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
