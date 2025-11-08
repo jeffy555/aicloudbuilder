@@ -1,9 +1,63 @@
+export interface BackendConfiguration {
+  hasBackend: boolean;
+  backendType: 'azurerm' | 'aws' | 'gcs' | null;
+  storageAccountName?: string;
+  resourceGroupName?: string;
+  containerName?: string;
+  stateFileKey?: string;
+}
+
 export interface TerraformAnalysis {
   cloudProvider: 'azure' | 'aws' | 'gcp' | null;
   moduleType: 'child' | 'root' | 'empty';
   hasResources: boolean;
   hasModules: boolean;
   providerBlocks: string[];
+  backend: BackendConfiguration;
+}
+
+function parseBackendConfiguration(files: { path: string; content: string }[]): BackendConfiguration {
+  const backend: BackendConfiguration = {
+    hasBackend: false,
+    backendType: null,
+  };
+
+  for (const file of files) {
+    if (!file.path.endsWith('.tf')) continue;
+
+    const content = file.content;
+
+    // Check for terraform backend block
+    const backendMatch = content.match(/terraform\s*\{[\s\S]*?backend\s+"([^"]+)"\s*\{([\s\S]*?)\}/m);
+    if (backendMatch) {
+      backend.hasBackend = true;
+      const backendTypeRaw = backendMatch[1];
+      const backendBody = backendMatch[2];
+
+      if (backendTypeRaw === 'azurerm') {
+        backend.backendType = 'azurerm';
+        
+        // Extract Azure backend parameters
+        const storageAccountMatch = backendBody.match(/storage_account_name\s*=\s*"([^"]+)"/);
+        const resourceGroupMatch = backendBody.match(/resource_group_name\s*=\s*"([^"]+)"/);
+        const containerMatch = backendBody.match(/container_name\s*=\s*"([^"]+)"/);
+        const keyMatch = backendBody.match(/key\s*=\s*"([^"]+)"/);
+
+        if (storageAccountMatch) backend.storageAccountName = storageAccountMatch[1];
+        if (resourceGroupMatch) backend.resourceGroupName = resourceGroupMatch[1];
+        if (containerMatch) backend.containerName = containerMatch[1];
+        if (keyMatch) backend.stateFileKey = keyMatch[1];
+      } else if (backendTypeRaw === 's3') {
+        backend.backendType = 'aws';
+      } else if (backendTypeRaw === 'gcs') {
+        backend.backendType = 'gcs';
+      }
+      
+      break; // Found backend, no need to continue
+    }
+  }
+
+  return backend;
 }
 
 export function analyzeTerraformFiles(files: { path: string; content: string }[]): TerraformAnalysis {
@@ -84,11 +138,15 @@ export function analyzeTerraformFiles(files: { path: string; content: string }[]
     moduleType = hasModules ? 'root' : 'root';
   }
 
+  // Parse backend configuration
+  const backend = parseBackendConfiguration(files);
+
   return {
     cloudProvider,
     moduleType,
     hasResources,
     hasModules,
     providerBlocks: Array.from(providerBlocks),
+    backend,
   };
 }

@@ -265,6 +265,13 @@ Avoid creating structured breakdowns or lists unless specifically asked.`;
         detectedCloudProvider: analysis.cloudProvider,
         detectedModuleType: analysis.moduleType,
         detectedTerraformFiles: files.map(f => f.path),
+        // Backend configuration tracking
+        hasBackend: analysis.backend.hasBackend ? 'true' : 'false',
+        backendType: analysis.backend.backendType,
+        backendStorageAccount: analysis.backend.storageAccountName,
+        backendResourceGroup: analysis.backend.resourceGroupName,
+        backendContainer: analysis.backend.containerName,
+        backendStateKey: analysis.backend.stateFileKey,
       };
 
       if (analysis.cloudProvider) {
@@ -281,6 +288,7 @@ Avoid creating structured breakdowns or lists unless specifically asked.`;
         hasResources: analysis.hasResources,
         hasModules: analysis.hasModules,
         providerBlocks: analysis.providerBlocks,
+        backend: analysis.backend,
       };
 
       res.json(result);

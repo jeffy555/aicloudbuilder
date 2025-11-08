@@ -21,6 +21,15 @@ export const sessions = pgTable("sessions", {
   detectedCloudProvider: text("detected_cloud_provider"), // 'azure' | 'aws' | 'gcp' | null
   detectedModuleType: text("detected_module_type"), // 'child' | 'root' | 'empty' | null
   detectedTerraformFiles: jsonb("detected_terraform_files"), // Array of file paths found
+  // Backend configuration tracking
+  hasBackend: text("has_backend"), // 'true' | 'false' | null
+  backendType: text("backend_type"), // 'azurerm' | 'aws' | 'gcs' | null
+  backendStorageAccount: text("backend_storage_account"), // Azure storage account name
+  backendResourceGroup: text("backend_resource_group"), // Azure resource group name
+  backendContainer: text("backend_container"), // Azure container name or AWS S3 bucket
+  backendStateKey: text("backend_state_key"), // State file key/path
+  backendLocation: text("backend_location"), // Azure location for storage account
+  backendValidated: text("backend_validated"), // 'true' | 'false' | 'pending' | null
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -88,6 +97,17 @@ export const repositorySchema = z.object({
 
 export type Repository = z.infer<typeof repositorySchema>;
 
+export const backendConfigurationSchema = z.object({
+  hasBackend: z.boolean(),
+  backendType: z.enum(['azurerm', 'aws', 'gcs']).nullable(),
+  storageAccountName: z.string().optional(),
+  resourceGroupName: z.string().optional(),
+  containerName: z.string().optional(),
+  stateFileKey: z.string().optional(),
+});
+
+export type BackendConfiguration = z.infer<typeof backendConfigurationSchema>;
+
 export const repositoryScanResultSchema = z.object({
   isExisting: z.boolean(),
   cloudProvider: z.enum(['azure', 'aws', 'gcp']).nullable(),
@@ -96,6 +116,7 @@ export const repositoryScanResultSchema = z.object({
   hasResources: z.boolean(),
   hasModules: z.boolean(),
   providerBlocks: z.array(z.string()),
+  backend: backendConfigurationSchema,
 });
 
 export type RepositoryScanResult = z.infer<typeof repositoryScanResultSchema>;
