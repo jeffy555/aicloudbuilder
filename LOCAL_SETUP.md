@@ -76,6 +76,38 @@ Edit `.env` and add your credentials:
    AZURE_DEVOPS_USER_ID=your-user-id
    ```
 
+#### **Azure Authentication** (Required for Azure backend features)
+
+You have **two options** for Azure authentication:
+
+##### **Option A: Service Principal** (Recommended for production)
+Create a Service Principal in Azure and add to `.env`:
+```
+AZURE_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+AZURE_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AZURE_TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+AZURE_SUBSCRIPTION_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+**To create Service Principal:**
+```bash
+az login
+az ad sp create-for-rbac --name "aicloudbuilder-sp" --role contributor --scopes /subscriptions/{SUBSCRIPTION_ID}
+```
+
+**No `az login` required after setup!** ✅
+
+See [AZURE_AUTHENTICATION.md](./AZURE_AUTHENTICATION.md) for detailed instructions.
+
+##### **Option B: Azure CLI** (For local development)
+Simply login with Azure CLI:
+```bash
+az login
+az account show  # Verify authentication
+```
+
+**Note:** If Service Principal credentials are provided, they take precedence over Azure CLI.
+
 #### **Session Secret** (Required)
 Generate a random secret:
 ```bash
@@ -89,32 +121,25 @@ SESSION_SECRET=<generated-secret>
 
 ---
 
-## ☁️ Step 4: Authenticate with Azure
+## ☁️ Step 4: Azure Authentication (If using Azure features)
 
-The Azure MCP server uses **Azure CLI** for authentication. You must be logged in before starting the application.
+### Option A: Service Principal (Recommended)
 
-### 4.1 Login to Azure CLI
+See [AZURE_AUTHENTICATION.md](./AZURE_AUTHENTICATION.md) for complete setup instructions.
+
+**Quick setup:**
+1. Create Service Principal: `az ad sp create-for-rbac --name "aicloudbuilder-sp" --role contributor`
+2. Add credentials to `.env` file
+3. No `az login` needed!
+
+### Option B: Azure CLI (Local Development)
 
 ```bash
 az login
+az account show  # Verify
 ```
 
-This will open your browser to authenticate. Follow the prompts.
-
-### 4.2 Verify Authentication
-
-```bash
-az account show
-```
-
-You should see your subscription details.
-
-### 4.3 Set Default Subscription (if you have multiple)
-
-```bash
-az account list --output table
-az account set --subscription "<subscription-id>"
-```
+**Note:** Service Principal takes precedence if both are configured.
 
 ---
 

@@ -67,6 +67,7 @@ export function analyzeTerraformFiles(files: { path: string; content: string }[]
   const providerBlocks: Set<string> = new Set();
   const subdirectories: Set<string> = new Set();
   const rootFiles: string[] = [];
+  const resourceTypes: Set<string> = new Set();
 
   for (const file of files) {
     if (!file.path.endsWith('.tf')) continue;
@@ -84,6 +85,7 @@ export function analyzeTerraformFiles(files: { path: string; content: string }[]
       rootFiles.push(file.path);
     }
 
+    // Detect cloud provider from provider blocks
     const providerMatches = content.match(/provider\s+"([^"]+)"/g);
     if (providerMatches) {
       providerMatches.forEach(match => {
@@ -96,6 +98,54 @@ export function analyzeTerraformFiles(files: { path: string; content: string }[]
           } else if (provider === 'aws') {
             cloudProvider = 'aws';
           } else if (provider === 'google') {
+            cloudProvider = 'gcp';
+          }
+        }
+      });
+    }
+
+    // Detect cloud provider from resource types (if not already detected from provider blocks)
+    // Match: resource "azurerm_storage_account" "name" { ... }
+    const resourceTypeMatches = content.match(/resource\s+"([^"]+)"\s+"[^"]+"/g);
+    if (resourceTypeMatches) {
+      resourceTypeMatches.forEach(match => {
+        const resourceType = match.match(/resource\s+"([^"]+)"/)?.[1];
+        if (resourceType) {
+          resourceTypes.add(resourceType);
+          
+          // If cloud provider not yet detected, detect from resource type prefix
+          if (!cloudProvider) {
+            if (resourceType.startsWith('azurerm_') || 
+                resourceType.startsWith('azuread_') || 
+                resourceType.startsWith('azapi_') ||
+                resourceType.startsWith('azurestack_')) {
+              cloudProvider = 'azure';
+            } else if (resourceType.startsWith('aws_')) {
+              cloudProvider = 'aws';
+            } else if (resourceType.startsWith('google_') || 
+                       resourceType.startsWith('google_compute_') ||
+                       resourceType.startsWith('google_storage_') ||
+                       resourceType.startsWith('google_container_')) {
+              cloudProvider = 'gcp';
+            }
+          }
+        }
+      });
+    }
+
+    // Also check for data sources
+    const dataSourceMatches = content.match(/data\s+"([^"]+)"\s+"[^"]+"/g);
+    if (dataSourceMatches) {
+      dataSourceMatches.forEach(match => {
+        const dataSourceType = match.match(/data\s+"([^"]+)"/)?.[1];
+        if (dataSourceType && !cloudProvider) {
+          if (dataSourceType.startsWith('azurerm_') || 
+              dataSourceType.startsWith('azuread_') || 
+              dataSourceType.startsWith('azapi_')) {
+            cloudProvider = 'azure';
+          } else if (dataSourceType.startsWith('aws_')) {
+            cloudProvider = 'aws';
+          } else if (dataSourceType.startsWith('google_')) {
             cloudProvider = 'gcp';
           }
         }

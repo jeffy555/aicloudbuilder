@@ -115,6 +115,15 @@ export const repositoryScanResultSchema = z.object({
   cloudProvider: z.enum(['azure', 'aws', 'gcp']).nullable(),
   moduleType: z.enum(['child', 'root', 'empty']).nullable(),
   terraformFiles: z.array(z.string()),
+  terraformFilesWithContent: z.array(z.object({
+    path: z.string(),
+    content: z.string()
+  })).optional(),
+  existingResources: z.array(z.object({
+    type: z.string(),
+    name: z.string(),
+    file: z.string()
+  })).optional(),
   hasResources: z.boolean(),
   hasModules: z.boolean(),
   providerBlocks: z.array(z.string()),
