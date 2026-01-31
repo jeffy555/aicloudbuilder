@@ -1,0 +1,63 @@
+check_id: CKV_AZURE_33
+check_name: Ensure Storage logging is enabled for Queue service for read, write and delete requests
+resource_types:
+  - azurerm_storage_account
+terraform_attribute: queue_properties.logging
+attribute_type: nested_block
+required_value:
+  delete: true
+  read: true
+  write: true
+  version: "1.0"
+  retention_policy_days: 10
+description: Enables logging for queue service operations (read, write, delete)
+
+remediation_snippet: |
+  queue_properties {
+    logging {
+      delete                = true
+      read                  = true
+      write                 = true
+      version               = "1.0"
+      retention_policy_days = 10
+    }
+  }
+
+complete_example: |
+  resource "azurerm_storage_account" "example" {
+    name                     = "examplestorage"
+    resource_group_name      = azurerm_resource_group.example.name
+    location                 = azurerm_resource_group.example.location
+    account_tier             = "Standard"
+    account_replication_type = "LRS"
+    
+    queue_properties {
+      logging {
+        delete                = true
+        read                  = true
+        write                 = true
+        version               = "1.0"
+        retention_policy_days = 10
+      }
+    }
+  }
+
+tags:
+  - storage
+  - logging
+  - queue
+  - azure
+  - audit
+
+keywords:
+  - queue logging
+  - storage logging
+  - audit logging
+  - queue service
+  - logging configuration
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account#queue_properties
+

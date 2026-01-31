@@ -1,0 +1,53 @@
+check_id: CKV2_AZURE_38
+check_name: Ensure soft-delete is enabled on Azure storage account
+resource_types:
+  - azurerm_storage_account
+terraform_attribute: blob_properties.delete_retention_policy
+attribute_type: nested_block
+required_value:
+  days: 7
+  enabled: true
+description: Enables soft-delete retention policy for blob storage
+
+remediation_snippet: |
+  blob_properties {
+    delete_retention_policy {
+      days    = 7
+      enabled = true
+    }
+  }
+
+complete_example: |
+  resource "azurerm_storage_account" "example" {
+    name                     = "examplestorage"
+    resource_group_name      = azurerm_resource_group.example.name
+    location                 = azurerm_resource_group.example.location
+    account_tier             = "Standard"
+    account_replication_type = "LRS"
+    
+    blob_properties {
+      delete_retention_policy {
+        days    = 7
+        enabled = true
+      }
+    }
+  }
+
+tags:
+  - storage
+  - soft-delete
+  - retention
+  - azure
+  - backup
+
+keywords:
+  - soft delete
+  - delete retention
+  - blob retention
+  - data protection
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account#blob_properties
+

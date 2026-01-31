@@ -1,0 +1,48 @@
+check_id: CKV_AZURE_56
+check_name: Ensure that function apps enables Authentication
+resource_types:
+  - azurerm_function_app
+  - azurerm_linux_function_app
+  - azurerm_windows_function_app
+terraform_attribute: auth_settings.enabled
+attribute_type: nested_block
+required_value: true
+description: Enables authentication for function app
+
+remediation_snippet: |
+  auth_settings {
+    enabled = true
+  }
+
+complete_example: |
+  resource "azurerm_function_app" "example" {
+    name                       = "example-function"
+    location                   = azurerm_resource_group.example.location
+    resource_group_name        = azurerm_resource_group.example.name
+    app_service_plan_id        = azurerm_app_service_plan.example.id
+    storage_account_name       = azurerm_storage_account.example.name
+    storage_account_access_key = azurerm_storage_account.example.primary_access_key
+    
+    auth_settings {
+      enabled = true
+    }
+  }
+
+tags:
+  - function-app
+  - authentication
+  - security
+  - azure
+  - auth
+
+keywords:
+  - authentication
+  - auth settings
+  - function app auth
+  - app authentication
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/function_app#auth_settings
+

@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { useSecretsConfig } from "@/hooks/useSecretsConfig";
 import Header from "@/components/Header";
 import AIMessage from "@/components/AIMessage";
 import UserMessage from "@/components/UserMessage";
@@ -12,11 +13,9 @@ import CreateRepoForm from "@/components/CreateRepoForm";
 import CodeEditor from "@/components/CodeEditor";
 import StepIndicator from "@/components/StepIndicator";
 import ActionButtons from "@/components/ActionButtons";
-import CheckovScanner from "@/components/CheckovScanner";
-import CostAnalyzer from "@/components/CostAnalyzer";
-import RefactorValidator from "@/components/RefactorValidator";
+import ActivityPanel from "@/components/ActivityPanel";
 import { CodeIcon } from "@radix-ui/react-icons";
-import { Cloud, CloudCog, Package, Home, FileText, X } from "lucide-react";
+import { Cloud, CloudCog, Package, Home, FileText, X, RefreshCw, Loader2, Box, Layers, Network, FileCode } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +24,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import type { Session, Message, GeneratedFile, Repository, RepositoryScanResult } from "@shared/schema";
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 type Provider = 'github' | 'azure' | null;
 type CloudProvider = 'azure' | 'aws' | 'gcp' | null;
 type ModuleApproach = 'child-module' | 'standalone-root' | 'aggregated-root' | null;
@@ -35,8 +34,14 @@ export default function TerraformWorkflow() {
   const [, setLocation] = useLocation();
   const [sessionId, setSessionId] = useState<string>('');
   const [currentStep, setCurrentStep] = useState<Step>(1);
+  const [hasInitialized, setHasInitialized] = useState(false);
   const [provider, setProvider] = useState<Provider>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>('');
+  const [childModuleRepoId, setChildModuleRepoId] = useState<string>('');
+  const [childModuleResources, setChildModuleResources] = useState<Array<{ type: string; name: string; description?: string }>>([]);
+  const [childModuleReviewed, setChildModuleReviewed] = useState<boolean>(false);
+  const [resourceValidationResult, setResourceValidationResult] = useState<{ valid: boolean; message?: string; requestedResources?: string[]; availableResources?: string[]; unavailableResources?: string[] } | null>(null);
+  const [resourceDescription, setResourceDescription] = useState<string>('');
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>(null);
   const [moduleApproach, setModuleApproach] = useState<ModuleApproach>(null);
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
@@ -56,15 +61,28 @@ export default function TerraformWorkflow() {
   const [selectedFileToReview, setSelectedFileToReview] = useState<string | null>(null);
   const [filesBeforeGeneration, setFilesBeforeGeneration] = useState<Map<string, string>>(new Map()); // fileName -> fileId
 
-
-  const steps = [
+  // Dynamic steps based on module approach
+  // Corrected Flow: Provider → Repository → Cloud Provider → Module → (for Aggregated: Child Repo → Root Repo → Backend → Resources) → Generate → Review → Activities
+  const steps = moduleApproach === 'aggregated-root' ? [
+    { number: 1, title: 'Provider' },
+    { number: 2, title: 'Cloud Provider' },
+    { number: 3, title: 'Module' },
+    { number: 4, title: 'Child Repo' },
+    { number: 5, title: 'Root Repo' },
+    { number: 6, title: 'Backend' },
+    { number: 7, title: 'Resources' },
+    { number: 8, title: 'Generate' },
+    { number: 9, title: 'Activities' },
+    { number: 10, title: 'Commit' },
+  ] : [
     { number: 1, title: 'Provider' },
     { number: 2, title: 'Repository' },
-    { number: 3, title: 'Cloud' },
+    { number: 3, title: 'Cloud Provider' },
     { number: 4, title: 'Module' },
     { number: 5, title: 'Backend' },
     { number: 6, title: 'Generate' },
     { number: 7, title: 'Review' },
+    { number: 8, title: 'Activities' },
   ];
 
   // Create or restore session on mount
@@ -105,6 +123,9 @@ export default function TerraformWorkflow() {
     initializeSession();
   }, []);
 
+  // Fetch secrets configuration status
+  const { data: config } = useSecretsConfig();
+
   // Fetch messages
   const { data: messages = [] } = useQuery<Message[]>({
     queryKey: ['/api/sessions', sessionId, 'messages'],
@@ -121,15 +142,60 @@ export default function TerraformWorkflow() {
   // Sync currentStep with session.currentStep (only on initial load)
   // This ensures we start from the correct step if page is refreshed
   useEffect(() => {
-    if (session?.currentStep && currentStep === 1) {
-      // Only sync on initial load (when currentStep is still 1)
+    if (session?.currentStep && !hasInitialized && currentStep === 1) {
+      // Only sync on initial load (when currentStep is still 1 and not yet initialized)
       // Handlers will manage step transitions after that
       const stepNum = parseInt(session.currentStep, 10) as Step;
       if (stepNum !== 1) {
         setCurrentStep(stepNum);
       }
+      setHasInitialized(true);
     }
-  }, [session?.currentStep]); // Only sync when session changes, not when currentStep changes
+  }, [session?.currentStep, hasInitialized, currentStep]); // Only sync on initial load
+
+  // Sync currentStep when session.currentStep changes (for backend-driven step updates)
+  // This handles cases where the backend updates the step (e.g., after code generation)
+  useEffect(() => {
+    if (session?.currentStep && hasInitialized) {
+      const sessionStep = parseInt(session.currentStep, 10) as Step;
+      // Only update if session step is different and is a valid step
+      // This allows backend to drive step transitions (e.g., after code generation sets step to 8)
+      if (sessionStep !== currentStep && sessionStep >= 1 && sessionStep <= 10) {
+        console.log(`🔄 Syncing currentStep: ${currentStep} → ${sessionStep} (from session)`);
+        setCurrentStep(sessionStep);
+      }
+    }
+  }, [session?.currentStep, hasInitialized]);
+
+  // Re-fetch child module resources when entering Step 7 if they're empty
+  useEffect(() => {
+    if (currentStep === 7 && moduleApproach === 'aggregated-root' && childModuleResources.length === 0 && childModuleRepoId) {
+      // Re-scan child module to get resources
+      const reScanChildModule = async () => {
+        try {
+          const response = await apiRequest('POST', `/api/sessions/${sessionId}/scan-child-module`, {
+            repositoryId: childModuleRepoId,
+            provider: provider
+          });
+          const result = await response.json();
+          
+          if (result.resources && result.resources.length > 0) {
+            setChildModuleResources(result.resources);
+            console.log('✅ Re-fetched child module resources:', result.resources.length);
+          }
+        } catch (error: any) {
+          console.error('Error re-scanning child module:', error);
+          toast({
+            title: "Warning",
+            description: "Could not re-fetch child module resources. Please go back and re-select the child module repository.",
+            variant: "destructive"
+          });
+        }
+      };
+      
+      reScanChildModule();
+    }
+  }, [currentStep, moduleApproach, childModuleResources.length, childModuleRepoId, sessionId, provider]);
 
   // Load backend values from session when entering step 5 (only once, don't overwrite user edits)
   useEffect(() => {
@@ -150,18 +216,20 @@ export default function TerraformWorkflow() {
   }, [currentStep]); // Only run when step changes, not when session changes
 
   // Fetch repositories
+  // Enable for Step 2 (repository selection for non-aggregated-root), Step 4 (child module repo for aggregated-root), and Step 5 (root module repo for aggregated-root)
   const { data: repositories = [] } = useQuery<Repository[]>({
     queryKey: ['/api/repositories', provider],
-    enabled: !!provider && currentStep === 2,
+    enabled: !!provider && (currentStep === 2 || (currentStep === 4 && moduleApproach === 'aggregated-root') || (currentStep === 5 && moduleApproach === 'aggregated-root')),
   });
 
   // Fetch generated files
-  const { data: generatedFiles = [] } = useQuery<GeneratedFile[]>({
+  const { data: generatedFiles = [], refetch: refetchFiles } = useQuery<GeneratedFile[]>({
     queryKey: ['/api/sessions', sessionId, 'files'],
-    enabled: !!sessionId && currentStep === 7,
+    enabled: !!sessionId && (currentStep === 7 || currentStep === 8 || currentStep === 9 || currentStep === 10),
     refetchOnMount: true,
     refetchOnWindowFocus: false,
-    staleTime: 0, // Always consider data stale to ensure fresh fetch
+    staleTime: 0, // Always refetch to get latest files
+    refetchOnReconnect: false, // Don't refetch on reconnect to prevent reload appearance
   });
 
   // Debug: Log files when they change
@@ -217,9 +285,76 @@ export default function TerraformWorkflow() {
     }
   });
 
+  // Validate aggregated resources mutation
+  const validateResourcesMutation = useMutation({
+    mutationFn: async (description: string) => {
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/validate-aggregated-resources`, {
+        description,
+        childModuleResources: childModuleResources
+      });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setResourceValidationResult(data);
+      if (data.valid) {
+        toast({
+          title: "Validation Successful",
+          description: data.message || "All requested resources are available in the child module.",
+        });
+      }
+    },
+    onError: (error: any) => {
+      console.error('Validation error:', error);
+      let errorMessage = 'Failed to validate resources';
+      let errorData: any = null;
+      
+      if (error?.message) {
+        const match = error.message.match(/^(\d+):\s*(.+)$/);
+        if (match) {
+          const [, status, text] = match;
+          try {
+            errorData = JSON.parse(text);
+            errorMessage = errorData.error || errorMessage;
+          } catch {
+            errorMessage = text;
+          }
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      setResourceValidationResult({
+        valid: false,
+        message: errorMessage,
+        unavailableResources: errorData?.unavailableResources,
+        availableResources: errorData?.availableResources,
+        requestedResources: errorData?.requestedResources
+      });
+      
+      toast({
+        title: "Validation Failed",
+        description: errorMessage,
+        variant: "destructive",
+        duration: 10000
+      });
+    }
+  });
+
   // Generate Terraform mutation
   const generateTerraformMutation = useMutation({
     mutationFn: async (description: string) => {
+      console.log('\n🚀 ========== FRONTEND: Generate Terraform Called ==========');
+      console.log('   Timestamp:', new Date().toISOString());
+      console.log('   Session ID:', sessionId);
+      console.log('   Module approach:', moduleApproach);
+      console.log('   Description:', description);
+      console.log('   Description length:', description?.length || 0);
+      
+      if (!description || description.trim().length === 0) {
+        console.error('❌ CRITICAL: Description is empty!');
+        throw new Error('Description is required');
+      }
+      
       // Store current files before generation to compare later
       const currentFiles = await queryClient.fetchQuery<GeneratedFile[]>({
         queryKey: ['/api/sessions', sessionId, 'files'],
@@ -231,11 +366,27 @@ export default function TerraformWorkflow() {
       setFilesBeforeGeneration(filesMap);
       console.log('📋 Files before generation:', Array.from(filesMap.entries()).map(([name, id]) => `${name}: ${id}`));
       
-      const res = await apiRequest('POST', `/api/sessions/${sessionId}/generate-terraform`, { description });
-      return res.json();
+      // For aggregated-root modules, include child module resources for validation
+      const requestBody: any = { description };
+      if (moduleApproach === 'aggregated-root' && childModuleResources.length > 0) {
+        requestBody.childModuleResources = childModuleResources.map(r => r.type);
+        console.log('📋 Child module resources:', requestBody.childModuleResources);
+      }
+      
+      console.log('📤 Sending request to backend...');
+      console.log('   Request body:', JSON.stringify(requestBody, null, 2));
+      
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/generate-terraform`, requestBody);
+      const result = await res.json();
+      console.log('✅ Backend response received:', result);
+      return result;
     },
     onSuccess: async (data) => {
       console.log('✅ Generation successful, response:', data);
+      
+      // CRITICAL: Refetch session to get updated currentStep from backend
+      console.log('🔄 Refreshing session to sync step...');
+      await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId] });
       
       // CRITICAL: Aggressively invalidate and refetch files to ensure UI shows updated content
       console.log('🔄 Refreshing files in UI...');
@@ -296,7 +447,32 @@ export default function TerraformWorkflow() {
         });
       }
       
-      setCurrentStep(7);
+      // For aggregated-root: Don't advance step here - the button handler will advance after generation
+      // For non-aggregated-root: Advance to Step 7 (Review)
+      if (moduleApproach === 'aggregated-root') {
+        // Don't change step - button handler will advance to Step 8 after generation completes
+        // Force refetch files to ensure UI updates - use multiple strategies
+        console.log('🔄 Refetching files after code generation...');
+        await queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+        await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+        
+        // Also manually refetch using the refetch function
+        const filesResult = await refetchFiles();
+        console.log('📁 Files refetched:', filesResult.data?.length || 0);
+        if (filesResult.data) {
+          filesResult.data.forEach((f, i) => {
+            console.log(`   ${i + 1}. ${f.fileName} (${f.content.length} chars)`);
+          });
+        }
+        
+        console.log('✅ Code generation complete for aggregated-root - button handler will advance to Step 8');
+        // Don't send system message here - button handler will handle navigation
+      } else {
+        // Backend already sets step to 8, so just sync with it
+        // Refetch session to get the updated step from backend
+        await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId] });
+        // The useEffect will sync currentStep to 8 when session updates
+      }
       setScanCompleted(false); // Reset scan state for new files
       toast({
         title: "Success",
@@ -304,7 +480,10 @@ export default function TerraformWorkflow() {
       });
     },
     onError: async (error: any) => {
-      console.error('Generate Terraform error:', error);
+      console.error('\n❌ ========== FRONTEND: Generate Terraform Error ==========');
+      console.error('   Error:', error);
+      console.error('   Error message:', error?.message);
+      console.error('   Error stack:', error?.stack);
       
       // Parse error message from apiRequest format: "500: {...json...}" or "500: error text"
       let errorMessage = 'Failed to generate Terraform files';
@@ -413,8 +592,9 @@ export default function TerraformWorkflow() {
       chatMutation.mutate(`Files committed successfully with message: "${data.commitMessage}"`);
       
       // Navigate to home after a short delay to show the success message
+      // Session is automatically reset on server side, so we can start fresh
       setTimeout(() => {
-        window.location.href = '/';
+        setLocation('/');
       }, 2000);
     },
     onError: (error: any) => {
@@ -429,7 +609,58 @@ export default function TerraformWorkflow() {
 
   // Handle home navigation
   const handleGoHome = () => {
-    window.location.href = '/';
+    setLocation('/');
+  };
+
+  // Handle refresh - reset session and state
+  const handleRefresh = async () => {
+    try {
+      localStorage.removeItem('terraform_workflow_session_id');
+      setSessionId('');
+      setCurrentStep(1);
+      setProvider(null);
+      setSelectedRepo('');
+      setCloudProvider(null);
+      setModuleApproach(null);
+      setBackendConfigured(false);
+      setBackendResourceGroup('');
+      setBackendStorageAccount('');
+      setBackendContainer('');
+      setBackendBucket('');
+      setBackendDynamodbTable('terraform-state-lock');
+      setBackendRegion('us-east-1');
+      setExistingFilesReviewed(false);
+      setExistingFiles([]);
+      setSelectedFileToReview(null);
+      setIsCommitted(false);
+      setScanCompleted(false);
+      setRepositoryScanResult(null);
+      
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions'] });
+      
+      const response = await apiRequest('POST', '/api/sessions');
+      const session = await response.json() as Session;
+      setSessionId(session.id);
+      localStorage.setItem('terraform_workflow_session_id', session.id);
+      
+      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
+        message: 'Welcome! Let\'s start by selecting your repository provider. Choose GitHub or Azure DevOps.' 
+      });
+      
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', session.id, 'messages'] });
+      
+      toast({
+        title: "Refreshed",
+        description: "Started a new session. You can now begin a new Terraform workflow.",
+      });
+    } catch (error: any) {
+      console.error('Failed to refresh:', error);
+      toast({
+        title: "Refresh Failed",
+        description: error.message || "Failed to refresh. Please try again.",
+        variant: "destructive"
+      });
+    }
   };
 
   // Handle continue after reviewing existing files
@@ -477,11 +708,6 @@ export default function TerraformWorkflow() {
       // Ignore errors - pre-warming is optional
     });
     
-    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
-      provider: selectedProvider, 
-      currentStep: '2' 
-    });
-
     const providerName = selectedProvider === 'github' ? 'GitHub' : 'Azure DevOps';
     
     // User confirmation
@@ -489,16 +715,259 @@ export default function TerraformWorkflow() {
       message: `Selected ${providerName}` 
     });
     
-    // System guidance for next step
+    // For aggregated-root: Skip repository selection, go directly to Cloud Provider (Step 2)
+    // For non-aggregated-root: Go to Repository selection (Step 2)
+    // We'll determine this after module selection, so for now, go to Step 2 (which will be Cloud Provider for aggregated, Repository for others)
+    // Actually, let's make it simpler: For aggregated-root, skip repo selection and go to Cloud Provider
+    // For others, go to Repository selection
+    
+    // For now, we'll go to Step 2 which will show Repository selection for non-aggregated-root
+    // But for aggregated-root flow, we need to skip to Cloud Provider
+    // Since we don't know moduleApproach yet, we'll handle repository selection in Step 2
+    // and then after module selection, we'll know if we need to go back or forward
+    
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+      provider: selectedProvider, 
+      currentStep: '2' 
+    });
+    
+    // System guidance for next step - for aggregated-root, this will be Cloud Provider, for others it will be Repository
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
       message: 'Great! Now select an existing repository or create a new one.' 
     });
     
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+    queryClient.invalidateQueries({ queryKey: ['/api/repositories', selectedProvider] });
     setCurrentStep(2);
   };
 
   const handleRepoSelect = async (repoId: string) => {
+    // For Step 2: Repository selection for non-aggregated-root modules
+    if (currentStep === 2 && !moduleApproach) {
+      setSelectedRepo(repoId);
+      const repo = repositories.find(r => r.id === repoId);
+      
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: `Selected repository: ${repo?.name}` 
+      });
+
+      // Scan repository to check for existing Terraform files
+      // First, update session with repository info, then scan
+      try {
+        const repo = repositories.find(r => r.id === repoId);
+        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+          repositoryId: repoId,
+          repositoryName: repo?.name || repoId,
+        });
+        
+        // Use the session-based scan endpoint
+        const scanResponse = await apiRequest('POST', `/api/sessions/${sessionId}/scan-repository`, {});
+        
+        // Check if response is JSON before parsing
+        const contentType = scanResponse.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+          // Response is not JSON, likely HTML error page
+          const text = await scanResponse.text();
+          if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+            throw new Error('Server returned HTML instead of JSON. The scan endpoint may not be available or there was a server error.');
+          }
+          throw new Error(`Unexpected response type: ${contentType}`);
+        }
+        
+        const scanResult = await scanResponse.json();
+        
+        // The scan endpoint returns the result in the correct format already
+        setRepositoryScanResult(scanResult);
+
+        if (scanResult.terraformFiles && scanResult.terraformFiles.length > 0) {
+          const moduleTypeText = scanResult.moduleType === 'child' ? 'child module' :
+                                scanResult.moduleType === 'root' ? 'root module' : 
+                                'configuration';
+          const providerText = scanResult.cloudProvider ? 
+            ` for ${scanResult.cloudProvider.toUpperCase()}` : '';
+
+          // Store existing files for review
+          if (scanResult.terraformFilesWithContent && scanResult.terraformFilesWithContent.length > 0) {
+            setExistingFiles(scanResult.terraformFilesWithContent);
+          } else {
+            setExistingFiles(scanResult.terraformFiles.map(path => ({ path, content: '' })));
+          }
+          setExistingFilesReviewed(false);
+
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+            message: `Found existing ${moduleTypeText}${providerText} with ${scanResult.terraformFiles.length} Terraform files.` 
+          });
+
+          if (scanResult.cloudProvider && !cloudProvider) {
+            await apiRequest('PATCH', `/api/sessions/${sessionId}`, { cloudProvider: scanResult.cloudProvider });
+            setCloudProvider(scanResult.cloudProvider);
+          }
+
+          // Stay on Step 2 to show review - user will click "Continue" after reviewing
+          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+        } else {
+          // New/empty repo - proceed to Cloud Provider selection
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+            message: 'This appears to be a new repository. Let\'s configure it from scratch.' 
+          });
+
+          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
+          setCurrentStep(3);
+          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+            message: 'Perfect! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+          });
+        }
+      } catch (error: any) {
+        console.error('Error scanning repository:', error);
+        
+        // Show user-friendly error message
+        toast({
+          title: "Scan Failed",
+          description: error.message || "Failed to scan repository. Proceeding with new repository setup.",
+          variant: "destructive"
+        });
+        
+        // On error, proceed to Cloud Provider selection (treat as new repository)
+        setRepositoryScanResult({
+          isExisting: false,
+          cloudProvider: null,
+          moduleType: null,
+          terraformFiles: [],
+          hasResources: false,
+          hasModules: false,
+          providerBlocks: [],
+          backend: { hasBackend: false }
+        } as RepositoryScanResult);
+        setExistingFiles([]);
+        setExistingFilesReviewed(true);
+        
+        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
+        setCurrentStep(3);
+        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+          message: 'Unable to scan repository. Proceeding with new repository setup. Now choose your target cloud provider (Azure, AWS, or GCP).' 
+        });
+      }
+
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+      return;
+    }
+    
+    // For aggregated-root modules in Step 4, this is child module repository selection
+    if (moduleApproach === 'aggregated-root' && currentStep === 4 && !childModuleReviewed) {
+      setChildModuleRepoId(repoId);
+      const repo = repositories.find(r => r.id === repoId);
+      
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: `Selected child module repository: ${repo?.name}` 
+      });
+
+      // Scan the child module repository to extract resources
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Scanning child module repository to extract available resources...' 
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+
+      try {
+        // Call API to scan child module and extract resources
+        const response = await apiRequest('POST', `/api/sessions/${sessionId}/scan-child-module`, {
+          repositoryId: repoId,
+          provider: provider
+        });
+        const result = await response.json();
+        
+        if (result.resources && result.resources.length > 0) {
+          setChildModuleResources(result.resources);
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+            message: `Found ${result.resources.length} available resource type(s) in the child module. Please review them before proceeding.` 
+          });
+        } else {
+          toast({
+            title: "No Resources Found",
+            description: "The child module repository does not contain any Terraform resources.",
+            variant: "destructive"
+          });
+          setChildModuleResources([]);
+        }
+      } catch (error: any) {
+        console.error('Error scanning child module:', error);
+        toast({
+          title: "Scan Failed",
+          description: error.message || "Failed to scan child module repository.",
+          variant: "destructive"
+        });
+      }
+      
+      return;
+    }
+    
+    // For aggregated-root modules in Step 5, this is root module repository selection
+    // Scan it to check if backend exists (but don't show file review)
+    if (moduleApproach === 'aggregated-root' && currentStep === 5) {
+      setSelectedRepo(repoId);
+      const repo = repositories.find(r => r.id === repoId);
+      
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+        repositoryId: repoId,
+        repositoryName: repo?.name,
+      });
+
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: `Selected root module repository: ${repo?.name}` 
+      });
+
+      // Scan the repository to check if backend exists (for new vs existing repo logic)
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Checking repository for existing backend configuration...' 
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+
+      try {
+        const scanResult = await scanRepositoryMutation.mutateAsync();
+        setRepositoryScanResult(scanResult);
+        
+        // Check if backend exists in the scan result
+        const hasBackend = scanResult.backend && scanResult.backend.hasBackend;
+        
+        if (hasBackend) {
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+            message: 'Found existing backend configuration in the repository.' 
+          });
+        } else {
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+            message: 'This is a new repository. Backend configuration will be required before code generation.' 
+          });
+        }
+      } catch (error: any) {
+        // If scan fails, assume it's a new repo (backend required)
+        console.warn('Repository scan failed, assuming new repository:', error);
+        // Set scan result with no backend to indicate new repository
+        setRepositoryScanResult({
+          isExisting: false,
+          cloudProvider: null,
+          moduleType: null,
+          terraformFiles: [],
+          hasResources: false,
+          hasModules: false,
+          providerBlocks: [],
+          backend: { hasBackend: false }
+        } as RepositoryScanResult);
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+          message: 'Unable to scan repository. Backend configuration will be required.' 
+        });
+      }
+      
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+      
+      return; // Show the continue button
+    }
+    
+    // Normal repository selection (for non-aggregated-root)
     setSelectedRepo(repoId);
     const repo = repositories.find(r => r.id === repoId);
     
@@ -571,7 +1040,84 @@ export default function TerraformWorkflow() {
   };
 
   const handleCreateRepo = async (name: string, description: string) => {
-    await createRepoMutation.mutateAsync({ name, description });
+    const newRepo = await createRepoMutation.mutateAsync({ name, description });
+    
+    // For Step 2: Repository creation for non-aggregated-root modules
+    if (currentStep === 2 && !moduleApproach) {
+      const repoId = (newRepo as any)?.id || name;
+      setSelectedRepo(repoId);
+      
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+        repositoryId: repoId,
+        repositoryName: name,
+      });
+
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: `Created repository: ${name}` 
+      });
+
+      // New repository - no existing files, proceed to Cloud Provider
+      setRepositoryScanResult({
+        isExisting: false,
+        cloudProvider: null,
+        moduleType: null,
+        terraformFiles: [],
+        hasResources: false,
+        hasModules: false,
+        providerBlocks: [],
+        backend: { hasBackend: false }
+      } as RepositoryScanResult);
+      setExistingFiles([]);
+      setExistingFilesReviewed(true);
+
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
+      setCurrentStep(3);
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+      queryClient.invalidateQueries({ queryKey: ['/api/repositories', provider] });
+
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Perfect! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+      });
+      return;
+    }
+    
+    // For aggregated-root modules in Step 5, this is root module repository creation
+    if (moduleApproach === 'aggregated-root' && currentStep === 5) {
+      // Get the created repo ID from the response
+      const repoId = (newRepo as any)?.id || name;
+      setSelectedRepo(repoId);
+      
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+        repositoryId: repoId,
+        repositoryName: name,
+      });
+
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: `Created root module repository: ${name}` 
+      });
+      
+      // New repository - no backend exists, so mark it
+      setRepositoryScanResult({
+        isExisting: false,
+        cloudProvider: null,
+        moduleType: null,
+        terraformFiles: [],
+        hasResources: false,
+        hasModules: false,
+        providerBlocks: [],
+        backend: { hasBackend: false }
+      } as RepositoryScanResult);
+      
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'This is a new repository. Backend configuration will be required before code generation.' 
+      });
+      
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/repositories', provider] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+      
+      return; // Don't proceed with normal flow - just show the continue button
+    }
     
     await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
       repositoryName: name,
@@ -595,11 +1141,6 @@ export default function TerraformWorkflow() {
   const handleCloudProviderSelect = async (selectedCloudProvider: CloudProvider) => {
     setCloudProvider(selectedCloudProvider);
     
-    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
-      cloudProvider: selectedCloudProvider,
-      currentStep: '4' 
-    });
-
     const cloudName = selectedCloudProvider === 'azure' ? 'Microsoft Azure' : 
                       selectedCloudProvider === 'aws' ? 'Amazon Web Services (AWS)' : 
                       'Google Cloud Platform (GCP)';
@@ -609,12 +1150,39 @@ export default function TerraformWorkflow() {
       message: `Selected ${cloudName}` 
     });
     
-    // System guidance for next step
+    // Pre-warm Azure MCP connection if Azure is selected
+    if (selectedCloudProvider === 'azure') {
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'Initializing Azure MCP server connection...' 
+      });
+      try {
+        // Pre-warm the Azure resources MCP connection
+        await apiRequest('GET', '/api/debug/azure-mcp');
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+          message: 'Azure MCP server connection established successfully.' 
+        });
+      } catch (mcpError: any) {
+        console.warn('Azure MCP pre-warm failed:', mcpError);
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+          message: '⚠️ Azure MCP server connection test failed. Backend creation may fail. Please ensure Azure credentials are configured.' 
+        });
+      }
+    }
+    
+    // After cloud provider selection, go to Step 4 (Module Approach selection)
+    // For non-aggregated-root: Step 3 = Cloud Provider, Step 4 = Module
+    // For aggregated-root: Step 2 = Cloud Provider, Step 3 = Module (but we handle that separately)
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+      cloudProvider: selectedCloudProvider,
+      currentStep: '4'
+    });
+    
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
       message: 'Great! Now choose your module approach: child module, standalone root module, or aggregated root module.' 
     });
     
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
+    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
     setCurrentStep(4);
   };
 
@@ -645,8 +1213,25 @@ export default function TerraformWorkflow() {
         backendValidated: 'skipped'
       });
       setCurrentStep(6);
+    } else if (selectedApproach === 'aggregated-root') {
+      // For aggregated-root: Cloud provider should already be selected in Step 2
+      // Now go to Step 4 to select child module repository
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+        message: 'For aggregated root modules, you need to select the repository containing the child module. The system will scan it to identify available resources.' 
+      });
+      // Reset repository selection state for child module selection
+      setSelectedRepo('');
+      setChildModuleRepoId('');
+      setChildModuleResources([]);
+      setChildModuleReviewed(false);
+      // Go to Step 4 to select child module repository
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+        moduleApproach: selectedApproach,
+        currentStep: '4'
+      });
+      setCurrentStep(4);
     } else {
-      // Both standalone-root and aggregated-root modules need backend configuration
+      // Standalone-root modules need backend configuration
       // BUT: Check if backend already exists in the repository
       const sessionData = await apiRequest('GET', `/api/sessions/${sessionId}`).then(r => r.json());
       
@@ -672,7 +1257,7 @@ export default function TerraformWorkflow() {
         });
         setCurrentStep(5);
         
-        // Show the form for new setups (standalone-root and aggregated-root)
+        // Show the form for new setups (standalone-root)
           await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
           message: 'Please configure the Terraform backend for state management. Enter the Azure resource group, storage account, and container names in the form below, then click "Create Backend" to create the resources and generate backend.tf, provider.tf, and terraform.tf files.' 
         });
@@ -710,11 +1295,36 @@ export default function TerraformWorkflow() {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
       
       // Only advance to step 6 if action was successful (not for errors)
-      if (action === 'decline' || (action === 'create' && (result.status === 'success' || result.status === 'configured')) || (action === 'validate' && (result.status === 'success' || result.status === 'validated'))) {
-      setCurrentStep(6);
-      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
+      // Check for all possible success statuses
+      const isSuccess = action === 'decline' || 
+                       (action === 'create' && (result.status === 'success' || result.status === 'configured' || result.status === 'created')) ||
+                       (action === 'validate' && (result.status === 'success' || result.status === 'validated'));
+      
+      if (isSuccess) {
+        // Mark backend as configured ONLY after successful configuration
+        setBackendConfigured(true);
+        
+        // Determine next step based on module approach
+        const nextStep = moduleApproach === 'aggregated-root' ? '7' : '6';
+        
+        // Update session first, then update local state
+        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+          currentStep: nextStep,
+          backendValidated: 'true',
+          backendConfigured: 'true'
+        });
+        // Invalidate and wait for session to update
+        await queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+        // Then update local state
+        setCurrentStep(moduleApproach === 'aggregated-root' ? 7 : 6);
+        console.log(`✅ Backend configured successfully. Advanced to step ${nextStep}.`);
+      } else {
+        // Log the actual status for debugging
+        console.warn('Backend configuration did not advance. Status:', result.status, 'Action:', action);
+        console.warn('Full result:', result);
+        // Don't set backendConfigured to true if configuration failed
       }
-      // Otherwise stay on step 5 to allow retry
+      // Otherwise stay on current step to allow retry
     } catch (error: any) {
       // Parse error message which is in format "400: {...json...}"
       let errorResponse: any = {};
@@ -740,7 +1350,9 @@ export default function TerraformWorkflow() {
       const isSkippedCheck = errorMessage.includes('Could not verify permissions') || 
                             errorMessage.includes('MCP connection issue') ||
                             errorMessage.includes('skipped') ||
-                            errorMessage.includes('Connection closed');
+                            errorMessage.includes('Connection closed') ||
+                            errorMessage.includes('MCP server') ||
+                            errorMessage.includes('Azure MCP server is not available');
       
       if (!isSkippedCheck && !errorResponse?.skipped) {
         // Show detailed error message only if it's a real error
@@ -781,8 +1393,39 @@ export default function TerraformWorkflow() {
   };
 
   const handleGenerateRequest = async (message: string) => {
-    await chatMutation.mutateAsync(message);
-    await generateTerraformMutation.mutateAsync(message);
+    console.log('\n🎯 ========== handleGenerateRequest CALLED ==========');
+    console.log('   Timestamp:', new Date().toISOString());
+    console.log('   Message:', message);
+    console.log('   Message length:', message?.length || 0);
+    console.log('   Session ID:', sessionId);
+    console.log('   Module approach:', moduleApproach);
+    
+    if (!message || message.trim().length === 0) {
+      console.error('❌ CRITICAL: Message is empty in handleGenerateRequest!');
+      toast({
+        title: "Error",
+        description: "Description is required to generate code",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    try {
+      console.log('📤 Step 1: Calling chatMutation...');
+      await chatMutation.mutateAsync(message);
+      console.log('✅ Step 1: chatMutation completed');
+      
+      console.log('📤 Step 2: Calling generateTerraformMutation...');
+      await generateTerraformMutation.mutateAsync(message);
+      console.log('✅ Step 2: generateTerraformMutation completed');
+      
+      console.log('✅ ========== handleGenerateRequest COMPLETE ==========');
+    } catch (error: any) {
+      console.error('❌ Error in handleGenerateRequest:', error);
+      console.error('   Error message:', error?.message);
+      console.error('   Error stack:', error?.stack);
+      throw error;
+    }
   };
 
   const handleFileChange = (fileName: string, content: string) => {
@@ -815,16 +1458,53 @@ export default function TerraformWorkflow() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-background">
+    <div className="h-screen flex flex-col bg-white">
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
       <Header />
       
-      <main className="flex-1 overflow-hidden flex flex-col">
-        <div className="py-6 px-6">
+      <main id="main-content" className="flex-1 overflow-hidden flex flex-col" role="main" aria-label="Terraform workflow">
+        <div className="py-6 px-4 sm:px-6 lg:px-8">
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-lg bg-primary/10">
+                  <Cloud className="w-6 h-6 text-primary" />
+                </div>
+                <div>
+                  <h1 className="text-3xl font-bold">Terraform</h1>
+                  <p className="text-muted-foreground">
+                    Generate infrastructure as code for Azure, AWS, or GCP
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRefresh}
+                  disabled={generateTerraformMutation.isPending}
+                >
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Refresh
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleGoHome}
+                >
+                  <Home className="w-4 h-4 mr-2" />
+                  Home
+                </Button>
+              </div>
+            </div>
+          </div>
           <StepIndicator steps={steps} currentStep={currentStep} />
         </div>
 
-        <ScrollArea className="flex-1 px-6">
-          <div className="max-w-6xl mx-auto pb-6">
+        <ScrollArea className="flex-1 px-4 sm:px-6 lg:px-8">
+          <div className="max-w-6xl mx-auto pb-8 space-y-6">
             {/* Debug: Current Step */}
             {process.env.NODE_ENV === 'development' && (
               <div className="mb-2 text-xs text-muted-foreground">
@@ -846,47 +1526,377 @@ export default function TerraformWorkflow() {
             {/* Step 1: Provider Selection */}
             {currentStep === 1 && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto">
-                <ProviderCard
-                  icon={<CodeIcon className="w-6 h-6" />}
-                  title="GitHub"
-                  description="Use GitHub repositories for your Terraform configurations"
-                  onClick={() => handleProviderSelect('github')}
-                  selected={provider === 'github'}
-                  data-testid="card-provider-github"
-                />
-                <ProviderCard
-                  icon={<Cloud className="w-6 h-6" />}
-                  title="Azure DevOps"
-                  description="Use Azure DevOps repositories for your infrastructure code"
-                  onClick={() => handleProviderSelect('azure')}
-                  selected={provider === 'azure'}
-                  data-testid="card-provider-azure"
-                />
+                {config?.hasGithub && (
+                  <ProviderCard
+                    icon={<CodeIcon className="w-6 h-6" />}
+                    title="GitHub"
+                    description="Use GitHub repositories for your Terraform configurations"
+                    onClick={() => handleProviderSelect('github')}
+                    selected={provider === 'github'}
+                    provider="github"
+                    fillBackground={true}
+                    data-testid="card-provider-github"
+                  />
+                )}
+                {config?.hasAzureDevOps && (
+                  <ProviderCard
+                    icon={<Cloud className="w-6 h-6" />}
+                    title="Azure DevOps"
+                    description="Use Azure DevOps repositories for your infrastructure code"
+                    onClick={() => handleProviderSelect('azure')}
+                    selected={provider === 'azure'}
+                    provider="azure"
+                    fillBackground={true}
+                    data-testid="card-provider-azure"
+                  />
+                )}
+                {!config?.hasGithub && !config?.hasAzureDevOps && (
+                  <div className="col-span-2 text-center py-12">
+                    <p className="text-muted-foreground mb-4">No repository providers configured.</p>
+                    <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Step 2: Repository Selection */}
-            {currentStep === 2 && (
+            {/* Step 2: Repository Selection (for all flows) */}
+            {currentStep === 2 && provider && !moduleApproach && !selectedRepo && (
               <div className="space-y-6">
-                {/* Repository Selection - Hide after repo is selected */}
-                {!selectedRepo && (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <RepositoryList
-                      showSearch={provider === 'github'}
-                  repositories={repositories}
-                  selectedId={selectedRepo}
-                  onSelect={handleRepoSelect}
-                />
-                    {(provider === 'github' || provider === 'azure') && (
-                  <CreateRepoForm 
-                    onSubmit={handleCreateRepo}
-                    loading={createRepoMutation.isPending}
+                <div className="mb-4">
+                  <h2 className="text-2xl font-bold mb-2">Select Repository</h2>
+                  <p className="text-muted-foreground">
+                    Select an existing repository or create a new one from {provider === 'github' ? 'GitHub' : 'Azure DevOps'}.
+                  </p>
+                </div>
+                
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <RepositoryList
+                    showSearch={provider === 'github'}
+                    repositories={repositories}
+                    selectedId={selectedRepo}
+                    onSelect={handleRepoSelect}
+                  />
+                  {(provider === 'github' || provider === 'azure') && (
+                    <CreateRepoForm 
+                      onSubmit={handleCreateRepo}
+                      loading={createRepoMutation.isPending}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Step 2: Show selected repository and continue to Cloud Provider */}
+            {currentStep === 2 && provider && !moduleApproach && selectedRepo && (
+              <div className="space-y-6">
+                <div className="rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950 p-4 mb-6">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Package className="w-5 h-5 text-green-600 dark:text-green-400" />
+                      <div>
+                        <p className="text-sm font-medium text-green-900 dark:text-green-100">
+                          Repository Selected
+                        </p>
+                        <p className="text-xs text-green-700 dark:text-green-300">
+                          {repositories.find(r => r.id === selectedRepo)?.name || selectedRepo}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setSelectedRepo('');
+                        setRepositoryScanResult(null);
+                        setExistingFiles([]);
+                        setExistingFilesReviewed(false);
+                      }}
+                      className="text-green-700 dark:text-green-300"
+                    >
+                      Change
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Continue button to go to Cloud Provider */}
+                <div className="flex justify-end">
+                  <Button
+                    onClick={async () => {
+                      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
+                      setCurrentStep(3);
+                      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+                      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+                        message: 'Now choose your target cloud provider (Azure, AWS, or GCP).' 
+                      });
+                    }}
+                  >
+                    Continue to Cloud Provider →
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 2: Cloud Provider Selection (for aggregated-root flow) */}
+            {currentStep === 2 && provider && moduleApproach === 'aggregated-root' && !cloudProvider && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                {config?.hasAzureCloud && (
+                  <ProviderCard
+                    icon={<Cloud className="w-6 h-6" />}
+                    title="Microsoft Azure"
+                    description="Generate Terraform for Azure cloud resources"
+                    onClick={() => handleCloudProviderSelect('azure')}
+                    selected={cloudProvider === 'azure'}
+                    cloudProvider="azure"
+                    fillBackground={true}
+                    data-testid="card-cloud-azure"
                   />
                 )}
+                {config?.hasAws && (
+                  <ProviderCard
+                    icon={<CloudCog className="w-6 h-6" />}
+                    title="Amazon Web Services"
+                    description="Generate Terraform for AWS cloud resources"
+                    onClick={() => handleCloudProviderSelect('aws')}
+                    selected={cloudProvider === 'aws'}
+                    cloudProvider="aws"
+                    fillBackground={true}
+                    data-testid="card-cloud-aws"
+                  />
+                )}
+                {config?.hasGcp && (
+                  <ProviderCard
+                    icon={<Package className="w-6 h-6" />}
+                    title="Google Cloud Platform"
+                    description="Generate Terraform for GCP cloud resources"
+                    onClick={() => handleCloudProviderSelect('gcp')}
+                    selected={cloudProvider === 'gcp'}
+                    cloudProvider="gcp"
+                    fillBackground={true}
+                    data-testid="card-cloud-gcp"
+                  />
+                )}
+                {!config?.hasAzureCloud && !config?.hasAws && !config?.hasGcp && (
+                  <div className="col-span-3 text-center py-12">
+                    <p className="text-muted-foreground mb-4">No cloud providers configured.</p>
+                    <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Step 3: Cloud Provider Selection (after Repository selection for non-aggregated-root) */}
+            {currentStep === 3 && provider && selectedRepo && !cloudProvider && !moduleApproach && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                {config?.hasAzureCloud && (
+                  <ProviderCard
+                    icon={<Cloud className="w-6 h-6" />}
+                    title="Microsoft Azure"
+                    description="Generate Terraform for Azure cloud resources"
+                    onClick={() => handleCloudProviderSelect('azure')}
+                    selected={cloudProvider === 'azure'}
+                    cloudProvider="azure"
+                    fillBackground={true}
+                    data-testid="card-cloud-azure"
+                  />
+                )}
+                {config?.hasAws && (
+                  <ProviderCard
+                    icon={<CloudCog className="w-6 h-6" />}
+                    title="Amazon Web Services"
+                    description="Generate Terraform for AWS cloud resources"
+                    onClick={() => handleCloudProviderSelect('aws')}
+                    selected={cloudProvider === 'aws'}
+                    cloudProvider="aws"
+                    fillBackground={true}
+                    data-testid="card-cloud-aws"
+                  />
+                )}
+                {config?.hasGcp && (
+                  <ProviderCard
+                    icon={<Package className="w-6 h-6" />}
+                    title="Google Cloud Platform"
+                    description="Generate Terraform for GCP cloud resources"
+                    onClick={() => handleCloudProviderSelect('gcp')}
+                    selected={cloudProvider === 'gcp'}
+                    cloudProvider="gcp"
+                    fillBackground={true}
+                    data-testid="card-cloud-gcp"
+                  />
+                )}
+                {!config?.hasAzureCloud && !config?.hasAws && !config?.hasGcp && (
+                  <div className="col-span-3 text-center py-12">
+                    <p className="text-muted-foreground mb-4">No cloud providers configured.</p>
+                    <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Step 4: Module Approach Selection (after Cloud Provider selection) */}
+            {currentStep === 4 && cloudProvider && !moduleApproach && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                <ProviderCard
+                  icon={<Box className="w-6 h-6" />}
+                  title="Child Module"
+                  description="Create a reusable child module"
+                  onClick={() => handleModuleApproachSelect('child-module')}
+                  selected={moduleApproach === 'child-module'}
+                  data-testid="card-module-child"
+                />
+                <ProviderCard
+                  icon={<Layers className="w-6 h-6" />}
+                  title="Standalone Root"
+                  description="Create a standalone root module configuration"
+                  onClick={() => handleModuleApproachSelect('standalone-root')}
+                  selected={moduleApproach === 'standalone-root'}
+                  data-testid="card-module-standalone"
+                />
+                <ProviderCard
+                  icon={<Network className="w-6 h-6" />}
+                  title="Aggregated Root"
+                  description="Create a root module that composes multiple child modules"
+                  onClick={() => handleModuleApproachSelect('aggregated-root')}
+                  selected={moduleApproach === 'aggregated-root'}
+                  data-testid="card-module-aggregated"
+                />
+              </div>
+            )}
+            
+
+            {/* Step 4: Child Module Repository Selection (for aggregated-root) */}
+            {currentStep === 4 && moduleApproach === 'aggregated-root' && (
+              <div className="space-y-6">
+                <div className="mb-4">
+                  <h2 className="text-2xl font-bold mb-2">Child Module Repository</h2>
+                  <p className="text-muted-foreground">
+                    Select the repository containing the child module. We'll review available resources before creating the root module.
+                  </p>
+                </div>
+                
+                {!childModuleRepoId && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <RepositoryList
+                      showSearch={provider === 'github'}
+                      repositories={repositories}
+                      selectedId={childModuleRepoId}
+                      onSelect={handleRepoSelect}
+                    />
+                    {(provider === 'github' || provider === 'azure') && (
+                      <CreateRepoForm 
+                        onSubmit={handleCreateRepo}
+                        loading={createRepoMutation.isPending}
+                      />
+                    )}
                   </div>
                 )}
 
-                {/* Show selected repository info */}
+                {childModuleRepoId && childModuleResources.length > 0 && (
+                  <div className="rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950 p-4 mb-6">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Package className="w-5 h-5 text-green-600 dark:text-green-400" />
+                        <div>
+                          <p className="text-sm font-medium text-green-900 dark:text-green-100">
+                            Child Module Repository Selected
+                          </p>
+                          <p className="text-xs text-green-700 dark:text-green-300">
+                            {repositories.find(r => r.id === childModuleRepoId)?.name || childModuleRepoId}
+                          </p>
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setChildModuleRepoId('');
+                          setChildModuleResources([]);
+                          setChildModuleReviewed(false);
+                        }}
+                        className="text-green-700 dark:text-green-300"
+                      >
+                        Change
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {childModuleResources.length > 0 && (
+                  <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 p-4 mb-6">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Package className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                      <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100">
+                        Available Child Module Resources
+                      </h3>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {childModuleResources.map((resource, idx) => (
+                        <span 
+                          key={idx}
+                          className="inline-flex items-center gap-1 px-3 py-1 rounded-md bg-white dark:bg-gray-800 text-xs font-mono text-blue-800 dark:text-blue-200 border border-blue-300 dark:border-blue-700"
+                        >
+                          {resource.type}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {childModuleRepoId && childModuleResources.length > 0 && (
+                  <div className="flex gap-4 justify-end">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setChildModuleReviewed(false);
+                        setCurrentStep(4);
+                      }}
+                    >
+                      ← Back
+                    </Button>
+                    <Button
+                      onClick={async () => {
+                        setChildModuleReviewed(true);
+                        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '5' });
+                        setCurrentStep(5);
+                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+                        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+                          message: 'Child module reviewed. Now select or create the root module repository.' 
+                        });
+                      }}
+                    >
+                      Continue to Root Module Repository →
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Step 5: Root Module Repository Selection (for aggregated-root) */}
+            {currentStep === 5 && moduleApproach === 'aggregated-root' && (
+              <div className="space-y-6">
+                <div className="mb-4">
+                  <h2 className="text-2xl font-bold mb-2">Root Module Repository</h2>
+                  <p className="text-muted-foreground">
+                    Select or create the repository where the root module will be created. The root module will use the child module resources you reviewed.
+                  </p>
+                </div>
+                
+                {!selectedRepo && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <RepositoryList
+                      showSearch={provider === 'github'}
+                      repositories={repositories}
+                      selectedId={selectedRepo}
+                      onSelect={handleRepoSelect}
+                    />
+                    {(provider === 'github' || provider === 'azure') && (
+                      <CreateRepoForm 
+                        onSubmit={handleCreateRepo}
+                        loading={createRepoMutation.isPending}
+                      />
+                    )}
+                  </div>
+                )}
+
                 {selectedRepo && (
                   <div className="rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950 p-4 mb-6">
                     <div className="flex items-center justify-between">
@@ -894,7 +1904,7 @@ export default function TerraformWorkflow() {
                         <Package className="w-5 h-5 text-green-600 dark:text-green-400" />
                         <div>
                           <p className="text-sm font-medium text-green-900 dark:text-green-100">
-                            Repository Selected
+                            Root Module Repository Selected
                           </p>
                           <p className="text-xs text-green-700 dark:text-green-300">
                             {repositories.find(r => r.id === selectedRepo)?.name || selectedRepo}
@@ -907,8 +1917,6 @@ export default function TerraformWorkflow() {
                         onClick={() => {
                           setSelectedRepo('');
                           setRepositoryScanResult(null);
-                          setExistingFiles([]);
-                          setExistingFilesReviewed(false);
                         }}
                         className="text-green-700 dark:text-green-300"
                       >
@@ -918,209 +1926,54 @@ export default function TerraformWorkflow() {
                   </div>
                 )}
 
-                {/* Existing Files Review Section - Show when repo is selected */}
-                {selectedRepo && repositoryScanResult && !existingFilesReviewed && (
-                  <div className="mt-8 rounded-lg border-2 border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-2">
-                        <FileText className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-                        <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100">
-                          Review Existing Terraform Files
-                        </h3>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={handleContinueAfterReview}
-                        className="text-blue-700 dark:text-blue-300"
-                      >
-                        Skip Review
-                      </Button>
-                    </div>
-                    <p className="text-sm text-blue-800 dark:text-blue-200 mb-4">
-                      {existingFiles.length > 0 
-                        ? `Found ${existingFiles.length} existing Terraform file(s). Please review them before proceeding with new resource creation.`
-                        : 'No existing Terraform files found. You can proceed with creating new resources.'}
-                    </p>
-                    
-                    {/* Existing Resources Summary */}
-                    {repositoryScanResult?.existingResources && repositoryScanResult.existingResources.length > 0 && (
-                      <div className="mb-4 p-3 rounded-md bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
-                        <h4 className="text-sm font-semibold mb-2 text-gray-900 dark:text-gray-100">
-                          Existing Resources ({repositoryScanResult.existingResources.length})
-                        </h4>
-                        <div className="flex flex-wrap gap-2">
-                          {repositoryScanResult.existingResources.map((resource, idx) => (
-                            <span 
-                              key={idx}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-xs font-mono"
-                              title={`File: ${resource.file}`}
-                            >
-                              <span className="text-gray-600 dark:text-gray-400">{resource.type}</span>
-                              <span className="text-gray-400 dark:text-gray-500">:</span>
-                              <span className="text-gray-900 dark:text-gray-100">{resource.name}</span>
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Files Viewer with Tabs - Only show if files exist */}
-                    {existingFiles.length > 0 && (
-                      <div className="mb-4 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
-                        <Tabs defaultValue={existingFiles[0]?.path || ''} className="w-full">
-                        <div className="border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
-                          <TabsList className="w-full justify-start h-auto p-0 bg-transparent min-w-max">
-                            <div className="flex">
-                              {existingFiles.map((file) => (
-                                <TabsTrigger
-                                  key={file.path}
-                                  value={file.path}
-                                  className="px-4 py-2 data-[state=active]:border-b-2 data-[state=active]:border-blue-500 rounded-none whitespace-nowrap"
-                                >
-                                  <div className="flex items-center gap-2">
-                                    <CodeIcon className="w-4 h-4" />
-                                    <span className="font-mono text-xs max-w-[150px] truncate" title={file.path}>
-                                      {file.path.split('/').pop() || file.path}
-                                    </span>
-                                    {file.content.length > 0 && (
-                                      <span className="text-xs text-muted-foreground">
-                                        ({(file.content.length / 1024).toFixed(1)} KB)
-                                      </span>
-                                    )}
-                                  </div>
-                                </TabsTrigger>
-                              ))}
-                            </div>
-                          </TabsList>
-                        </div>
+                {selectedRepo && (
+                  <div className="flex gap-4 justify-end">
+                    <Button
+                      variant="outline"
+                      onClick={() => setCurrentStep(2)}
+                    >
+                      ← Back
+                    </Button>
+                    <Button
+                      onClick={async () => {
+                        // For aggregated-root: Go to backend configuration step (Step 5) after root module repository selection
+                        // Check if backend exists in repository
+                        const sessionData = await apiRequest('GET', `/api/sessions/${sessionId}`).then(r => r.json());
+                        const hasBackend = sessionData.hasBackend === 'true' || sessionData.hasBackend === true || 
+                                         (repositoryScanResult && repositoryScanResult.backend && repositoryScanResult.backend.hasBackend);
                         
-                        {existingFiles.map((file) => (
-                          <TabsContent
-                            key={file.path}
-                            value={file.path}
-                            className="mt-0 p-0"
-                          >
-                            <div className="border-t border-gray-200 dark:border-gray-700">
-                              <div className="p-3 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-2">
-                                    <FileText className="w-4 h-4 text-gray-500" />
-                                    <span className="font-mono text-sm font-medium text-gray-900 dark:text-gray-100">
-                                      {file.path}
-                                    </span>
-                                  </div>
-                                  <span className="text-xs text-muted-foreground">
-                                    {file.content.length} characters
-                                  </span>
-                                </div>
-                              </div>
-                              <ScrollArea className="h-[500px] w-full">
-                                <div className="p-4 bg-gray-50 dark:bg-gray-900">
-                                  {file.content.length > 0 ? (
-                                    <pre className="text-xs font-mono whitespace-pre-wrap text-gray-900 dark:text-gray-100 leading-relaxed">
-                                      <code>{file.content}</code>
-                                    </pre>
-                                  ) : (
-                                    <div className="text-center text-muted-foreground py-8">
-                                      <p>No content available for this file</p>
-                                    </div>
-                                  )}
-                                </div>
-                              </ScrollArea>
-                            </div>
-                          </TabsContent>
-                        ))}
-                      </Tabs>
-                      </div>
-                    )}
-
-                    {/* Continue Button */}
-                    <div className="flex justify-end gap-2">
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          setExistingFilesReviewed(true);
-                          setExistingFiles([]);
-                        }}
-                      >
-                        Clear Review
-                      </Button>
-                      <Button
-                        onClick={handleContinueAfterReview}
-                        className="bg-blue-600 hover:bg-blue-700"
-                        data-testid="button-continue-after-review"
-                      >
-                        Continue to Next Step
-                      </Button>
-                    </div>
+                        if (hasBackend) {
+                          // Backend exists - skip to resource input step
+                          setBackendConfigured(true);
+                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+                            currentStep: '6',
+                            backendValidated: 'true'
+                          });
+                          setCurrentStep(6);
+                          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+                            message: 'Backend configuration already exists. Now describe the resources you want to create in the root module. The system will validate them against the child module resources.' 
+                          });
+                        } else {
+                          // New repository - backend must be configured
+                          // For aggregated-root, backend is at Step 6
+                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
+                          setCurrentStep(6);
+                          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+                          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
+                            message: 'This is a new repository. Backend configuration is required before you can describe resources for the root module.' 
+                          });
+                        }
+                      }}
+                    >
+                      Continue to Backend →
+                    </Button>
                   </div>
                 )}
               </div>
             )}
 
-            {/* Step 3: Cloud Provider Selection */}
-            {currentStep === 3 && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
-                <ProviderCard
-                  icon={<Cloud className="w-6 h-6" />}
-                  title="Microsoft Azure"
-                  description="Generate Terraform for Azure cloud resources"
-                  onClick={() => handleCloudProviderSelect('azure')}
-                  selected={cloudProvider === 'azure'}
-                  data-testid="card-cloud-azure"
-                />
-                <ProviderCard
-                  icon={<CloudCog className="w-6 h-6" />}
-                  title="Amazon Web Services"
-                  description="Generate Terraform for AWS cloud resources"
-                  onClick={() => handleCloudProviderSelect('aws')}
-                  selected={cloudProvider === 'aws'}
-                  data-testid="card-cloud-aws"
-                />
-                <ProviderCard
-                  icon={<Package className="w-6 h-6" />}
-                  title="Google Cloud"
-                  description="Generate Terraform for GCP cloud resources"
-                  onClick={() => handleCloudProviderSelect('gcp')}
-                  selected={cloudProvider === 'gcp'}
-                  data-testid="card-cloud-gcp"
-                />
-              </div>
-            )}
-
-            {/* Step 4: Module Approach Selection */}
-            {currentStep === 4 && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
-                <ProviderCard
-                  icon={<Package className="w-6 h-6" />}
-                  title="Child Module"
-                  description="Generate configuration specific to a child module"
-                  onClick={() => handleModuleApproachSelect('child-module')}
-                  selected={moduleApproach === 'child-module'}
-                  data-testid="card-module-child"
-                />
-                <ProviderCard
-                  icon={<CodeIcon className="w-6 h-6" />}
-                  title="Standalone Root"
-                  description="Create a standalone root module configuration"
-                  onClick={() => handleModuleApproachSelect('standalone-root')}
-                  selected={moduleApproach === 'standalone-root'}
-                  data-testid="card-module-standalone"
-                />
-                <ProviderCard
-                  icon={<CloudCog className="w-6 h-6" />}
-                  title="Aggregated Root"
-                  description="Build root module by aggregating child modules"
-                  onClick={() => handleModuleApproachSelect('aggregated-root')}
-                  selected={moduleApproach === 'aggregated-root'}
-                  data-testid="card-module-aggregated"
-                />
-              </div>
-            )}
-
-            {/* Step 5: Backend Configuration */}
-            {currentStep === 5 && (
+            {/* Step 5: Backend Configuration (for non-aggregated-root) or Step 6 (for aggregated-root) */}
+            {((currentStep === 5 && moduleApproach !== 'aggregated-root') || (currentStep === 6 && moduleApproach === 'aggregated-root')) && (
               <div className="w-full my-8">
                 <div className="max-w-2xl mx-auto">
                   <div className="bg-white dark:bg-gray-800 rounded-lg border-2 border-gray-300 dark:border-gray-600 p-8 shadow-xl">
@@ -1377,24 +2230,357 @@ export default function TerraformWorkflow() {
               </div>
             )}
 
-            {/* Step 7: Review & Edit */}
-            {currentStep === 7 && generatedFiles && Array.isArray(generatedFiles) && generatedFiles.length > 0 && (
+            {/* Step 7: Resource Input and Validation (for aggregated-root only) */}
+            {currentStep === 7 && moduleApproach === 'aggregated-root' && (
               <div className="space-y-6">
-                <CodeEditor 
-                  files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
-                  onFileChange={handleFileChange} 
-                />
-                <CheckovScanner 
+                <div className="mb-4">
+                  <h2 className="text-2xl font-bold mb-2">Describe Root Module Resources</h2>
+                  <p className="text-muted-foreground">
+                    Describe the resources you want to create in the root module. The system will validate them against the available child module resources. If resources don't match, an error will be shown.
+                  </p>
+                </div>
+
+                {/* Show warning if child module resources not loaded */}
+                {childModuleResources.length === 0 && (
+                  <div className="rounded-lg border border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-950 p-4 mb-6">
+                    <div className="flex items-center gap-2 mb-2">
+                      <svg className="w-5 h-5 text-yellow-600 dark:text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                      </svg>
+                      <h3 className="text-lg font-semibold text-yellow-900 dark:text-yellow-100">
+                        Child Module Resources Not Loaded
+                      </h3>
+                    </div>
+                    <p className="text-sm text-yellow-800 dark:text-yellow-200 mb-3">
+                      Child module resources are being loaded. Please wait or go back to select the child module repository.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setCurrentStep(2)}
+                    >
+                      ← Go Back to Select Child Module
+                    </Button>
+                  </div>
+                )}
+
+                {/* Show available child module resources */}
+                {childModuleResources.length > 0 && (
+                  <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 p-4 mb-6">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Package className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                      <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100">
+                        Available Child Module Resources
+                      </h3>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {childModuleResources.map((resource, idx) => (
+                        <span 
+                          key={idx}
+                          className="inline-flex items-center gap-1 px-3 py-1 rounded-md bg-white dark:bg-gray-800 text-xs font-mono text-blue-800 dark:text-blue-200 border border-blue-300 dark:border-blue-700"
+                        >
+                          {resource.type}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Resource Description - shown when user has submitted via ChatInput */}
+                {resourceDescription && (
+                  <div className="mb-6 p-4 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950">
+                    <p className="text-sm font-semibold mb-2">Your Resource Description:</p>
+                    <p className="text-sm text-blue-900 dark:text-blue-100">{resourceDescription}</p>
+                  </div>
+                )}
+
+                {/* Validation Result */}
+                {resourceValidationResult && (
+                  <div className={`rounded-lg border p-4 ${
+                    resourceValidationResult.valid 
+                      ? 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950' 
+                      : 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950'
+                  }`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      {resourceValidationResult.valid ? (
+                        <>
+                          <svg className="w-5 h-5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                          <h3 className="text-lg font-semibold text-green-900 dark:text-green-100">
+                            Validation Successful
+                          </h3>
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-5 h-5 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                          <h3 className="text-lg font-semibold text-red-900 dark:text-red-100">
+                            Validation Failed
+                          </h3>
+                        </>
+                      )}
+                    </div>
+                    <p className={`text-sm mb-3 ${
+                      resourceValidationResult.valid 
+                        ? 'text-green-800 dark:text-green-200' 
+                        : 'text-red-800 dark:text-red-200'
+                    }`}>
+                      {resourceValidationResult.message}
+                    </p>
+                    {resourceValidationResult.requestedResources && resourceValidationResult.requestedResources.length > 0 && (
+                      <div className="mb-3">
+                        <p className="text-xs font-semibold mb-1">Requested Resources:</p>
+                        <div className="flex flex-wrap gap-2">
+                          {resourceValidationResult.requestedResources.map((resource, idx) => (
+                            <span key={idx} className="px-2 py-1 rounded bg-white dark:bg-gray-800 text-xs font-mono">
+                              {resource}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {resourceValidationResult.unavailableResources && resourceValidationResult.unavailableResources.length > 0 && (
+                      <div className="mb-3">
+                        <p className="text-xs font-semibold mb-1 text-red-800 dark:text-red-200">Unavailable Resources:</p>
+                        <div className="flex flex-wrap gap-2">
+                          {resourceValidationResult.unavailableResources.map((resource, idx) => (
+                            <span key={idx} className="px-2 py-1 rounded bg-red-100 dark:bg-red-900 text-xs font-mono text-red-800 dark:text-red-200">
+                              {resource}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Action Buttons - Only show Continue if validation passed */}
+                {resourceValidationResult?.valid && (
+                  <div className="flex gap-4 justify-end">
+                    <Button
+                      variant="outline"
+                      onClick={() => setCurrentStep(6)}
+                    >
+                      ← Back
+                    </Button>
+                    <Button
+                      onClick={async () => {
+                        console.log('\n🚀 ========== Continue to Generate Button Clicked ==========');
+                        console.log('   resourceDescription:', resourceDescription);
+                        
+                        if (!resourceDescription || resourceDescription.trim().length === 0) {
+                          toast({
+                            title: "Error",
+                            description: "Resource description is required",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Generate code first (while staying on Step 7, showing loading state)
+                          console.log('   Triggering code generation...');
+                          await handleGenerateRequest(resourceDescription);
+                          
+                          // After generation completes successfully, refetch files and advance to Step 8
+                          console.log('   Code generation complete, refetching files...');
+                          
+                          // Force refetch files before advancing
+                          await queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                          const filesResult = await refetchFiles();
+                          console.log('   Files refetched:', filesResult.data?.length || 0);
+                          
+                          // Advance to Step 8
+                          console.log('   Advancing to Step 8...');
+                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+                            currentStep: '8'
+                          });
+                          setCurrentStep(8);
+                          
+                          toast({
+                            title: "Success",
+                            description: "Code generated successfully. Review the files below.",
+                          });
+                        } catch (error: any) {
+                          console.error('   Code generation failed:', error);
+                          toast({
+                            title: "Generation Failed",
+                            description: error?.message || "Failed to generate code. Please try again.",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                      disabled={chatMutation.isPending || generateTerraformMutation.isPending}
+                    >
+                      {chatMutation.isPending || generateTerraformMutation.isPending ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                          Generating Code...
+                        </>
+                      ) : (
+                        <>
+                          Continue to Generate →
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                )}
+                {resourceValidationResult && !resourceValidationResult.valid && (
+                  <div className="mt-4 p-4 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950">
+                    <p className="text-sm text-red-800 dark:text-red-200 font-semibold mb-2">
+                      ❌ Validation Failed: Resources do not match available child module resources.
+                    </p>
+                    <p className="text-xs text-red-700 dark:text-red-300">
+                      Please review the unavailable resources above and adjust your description. You can submit a new description using the input below.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Step 7: Review & Edit (for non-aggregated-root) or Step 8: Review & Edit (for aggregated-root) */}
+            {((currentStep === 7 && moduleApproach !== 'aggregated-root') || (currentStep === 8 && moduleApproach === 'aggregated-root')) && (
+              <>
+                {generatedFiles && Array.isArray(generatedFiles) && generatedFiles.length > 0 ? (
+                  <div className="space-y-6">
+                    <CodeEditor 
+                      files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
+                      onFileChange={handleFileChange} 
+                    />
+                    <div className="flex gap-4 justify-center">
+                      <Button
+                        variant="outline"
+                        onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 7 : 6)}
+                      >
+                        ← Back
+                      </Button>
+                      <Button
+                        onClick={async () => {
+                          const nextStep = moduleApproach === 'aggregated-root' ? 9 : 8;
+                          setCurrentStep(nextStep);
+                          // Update session step
+                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+                            currentStep: nextStep.toString()
+                          });
+                        }}
+                      >
+                        Continue to Activities →
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4 p-6 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950">
+                    <div className="flex items-center gap-3">
+                      <Loader2 className="w-5 h-5 animate-spin text-blue-600 dark:text-blue-400" />
+                      <div>
+                        <p className="text-sm font-semibold text-blue-900 dark:text-blue-100">
+                          {generateTerraformMutation.isPending ? 'Generating Code...' : 'Loading generated files...'}
+                        </p>
+                        <p className="text-xs text-blue-700 dark:text-blue-300">
+                          {generateTerraformMutation.isPending 
+                            ? 'Please wait while we generate your Terraform files.'
+                            : 'Please wait while we fetch your generated Terraform files.'}
+                        </p>
+                      </div>
+                    </div>
+                    {!generateTerraformMutation.isPending && (
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          console.log('🔄 Manually refetching files...');
+                          await refetchFiles();
+                        }}
+                      >
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        Refresh Files
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+            
+            {/* Step 8: Activities (non-aggregated-root) or Step 9: Activities (aggregated-root) */}
+            {((currentStep === 8 && moduleApproach !== 'aggregated-root') || (currentStep === 9 && moduleApproach === 'aggregated-root')) && (
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Activities</h2>
+                  <p className="text-muted-foreground">
+                    Run security scans, validate best practices, analyze costs, and generate architecture diagrams
+                  </p>
+                </div>
+                <ActivityPanel 
                   sessionId={sessionId}
-                  onScanComplete={() => setScanCompleted(true)}
+                  workflowType="terraform"
+                  moduleApproach={moduleApproach}
+                  onScanComplete={() => {
+                    setScanCompleted(true);
+                    toast({
+                      title: "Activity Complete",
+                      description: "Activity completed successfully.",
+                    });
+                  }}
                 />
-                <CostAnalyzer 
-                  sessionId={sessionId}
-                />
-                <RefactorValidator 
-                  sessionId={sessionId}
-                />
-                {isCommitted ? (
+                <div className="flex gap-4 justify-center">
+                  <Button
+                    variant="outline"
+                    onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 8 : 7)}
+                  >
+                    ← Back
+                  </Button>
+                  <Button
+                    onClick={async () => {
+                      const nextStep = moduleApproach === 'aggregated-root' ? 10 : 9;
+                      setCurrentStep(nextStep);
+                      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+                        currentStep: nextStep.toString()
+                      });
+                    }}
+                  >
+                    Continue to Commit →
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 9: Commit (non-aggregated-root) or Step 10: Commit (aggregated-root) */}
+            {((currentStep === 9 && moduleApproach !== 'aggregated-root') || (currentStep === 10 && moduleApproach === 'aggregated-root')) && (
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Commit & Push</h2>
+                  <p className="text-muted-foreground">
+                    Commit your Terraform configuration to the repository
+                  </p>
+                </div>
+                <div className="flex gap-4 justify-center">
+                  <Button
+                    variant="outline"
+                    onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 9 : 8)}
+                  >
+                    ← Back
+                  </Button>
+                  <Button
+                    onClick={handleApprove}
+                    disabled={commitMutation.isPending}
+                  >
+                    {commitMutation.isPending ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Committing...
+                      </>
+                    ) : (
+                      'Commit & Push →'
+                    )}
+                  </Button>
+                </div>
+                {!scanCompleted && moduleApproach !== 'aggregated-root' && (
+                  <p className="text-sm text-muted-foreground text-center">
+                    Please run the security scan before committing
+                  </p>
+                )}
+                {isCommitted && (
                   <div className="flex flex-col items-center gap-4 p-6 border rounded-lg bg-green-50 dark:bg-green-950">
                     <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
                       <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1414,33 +2600,65 @@ export default function TerraformWorkflow() {
                       Go to Home
                     </Button>
                   </div>
-                ) : (
-                  <>
-                <ActionButtons
-                  onApprove={handleApprove}
-                  onCancel={handleCancel}
-                  loading={commitMutation.isPending}
-                      disabled={!scanCompleted}
-                />
-                    {!scanCompleted && (
-                  <p className="text-sm text-muted-foreground text-center">
-                    Please run the security scan before committing
-                  </p>
-                    )}
-                  </>
                 )}
               </div>
             )}
           </div>
         </ScrollArea>
 
-        {/* Chat Input - Only show in step 6 (Generate) */}
-        {currentStep === 6 && (
+        {/* Resource input for non-aggregated-root (Step 6) - only show after backend is configured */}
+        {currentStep === 6 && moduleApproach !== 'aggregated-root' && backendConfigured && (
           <ChatInput
             onSend={handleGenerateRequest}
             placeholder="Describe your Terraform setup... e.g., 'Create Terraform for Azure Storage Account and Resource Group'"
             disabled={chatMutation.isPending || generateTerraformMutation.isPending}
           />
+        )}
+        
+        {/* Resource input for aggregated-root (Step 7) - shown when validation is not yet done or failed, and backend is configured */}
+        {currentStep === 7 && moduleApproach === 'aggregated-root' && backendConfigured && !resourceValidationResult?.valid && (
+          <ChatInput
+            onSend={(input) => {
+              // For aggregated-root, validate resources first before generating
+              if (!input.trim()) {
+                toast({
+                  title: "Description Required",
+                  description: "Please describe the resources you want to create.",
+                  variant: "destructive"
+                });
+                return;
+              }
+              if (childModuleResources.length === 0) {
+                toast({
+                  title: "Child Module Not Reviewed",
+                  description: "Please go back and select the child module repository first.",
+                  variant: "destructive"
+                });
+                return;
+              }
+              setResourceDescription(input);
+              validateResourcesMutation.mutate(input);
+            }}
+            placeholder="Describe the resources you want to create in the root module... e.g., 'Create a resource group, storage account, and app service using the child modules'"
+            disabled={validateResourcesMutation.isPending}
+          />
+        )}
+        
+        {/* Code generation loading state for aggregated-root (Step 8) - shown while generating */}
+        {currentStep === 8 && moduleApproach === 'aggregated-root' && backendConfigured && resourceValidationResult?.valid && generateTerraformMutation.isPending && (
+          <div className="space-y-4 p-6 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950">
+            <div className="flex items-center gap-3">
+              <RefreshCw className="w-5 h-5 animate-spin text-blue-600 dark:text-blue-400" />
+              <div>
+                <p className="text-sm font-semibold text-blue-900 dark:text-blue-100">
+                  Generating Code...
+                </p>
+                <p className="text-xs text-blue-700 dark:text-blue-300">
+                  Creating backend and resource files. This may take a moment.
+                </p>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>

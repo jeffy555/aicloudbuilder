@@ -13,6 +13,7 @@ import { randomUUID } from "crypto";
 export interface IStorage {
   // User methods
   getUser(id: string): Promise<User | undefined>;
+  getUserById(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
 
@@ -29,6 +30,7 @@ export interface IStorage {
   getFilesBySession(sessionId: string): Promise<GeneratedFile[]>;
   createFile(file: InsertGeneratedFile): Promise<GeneratedFile>;
   updateFile(id: string, content: string): Promise<GeneratedFile>;
+  deleteFile(id: string): Promise<void>;
   deleteFilesBySession(sessionId: string): Promise<void>;
 }
 
@@ -50,6 +52,10 @@ export class MemStorage implements IStorage {
     return this.users.get(id);
   }
 
+  async getUserById(id: string): Promise<User | undefined> {
+    return this.getUser(id);
+  }
+
   async getUserByUsername(username: string): Promise<User | undefined> {
     return Array.from(this.users.values()).find(
       (user) => user.username === username,
@@ -58,7 +64,13 @@ export class MemStorage implements IStorage {
 
   async createUser(insertUser: InsertUser): Promise<User> {
     const id = randomUUID();
-    const user: User = { ...insertUser, id };
+    const now = new Date();
+    const user: User = {
+      ...insertUser,
+      id,
+      createdAt: now,
+      updatedAt: now,
+    };
     this.users.set(id, user);
     return user;
   }
@@ -75,9 +87,11 @@ export class MemStorage implements IStorage {
       id,
       provider: insertSession.provider ?? null,
       repositoryId: insertSession.repositoryId ?? null,
-      repositoryName: insertSession.repositoryName ?? null,
+        repositoryName: insertSession.repositoryName ?? null,
+        repositoryBranch: insertSession.repositoryBranch ?? null,
       cloudProvider: insertSession.cloudProvider ?? null,
       moduleApproach: insertSession.moduleApproach ?? null,
+      activeModule: insertSession.activeModule ?? null,
       currentStep: insertSession.currentStep ?? '1',
       isExistingRepo: insertSession.isExistingRepo ?? null,
       detectedCloudProvider: insertSession.detectedCloudProvider ?? null,
@@ -156,6 +170,10 @@ export class MemStorage implements IStorage {
     return updated;
   }
 
+  async deleteFile(id: string): Promise<void> {
+    this.generatedFiles.delete(id);
+  }
+
   async deleteFilesBySession(sessionId: string): Promise<void> {
     const fileIds = Array.from(this.generatedFiles.values())
       .filter((file) => file.sessionId === sessionId)
@@ -165,4 +183,9 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new MemStorage();
+import { PostgresStorage } from './storage-postgres';
+
+// Use PostgreSQL if DATABASE_URL is set, otherwise fallback to in-memory storage
+export const storage = process.env.DATABASE_URL 
+  ? new PostgresStorage()
+  : new MemStorage();

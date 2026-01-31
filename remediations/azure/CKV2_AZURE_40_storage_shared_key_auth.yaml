@@ -1,0 +1,42 @@
+check_id: CKV2_AZURE_40
+check_name: Ensure storage account is not configured with Shared Key authorization
+resource_types:
+  - azurerm_storage_account
+terraform_attribute: shared_access_key_enabled
+attribute_type: simple
+required_value: false
+description: Disables shared key authorization (use Azure AD instead)
+
+remediation_snippet: |
+  shared_access_key_enabled = false
+
+complete_example: |
+  resource "azurerm_storage_account" "example" {
+    name                     = "examplestorage"
+    resource_group_name      = azurerm_resource_group.example.name
+    location                 = azurerm_resource_group.example.location
+    account_tier             = "Standard"
+    account_replication_type = "LRS"
+    
+    shared_access_key_enabled = false
+  }
+
+tags:
+  - storage
+  - security
+  - authentication
+  - azure
+  - shared-key
+
+keywords:
+  - shared key
+  - authentication
+  - azure ad
+  - storage auth
+  - access key
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account#shared_access_key_enabled
+

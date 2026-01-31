@@ -1,0 +1,45 @@
+check_id: CKV_AZURE_70
+check_name: Ensure that Function apps is only accessible over HTTPS
+resource_types:
+  - azurerm_function_app
+  - azurerm_linux_function_app
+  - azurerm_windows_function_app
+terraform_attribute: https_only
+attribute_type: simple
+required_value: true
+description: Ensures function app is only accessible over HTTPS
+
+remediation_snippet: |
+  https_only = true
+
+complete_example: |
+  resource "azurerm_function_app" "example" {
+    name                       = "example-function"
+    location                   = azurerm_resource_group.example.location
+    resource_group_name        = azurerm_resource_group.example.name
+    app_service_plan_id        = azurerm_app_service_plan.example.id
+    storage_account_name       = azurerm_storage_account.example.name
+    storage_account_access_key = azurerm_storage_account.example.primary_access_key
+    
+    https_only = true
+  }
+
+tags:
+  - function-app
+  - security
+  - https
+  - azure
+  - encryption
+
+keywords:
+  - function app
+  - https only
+  - tls
+  - ssl
+  - secure connection
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/function_app#https_only
+

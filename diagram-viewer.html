@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phase 1 Diagram Viewer</title>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ 
+            startOnLoad: true,
+            theme: 'default',
+            themeVariables: {
+                primaryColor: '#0078d4',
+                primaryTextColor: '#fff',
+                primaryBorderColor: '#005a9e',
+                lineColor: '#0078d4',
+                secondaryColor: '#ff6b35',
+                tertiaryColor: '#00bcf2'
+            }
+        });
+    </script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #0078d4;
+            margin-top: 0;
+        }
+        .info {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            border-left: 4px solid #0078d4;
+        }
+        .mermaid {
+            background: white;
+            padding: 20px;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            overflow-x: auto;
+            min-height: 400px;
+        }
+        .instructions {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 20px;
+            border-left: 4px solid #ffc107;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #0078d4;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏗️ Architecture Diagram - Phase 1 Test</h1>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value">6</div>
+                <div class="stat-label">Resources</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">11</div>
+                <div class="stat-label">Relationships</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">1</div>
+                <div class="stat-label">Resource Groups</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">4</div>
+                <div class="stat-label">Categories</div>
+            </div>
+        </div>
+
+        <div class="info">
+            <strong>📊 Diagram Information:</strong><br>
+            This diagram was generated from Terraform code using Phase 1 components:<br>
+            • Resource relationship parser<br>
+            • Mermaid syntax generator<br>
+            • Azure resource categorization
+        </div>
+
+        <div class="mermaid">
+graph TB
+    azurerm_resource_group_rg_main[Resource Group<br/>rg_main]
+
+    subgraph "Compute"
+        azurerm_app_service_plan_plan_standard[App Service Plan<br/>plan_standard]
+        azurerm_app_service_app_web[App Service<br/>app_web]
+    end
+
+    subgraph "Storage"
+        azurerm_storage_account_stg_main[Storage Account<br/>stg_main]
+    end
+
+    subgraph "Networking"
+        azurerm_virtual_network_vnet_main[Virtual Network<br/>vnet_main]
+        azurerm_subnet_subnet_frontend[Subnet<br/>subnet_frontend]
+    end
+
+    azurerm_app_service_app_web -->|App Service depends on App Service Plan| azurerm_app_service_plan_plan_standard
+    azurerm_resource_group_rg_main --> azurerm_app_service_plan_plan_standard
+    azurerm_resource_group_rg_main --> azurerm_app_service_app_web
+    azurerm_resource_group_rg_main --> azurerm_storage_account_stg_main
+    azurerm_resource_group_rg_main --> azurerm_virtual_network_vnet_main
+    azurerm_resource_group_rg_main --> azurerm_subnet_subnet_frontend
+
+    %% Azure Styling
+    classDef compute fill:#0078d4,stroke:#005a9e,stroke-width:2px,color:#fff
+    classDef storage fill:#ff6b35,stroke:#d84315,stroke-width:2px,color:#fff
+    classDef network fill:#00bcf2,stroke:#0097a7,stroke-width:2px,color:#fff
+    classDef resourceGroup fill:#107c10,stroke:#0e6b0e,stroke-width:2px,color:#fff
+    class azurerm_resource_group_rg_main resourceGroup
+    class azurerm_app_service_plan_plan_standard compute
+    class azurerm_app_service_app_web compute
+    class azurerm_storage_account_stg_main storage
+    class azurerm_virtual_network_vnet_main network
+    class azurerm_subnet_subnet_frontend network
+
+        </div>
+
+        <div class="instructions">
+            <strong>📝 Instructions:</strong><br>
+            1. This diagram is rendered using Mermaid.js (loaded from CDN)<br>
+            2. You can zoom and pan the diagram if needed<br>
+            3. The diagram shows resource relationships and dependencies<br>
+            4. Colors represent different Azure resource categories
+        </div>
+    </div>
+</body>
+</html>

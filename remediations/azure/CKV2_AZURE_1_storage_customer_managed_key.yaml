@@ -1,0 +1,51 @@
+check_id: CKV2_AZURE_1
+check_name: Ensure storage for critical data are encrypted with Customer Managed Key
+resource_types:
+  - azurerm_storage_account
+terraform_attribute: customer_managed_key
+attribute_type: nested_block
+required_value:
+  key_vault_key_id: azurerm_key_vault_key.example.id
+  user_assigned_identity_id: azurerm_user_assigned_identity.example.id
+description: Enables customer-managed key encryption for storage account
+
+remediation_snippet: |
+  customer_managed_key {
+    key_vault_key_id          = azurerm_key_vault_key.example.id
+    user_assigned_identity_id = azurerm_user_assigned_identity.example.id
+  }
+
+complete_example: |
+  resource "azurerm_storage_account" "example" {
+    name                     = "examplestorage"
+    resource_group_name      = azurerm_resource_group.example.name
+    location                 = azurerm_resource_group.example.location
+    account_tier             = "Standard"
+    account_replication_type = "LRS"
+    
+    customer_managed_key {
+      key_vault_key_id          = azurerm_key_vault_key.example.id
+      user_assigned_identity_id = azurerm_user_assigned_identity.example.id
+    }
+  }
+
+tags:
+  - storage
+  - encryption
+  - customer-managed-key
+  - key-vault
+  - azure
+  - security
+
+keywords:
+  - customer managed key
+  - cmk
+  - encryption
+  - key vault
+  - managed identity
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account#customer_managed_key
+

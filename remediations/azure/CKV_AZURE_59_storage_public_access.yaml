@@ -1,0 +1,41 @@
+check_id: CKV_AZURE_59
+check_name: Ensure that Storage accounts disallow public access
+resource_types:
+  - azurerm_storage_account
+terraform_attribute: allow_nested_items_to_be_public
+attribute_type: simple
+required_value: false
+description: Disallows public access to nested items (blobs, containers) in storage account
+
+remediation_snippet: |
+  allow_nested_items_to_be_public = false
+
+complete_example: |
+  resource "azurerm_storage_account" "example" {
+    name                     = "examplestorage"
+    resource_group_name      = azurerm_resource_group.example.name
+    location                 = azurerm_resource_group.example.location
+    account_tier             = "Standard"
+    account_replication_type = "LRS"
+    
+    allow_nested_items_to_be_public = false
+  }
+
+tags:
+  - storage
+  - security
+  - public-access
+  - azure
+
+keywords:
+  - storage account
+  - public access
+  - nested items
+  - blob access
+  - container access
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account#allow_nested_items_to_be_public
+

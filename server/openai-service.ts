@@ -847,15 +847,15 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: 'You are a Terraform expert specializing in reusable child modules. Generate well-structured child modules using ONLY resource blocks, organized by resource type into separate folders. Never use module blocks in child modules.' },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.3,
-          max_tokens: 4000,
-          response_format: { type: 'json_object' }
-        });
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are a Terraform expert specializing in reusable child modules. Generate well-structured child modules using ONLY resource blocks, organized by resource type into separate folders. Never use module blocks in child modules.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 16000, // Increased to handle large Terraform files
+        response_format: { type: 'json_object' }
+      });
       } catch (apiError: any) {
         console.error('❌ OpenAI API error (child-module):', apiError);
         throw new Error(`OpenAI API error: ${apiError?.message || 'Unknown error'}. Please check your API key and try again.`);
@@ -985,6 +985,18 @@ The existing files are shown above in the "EXISTING FILES IN REPOSITORY" section
 Your response MUST contain the COMPLETE file content: ALL existing content + new additions.
 DO NOT generate partial files or only the new additions - include EVERYTHING.
 
+**CRITICAL EXAMPLE FOR ANY NEW RESOURCE:**
+If the user requests ANY new resource (e.g., "create AKS cluster", "add storage account", "create VM", "add function app", etc.) and main.tf already has existing resources, your response MUST include:
+1. ALL existing resource blocks (copy them EXACTLY as they are - word-for-word)
+2. NEW resource blocks (add them at the end, after all existing resources)
+3. ALL existing variables from variables.tf (copy them EXACTLY)
+4. NEW variables needed for the new resources (add them at the end)
+5. ALL existing outputs from outputs.tf (copy them EXACTLY)
+6. NEW outputs for the new resources (add them at the end)
+
+**DO NOT** generate only the new resource code - you MUST include EVERYTHING that already exists!
+**This applies to ALL resource types: storage accounts, AKS, VMs, function apps, logic apps, databases, networking, etc.**
+
 STRICT REQUIREMENTS (VIOLATION WILL CAUSE DATA LOSS):
 1. **main.tf**: 
    - COPY ALL existing resource blocks EXACTLY as they are (word-for-word, character-for-character)
@@ -1086,8 +1098,8 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [
+        model: 'gpt-4o-mini',
+        messages: [
             { 
               role: 'system', 
               content: hasExistingFiles 
@@ -1191,12 +1203,12 @@ CRITICAL TERRAFORM BEST PRACTICES (MANDATORY):
 
 REMEMBER: Generate production-ready code that follows ALL these best practices. The code should be maintainable, secure, and follow Terraform industry standards.`
             },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.3,
-          max_tokens: 4000,
-          response_format: { type: 'json_object' }
-        });
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 16000, // Increased to handle large Terraform files
+        response_format: { type: 'json_object' }
+      });
       } catch (apiError: any) {
         console.error('❌ OpenAI API error (standalone-root):', apiError);
         console.error('   Error type:', apiError?.constructor?.name);
@@ -1221,19 +1233,7 @@ REMEMBER: Generate production-ready code that follows ALL these best practices. 
       console.log(`   Response length: ${response.length} chars`);
       console.log(`   Response preview: ${response.substring(0, 200)}...`);
 
-      // Check for truncation
-      if (finishReason === 'length') {
-        console.warn('⚠️  Response was truncated! max_tokens may be too low.');
-        console.warn('   Consider increasing max_tokens or simplifying the request.');
-      }
-
-      // Check if response is empty
-      if (!response || response.trim().length === 0) {
-        console.error('❌ Empty response from OpenAI (standalone-root)');
-        throw new Error('OpenAI returned an empty response. Please try again.');
-      }
-
-      // Try to extract JSON from response (in case it's wrapped in markdown or has extra text)
+      // Extract JSON text first (needed for truncation handling)
       let jsonText = response.trim();
       
       // Remove markdown code blocks if present
@@ -1252,7 +1252,90 @@ REMEMBER: Generate production-ready code that follows ALL these best practices. 
         }
       }
 
+      // Check if response is empty
+      if (!response || response.trim().length === 0) {
+        console.error('❌ Empty response from OpenAI (standalone-root)');
+        throw new Error('OpenAI returned an empty response. Please try again.');
+      }
+
       let parsed;
+      
+      // Check for truncation
+      if (finishReason === 'length') {
+        console.error('❌ Response was truncated! JSON is likely incomplete.');
+        console.error('   Response length:', response.length, 'chars');
+        console.error('   This usually means the generated Terraform code is too large.');
+        console.error('   Attempting to repair truncated JSON...');
+        
+        // Try to repair truncated JSON by closing incomplete structures
+        try {
+          let repairedJson = jsonText;
+          
+          // Count open braces and brackets
+          const openBraces = (repairedJson.match(/\{/g) || []).length;
+          const closeBraces = (repairedJson.match(/\}/g) || []).length;
+          const openBrackets = (repairedJson.match(/\[/g) || []).length;
+          const closeBrackets = (repairedJson.match(/\]/g) || []).length;
+          
+          // Close incomplete strings (find unclosed strings)
+          let inString = false;
+          let escapeNext = false;
+          for (let i = repairedJson.length - 1; i >= 0; i--) {
+            if (escapeNext) {
+              escapeNext = false;
+              continue;
+            }
+            if (repairedJson[i] === '\\') {
+              escapeNext = true;
+              continue;
+            }
+            if (repairedJson[i] === '"') {
+              inString = !inString;
+            }
+          }
+          
+          // If we're in a string, close it
+          if (inString) {
+            repairedJson += '"';
+          }
+          
+          // Close incomplete arrays/objects
+          if (openBrackets > closeBrackets) {
+            repairedJson += ']'.repeat(openBrackets - closeBrackets);
+          }
+          if (openBraces > closeBraces) {
+            repairedJson += '}'.repeat(openBraces - closeBraces);
+          }
+          
+          // Try to parse the repaired JSON
+          parsed = JSON.parse(repairedJson);
+          console.log('   ✅ Successfully repaired truncated JSON');
+          
+          // Skip to validation if repair succeeded
+          if (!parsed.files || !Array.isArray(parsed.files)) {
+            throw new Error('Repaired JSON missing files array');
+          }
+          
+          // Filter and return
+          const validFiles = parsed.files.filter((file: any) => {
+            if (!file.path || !file.content) {
+              console.warn('⚠️ Skipping invalid file entry:', file);
+              return false;
+            }
+            const fileName = file.path.split('/').pop();
+            return fileName !== 'backend.tf' && fileName !== 'provider.tf' && fileName !== 'terraform.tf';
+          });
+          
+          if (validFiles.length === 0) {
+            throw new Error('No valid files in repaired JSON');
+          }
+          
+          return { files: validFiles };
+        } catch (repairError: any) {
+          console.error('   ❌ Failed to repair truncated JSON:', repairError.message);
+          throw new Error(`Response was truncated and could not be repaired. The generated Terraform code is too large (${response.length} chars). Please try with fewer resources or split into multiple requests.`);
+        }
+      }
       try {
         parsed = JSON.parse(jsonText);
       } catch (parseError: any) {
@@ -1271,8 +1354,36 @@ REMEMBER: Generate production-ready code that follows ALL these best practices. 
           console.log('   ✅ Successfully repaired and parsed JSON');
         } catch (repairError: any) {
           console.error('   ❌ JSON repair failed:', repairError.message);
-          console.error('   Repaired JSON (first 500 chars):', repairJson(jsonText).substring(0, 500));
-          throw new Error(`Failed to parse AI response: ${parseError.message}. The AI may have returned invalid JSON. Please try again.`);
+          console.error('   Original error:', parseError.message);
+          console.error('   Repair error:', repairError.message);
+          console.error('   Response length:', response.length);
+          console.error('   Repaired JSON (first 1000 chars):', repairJson(jsonText).substring(0, 1000));
+          console.error('   Repaired JSON (last 500 chars):', repairJson(jsonText).substring(Math.max(0, repairJson(jsonText).length - 500)));
+          
+          // Try one more time with more aggressive repair
+          try {
+            let aggressiveRepair = repairJson(jsonText);
+            // Remove any text before first { or [
+            const firstBrace = aggressiveRepair.indexOf('{');
+            const firstBracket = aggressiveRepair.indexOf('[');
+            const startIndex = firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket) ? firstBrace : firstBracket;
+            if (startIndex > 0) {
+              aggressiveRepair = aggressiveRepair.substring(startIndex);
+            }
+            // Remove any text after last } or ]
+            const lastBrace = aggressiveRepair.lastIndexOf('}');
+            const lastBracket = aggressiveRepair.lastIndexOf(']');
+            const endIndex = lastBrace !== -1 && (lastBracket === -1 || lastBrace > lastBracket) ? lastBrace + 1 : lastBracket + 1;
+            if (endIndex < aggressiveRepair.length) {
+              aggressiveRepair = aggressiveRepair.substring(0, endIndex);
+            }
+            const finalParsed = JSON.parse(aggressiveRepair);
+            console.log('   ✅ Successfully parsed with aggressive repair');
+            parsed = finalParsed;
+          } catch (finalError: any) {
+            console.error('   ❌ Aggressive repair also failed:', finalError.message);
+            throw new Error(`Failed to parse AI response: ${parseError.message}. The AI may have returned invalid JSON. Please try again.`);
+          }
         }
       }
       
@@ -1301,24 +1412,42 @@ REMEMBER: Generate production-ready code that follows ALL these best practices. 
       };
     } else if (moduleApproach === 'aggregated-root') {
       // Aggregated root modules use module blocks to call child modules
+      console.log(`\n📦 Generating AGGREGATED ROOT MODULE for ${cloudName}`);
+      console.log(`   Description length: ${refinedDescription.length} characters`);
+      console.log(`   Description: "${refinedDescription.substring(0, 200)}${refinedDescription.length > 200 ? '...' : ''}"`);
+      console.log(`   Full description: "${refinedDescription}"`);
+      
+      if (!refinedDescription || refinedDescription.trim().length < 10) {
+        console.error(`\n❌ CRITICAL: Description is too short or empty!`);
+        console.error(`   Description: "${refinedDescription}"`);
+        throw new Error('Description is required and must be at least 10 characters long for aggregated-root modules.');
+      }
+      
       const prompt = `Generate Terraform aggregated root module for ${cloudName} based on this description: "${refinedDescription}"${docsContext}
 
 IMPORTANT: Use the latest Terraform documentation provided above to ensure your code follows current best practices and uses the correct resource syntax.
 
-This is an AGGREGATED ROOT MODULE. Generate concise configuration with opinionated defaults:
-- Use "module" blocks to call child modules (assume they exist in subfolders)
-- Use sensible module names and paths
+This is an AGGREGATED ROOT MODULE. You MUST generate the following files with actual module calls based on the description:
+
+REQUIRED FILES (you MUST generate all of these):
+1. main.tf - MUST contain "module" blocks that call child modules based on the description. Each resource type mentioned in the description should have a corresponding module block. DO NOT create empty files.
+2. variables.tf - MUST contain variable declarations for any values that need to be passed to the child modules
+3. dev.terraform.tfvars - MUST contain actual variable values (CRITICAL: Use "dev.terraform.tfvars" NOT "terraform.tfvars")
+4. outputs.tf - MUST contain output blocks that aggregate outputs from the child modules
+
+CRITICAL REQUIREMENTS:
+- Use "module" blocks to call child modules (assume they exist in subfolders matching the resource type name)
+- Use sensible module names and paths (e.g., module "resource_group" { source = "./resource_group" })
 - Pass variables to child modules with reasonable defaults
 - Aggregate outputs from child modules
-- Minimal parameterization - only variables that truly need customization
+- DO NOT include provider configuration or terraform blocks in main.tf - those will be in separate files
+- DO NOT generate backend.tf, provider.tf, or terraform.tf files - these already exist
+- The description "${refinedDescription}" contains the resources to create - you MUST create module calls for ALL resources mentioned
 
-CRITICAL: DO NOT include provider configuration or terraform blocks in main.tf - those will be in separate files.
-
-Please provide files:
-1. main.tf - Module calls ONLY (no provider blocks, no terraform blocks)
-2. variables.tf - Variable declarations (minimal)
-3. dev.terraform.tfvars - Environment-specific variable values (CRITICAL: Use "dev.terraform.tfvars" NOT "terraform.tfvars")
-4. outputs.tf - Aggregated outputs from child modules
+Example structure:
+- If description mentions "resource group" → create module "resource_group" { source = "./resource_group" ... }
+- If description mentions "storage account" → create module "storage_account" { source = "./storage_account" ... }
+- If description mentions "app service" → create module "app_service" { source = "./app_service" ... }
 
 CRITICAL: Always use "dev.terraform.tfvars" as the filename for variable values, NOT "terraform.tfvars".
 
@@ -1327,15 +1456,15 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: 'You are a Terraform expert. Generate concise aggregated root modules with opinionated defaults. Avoid asking users for every detail.' },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.3,
-          max_tokens: 4000,
-          response_format: { type: 'json_object' }
-        });
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are a Terraform expert. Generate concise aggregated root modules with opinionated defaults. Avoid asking users for every detail.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 16000, // Increased to handle large Terraform files
+        response_format: { type: 'json_object' }
+      });
       } catch (apiError: any) {
         console.error('❌ OpenAI API error (aggregated-root):', apiError);
         throw new Error(`OpenAI API error: ${apiError?.message || 'Unknown error'}. Please check your API key and try again.`);
@@ -1396,8 +1525,15 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       
       if (!parsed.files || !Array.isArray(parsed.files)) {
         console.error('❌ Invalid response structure from OpenAI (aggregated-root):', parsed);
+        console.error('   Parsed object keys:', Object.keys(parsed));
         throw new Error('AI response missing files array. Please try again.');
       }
+      
+      console.log(`\n📋 [AGGREGATED-ROOT] Raw AI response contains ${parsed.files.length} file(s):`);
+      parsed.files.forEach((file: any, idx: number) => {
+        const fileName = file.path ? file.path.split('/').pop() : 'unknown';
+        console.log(`   ${idx + 1}. ${file.path || 'NO PATH'} (${file.content ? file.content.length : 0} chars)`);
+      });
       
       // Filter out backend.tf, provider.tf, and terraform.tf - these are created during backend configuration
       // and should not be duplicated by AI generation
@@ -1407,10 +1543,36 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
           return false;
         }
         const fileName = file.path.split('/').pop();
-        return fileName !== 'backend.tf' && fileName !== 'provider.tf' && fileName !== 'terraform.tf';
+        const isBackendFile = fileName === 'backend.tf' || fileName === 'provider.tf' || fileName === 'terraform.tf';
+        if (isBackendFile) {
+          console.log(`   ⏭️  Filtering out backend file: ${fileName}`);
+        }
+        return !isBackendFile;
       });
       
+      console.log(`\n✅ [AGGREGATED-ROOT] After filtering, ${validFiles.length} valid file(s) remain:`);
+      validFiles.forEach((file: any, idx: number) => {
+        console.log(`   ${idx + 1}. ${file.path} (${file.content.length} chars)`);
+      });
+      
+      // Check for required files
+      const requiredFiles = ['main.tf', 'variables.tf', 'dev.terraform.tfvars', 'outputs.tf'];
+      const generatedFileNames = validFiles.map((f: any) => f.path.split('/').pop() || f.path);
+      const missingFiles = requiredFiles.filter(req => !generatedFileNames.includes(req));
+      if (missingFiles.length > 0) {
+        console.error(`\n❌ [AGGREGATED-ROOT] MISSING REQUIRED FILES: ${missingFiles.join(', ')}`);
+        console.error(`   Generated files: ${generatedFileNames.join(', ')}`);
+        console.error(`   This means the AI did not generate all required files!`);
+      } else {
+        console.log(`\n✅ [AGGREGATED-ROOT] All required files present: ${requiredFiles.join(', ')}`);
+      }
+      
       if (validFiles.length === 0) {
+        console.error(`\n❌ [AGGREGATED-ROOT] CRITICAL: No valid files after filtering!`);
+        console.error(`   Raw files count: ${parsed.files.length}`);
+        console.error(`   This means either:`);
+        console.error(`   1. AI only generated backend files (backend.tf, provider.tf, terraform.tf)`);
+        console.error(`   2. All files were invalid (missing path or content)`);
         throw new Error('No valid files were generated. Please try again with a more specific description.');
       }
       
@@ -1435,15 +1597,15 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: 'You are a Terraform expert. Generate well-structured, production-ready Terraform code.' },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.3,
-          max_tokens: 4000,
-          response_format: { type: 'json_object' }
-        });
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are a Terraform expert. Generate well-structured, production-ready Terraform code.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 16000, // Increased to handle large Terraform files
+        response_format: { type: 'json_object' }
+      });
       } catch (apiError: any) {
         console.error('❌ OpenAI API error (default):', apiError);
         throw new Error(`OpenAI API error: ${apiError?.message || 'Unknown error'}. Please check your API key and try again.`);
@@ -1462,7 +1624,67 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       console.log(`   Response length: ${response.length} chars`);
 
       if (finishReason === 'length') {
-        console.warn('⚠️  Response was truncated!');
+        console.error('❌ Response was truncated! JSON is likely incomplete.');
+        console.error('   Response length:', response.length, 'chars');
+        console.error('   Attempting to repair truncated JSON...');
+        
+        // Try to repair truncated JSON by closing incomplete structures
+        let jsonText = response.trim();
+        if (jsonText.startsWith('```json')) {
+          jsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+        } else if (jsonText.startsWith('```')) {
+          jsonText = jsonText.replace(/^```\s*/, '').replace(/\s*```$/, '');
+        }
+        
+        try {
+          // Count open braces and brackets
+          const openBraces = (jsonText.match(/\{/g) || []).length;
+          const closeBraces = (jsonText.match(/\}/g) || []).length;
+          const openBrackets = (jsonText.match(/\[/g) || []).length;
+          const closeBrackets = (jsonText.match(/\]/g) || []).length;
+          
+          // Close incomplete strings (find unclosed strings at the end)
+          let inString = false;
+          let escapeNext = false;
+          for (let i = jsonText.length - 1; i >= 0; i--) {
+            if (escapeNext) {
+              escapeNext = false;
+              continue;
+            }
+            if (jsonText[i] === '\\') {
+              escapeNext = true;
+              continue;
+            }
+            if (jsonText[i] === '"') {
+              inString = !inString;
+              break;
+            }
+          }
+          
+          // If we're in a string, close it
+          if (inString) {
+            jsonText += '"';
+          }
+          
+          // Close incomplete arrays/objects
+          if (openBrackets > closeBrackets) {
+            jsonText += ']'.repeat(openBrackets - closeBrackets);
+          }
+          if (openBraces > closeBraces) {
+            jsonText += '}'.repeat(openBraces - closeBraces);
+          }
+          
+          // Try to parse the repaired JSON
+          const parsed = JSON.parse(jsonText);
+          console.log('   ✅ Successfully repaired truncated JSON');
+          if (!parsed.files || !Array.isArray(parsed.files)) {
+            throw new Error('Repaired JSON missing files array');
+          }
+          return { files: parsed.files };
+        } catch (repairError: any) {
+          console.error('   ❌ Failed to repair truncated JSON:', repairError.message);
+          throw new Error(`Response was truncated and could not be repaired. The generated Terraform code is too large (${response.length} chars). Please try with fewer resources or split into multiple requests.`);
+        }
       }
 
       if (!response || response.trim().length === 0) {
@@ -1582,6 +1804,250 @@ Generate only the commit message, nothing else.`;
     const message = completion.choices[0]?.message?.content?.trim() || 'Add Terraform configuration';
     console.log(`📝 AI-generated commit message: "${message}"`);
     return message;
+  }
+
+  /**
+   * Generate variable declarations for missing variables
+   */
+  async generateVariableDeclarations(
+    variableNames: string[],
+    mainTfContent: string
+  ): Promise<string> {
+    const prompt = `You are a Terraform expert. Generate variable declarations for the following variables that are referenced in main.tf but not declared in variables.tf.
+
+Variables to declare: ${variableNames.join(', ')}
+
+Main.tf content (for context):
+\`\`\`
+${mainTfContent.substring(0, 2000)}${mainTfContent.length > 2000 ? '...' : ''}
+\`\`\`
+
+Generate proper variable declarations following Terraform best practices:
+1. Use appropriate types (string, number, bool, list, map, object)
+2. Add descriptions
+3. Only add defaults if they make sense (prefer no defaults for required variables)
+4. Use proper formatting
+
+Return ONLY the variable declarations, one per variable, in this format:
+variable "variable_name" {
+  type        = <type>
+  description = "<description>"
+  # default     = <value> (only if needed)
+}
+
+Return ONLY the Terraform code, no markdown, no explanations.`;
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You are a Terraform expert. Generate clean, production-ready variable declarations.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.3,
+    });
+
+    return response.choices[0]?.message?.content?.trim() || '';
+  }
+
+  /**
+   * Generate .tfvars values for variables based on context
+   */
+  async generateTfvarsValues(
+    variableNames: string[],
+    mainTfContent: string,
+    userDescription: string
+  ): Promise<string> {
+    const prompt = `You are a Terraform expert. Generate sensible default values for the following variables in .tfvars format.
+
+Variables to populate: ${variableNames.join(', ')}
+
+Main.tf content (for context):
+\`\`\`
+${mainTfContent.substring(0, 2000)}${mainTfContent.length > 2000 ? '...' : ''}
+\`\`\`
+
+User's original request: "${userDescription}"
+
+Generate sensible default values based on:
+1. The variable name (e.g., "storage_account_count" = 5 if user asked for 5 storage accounts)
+2. The context from main.tf (e.g., location, naming patterns)
+3. Terraform best practices
+
+Return ONLY the .tfvars assignments in this format:
+variable_name = "value"
+variable_name = 5
+variable_name = true
+variable_name = ["item1", "item2"]
+variable_name = { key = "value" }
+
+Return ONLY the Terraform code, no markdown, no explanations.`;
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You are a Terraform expert. Generate sensible default values for .tfvars files based on context.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.3,
+    });
+
+    return response.choices[0]?.message?.content?.trim() || '';
+  }
+
+  /**
+   * AI-driven resource extraction from natural language description
+   */
+  async extractResourcesFromDescription(
+    description: string,
+    cloudProvider: string | null
+  ): Promise<string[]> {
+    const providerContext = cloudProvider ? ` for ${cloudProvider.toUpperCase()}` : '';
+    const prompt = `You are a Terraform expert. Analyze the following user description and extract a list of specific Terraform resource types (e.g., "azurerm_resource_group", "azurerm_storage_account", "aws_s3_bucket", "google_compute_instance") that the user wants to create${providerContext}.
+
+User Description: "${description}"
+
+Guidelines:
+1. Return ONLY a list of actual Terraform resource types.
+2. If the user uses natural language like "storage account", map it to the correct resource type (e.g., "azurerm_storage_account" for Azure).
+3. Be as specific as possible based on the description.
+4. If a resource type is mentioned multiple times, include it only once.
+
+Return a JSON object with this structure:
+{
+  "resources": ["resource_type_1", "resource_type_2", ...]
+}
+
+Return ONLY valid JSON, no markdown, no explanations.`;
+
+    try {
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are a Terraform expert. Extract resource types and return them as JSON.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.1,
+        response_format: { type: 'json_object' }
+      });
+
+      const response = completion.choices[0]?.message?.content || '{"resources": []}';
+      const parsed = JSON.parse(repairJson(response));
+      return parsed.resources || [];
+    } catch (error: any) {
+      console.error('❌ Error extracting resources with AI:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Generate automation script based on language and user prompt
+   */
+  async generateAutomation(
+    language: 'python' | 'powershell' | 'shell' | 'bash',
+    prompt: string
+  ): Promise<{
+    files: Array<{ path: string; content: string }>;
+  }> {
+    console.log('\n🔍 ========== AUTOMATION SCRIPT GENERATION ==========');
+    console.log(`📝 User Prompt: "${prompt}"`);
+    console.log(`💻 Language: ${language}`);
+    console.log('\n🤖 Generating automation script...');
+
+    const languageInfo = {
+      python: {
+        extension: '.py',
+        name: 'Python',
+        comment: '#',
+        shebang: '#!/usr/bin/env python3',
+        bestPractices: 'Use type hints, docstrings, error handling, and follow PEP 8 style guide.'
+      },
+      powershell: {
+        extension: '.ps1',
+        name: 'PowerShell',
+        comment: '#',
+        shebang: '',
+        bestPractices: 'Use proper error handling with try-catch, parameter validation, and follow PowerShell best practices.'
+      },
+      shell: {
+        extension: '.sh',
+        name: 'Shell',
+        comment: '#',
+        shebang: '#!/bin/sh',
+        bestPractices: 'Use proper error handling with set -e, validate inputs, and follow POSIX shell standards.'
+      },
+      bash: {
+        extension: '.sh',
+        name: 'Bash',
+        comment: '#',
+        shebang: '#!/bin/bash',
+        bestPractices: 'Use proper error handling with set -euo pipefail, validate inputs, and follow bash best practices.'
+      }
+    };
+
+    const lang = languageInfo[language];
+    const fileName = `automation${lang.extension}`;
+
+    const systemPrompt = `You are an expert ${lang.name} automation script developer. Generate production-ready automation scripts that are:
+- Well-documented with clear comments
+- Include proper error handling
+- Follow ${lang.name} best practices: ${lang.bestPractices}
+- Are secure and follow security best practices
+- Include usage instructions in comments
+- Are ready to be deployed to CI/CD pipelines
+
+Generate ONLY the script code, no markdown, no explanations outside of code comments.`;
+
+    const userPrompt = `Generate a ${lang.name} automation script for the following task:
+
+${prompt}
+
+Requirements:
+1. Include a ${lang.shebang ? 'shebang line' : 'proper header'} at the top
+2. Add clear comments explaining what the script does
+3. Include proper error handling
+4. Make the script production-ready and secure
+5. Follow ${lang.name} best practices
+6. Include usage instructions in comments if applicable
+
+Generate the complete script code.`;
+
+    try {
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 4000,
+      });
+
+      let scriptContent = completion.choices[0]?.message?.content?.trim() || '';
+
+      // Clean up the response (remove markdown code blocks if present)
+      scriptContent = scriptContent.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '').trim();
+
+      // Ensure shebang is present if needed
+      if (lang.shebang && !scriptContent.startsWith('#!')) {
+        scriptContent = `${lang.shebang}\n\n${scriptContent}`;
+      }
+
+      console.log(`   ✅ Generated ${lang.name} script: ${fileName}`);
+      console.log(`   📏 Script length: ${scriptContent.length} characters`);
+      console.log('==========================================\n');
+
+      return {
+        files: [
+          {
+            path: fileName,
+            content: scriptContent
+          }
+        ]
+      };
+    } catch (error: any) {
+      console.error('❌ Automation generation failed:', error);
+      throw new Error(`Failed to generate automation script: ${error.message || 'Unknown error'}`);
+    }
   }
 }
 

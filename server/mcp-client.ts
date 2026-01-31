@@ -6,6 +6,18 @@ import { Octokit } from "@octokit/rest";
 export type MCPProvider = 'github' | 'azure' | 'terraform';
 export type MCPServerType = 'devops' | 'resources' | 'pricing';
 
+export interface RepositoryCredentials {
+  github?: {
+    token: string;
+    owner?: string;
+  };
+  azure?: {
+    org: string;
+    pat: string;
+    project: string;
+  };
+}
+
 interface MCPClientConfig {
   command: string;
   args: string[];
@@ -16,19 +28,19 @@ export class MCPClientManager {
   private clients: Map<string, { client: Client; process: ChildProcess }> = new Map();
   
   // Pre-warm connection for a provider (call this when provider is selected)
-  async prewarmConnection(provider: MCPProvider): Promise<void> {
-    const clientKey = `${provider}-devops`;
+  async prewarmConnection(provider: MCPProvider, serverType: MCPServerType = 'devops'): Promise<void> {
+    const clientKey = `${provider}-${serverType}`;
     if (this.clients.has(clientKey)) {
-      console.log(`⚡ [MCP] Connection already warm for ${provider}`);
+      console.log(`⚡ [MCP] Connection already warm for ${clientKey}`);
       return;
     }
     
-    console.log(`🔥 [MCP] Pre-warming connection for ${provider}...`);
+    console.log(`🔥 [MCP] Pre-warming connection for ${clientKey}...`);
     try {
-      await this.getClient(provider);
-      console.log(`✅ [MCP] Connection pre-warmed for ${provider}`);
+      await this.getClient(provider, serverType);
+      console.log(`✅ [MCP] Connection pre-warmed for ${clientKey}`);
     } catch (error: any) {
-      console.warn(`⚠️  [MCP] Failed to pre-warm connection for ${provider}: ${error.message}`);
+      console.warn(`⚠️  [MCP] Failed to pre-warm connection for ${clientKey}: ${error.message}`);
       // Don't throw - pre-warming is optional
     }
   }
@@ -169,17 +181,25 @@ export class MCPClientManager {
       console.error(`   Make sure ${config.command} is available in your PATH`);
     });
     
+    // Capture stdout and stderr for better error messages
+    let stdoutOutput = '';
+    let stderrOutput = '';
+    
     // Monitor process stdout for debugging
     if (childProcess.stdout) {
       childProcess.stdout.on('data', (data) => {
-        console.log(`   [MCP stdout] ${data.toString().trim()}`);
+        const output = data.toString();
+        stdoutOutput += output;
+        console.log(`   [MCP stdout] ${output.trim()}`);
       });
     }
     
     // Monitor process stderr for debugging
     if (childProcess.stderr) {
       childProcess.stderr.on('data', (data) => {
-        console.error(`   [MCP stderr] ${data.toString().trim()}`);
+        const output = data.toString();
+        stderrOutput += output;
+        console.error(`   [MCP stderr] ${output.trim()}`);
       });
     }
     
@@ -201,15 +221,31 @@ export class MCPClientManager {
       console.log(`   🔌 Attempting to connect to MCP server...`);
       console.log(`   Command: ${config.command} ${config.args.join(' ')}`);
       
-      // Add timeout for connection
+      // Add timeout for connection (longer for Azure resources server)
+      const timeoutDuration = (provider === 'azure' && serverType === 'resources') ? 30000 : 10000;
       const connectPromise = client.connect(transport);
       const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Connection timeout after 10 seconds')), 10000)
+        setTimeout(() => reject(new Error(`Connection timeout after ${timeoutDuration / 1000} seconds`)), timeoutDuration)
       );
       
       await Promise.race([connectPromise, timeoutPromise]);
       const connectTime = Date.now() - connectStart;
       console.log(`✅ Connected to MCP server for ${provider}-${serverType} (${connectTime}ms)`);
+      
+      // For Azure resources, wait a bit more to ensure server is fully initialized
+      if (provider === 'azure' && serverType === 'resources') {
+        // Give the server a moment to fully initialize after connection
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Try to list tools to verify server is ready
+        try {
+          await client.listTools();
+          console.log(`   ✅ Azure MCP server is ready and responding`);
+        } catch (toolError: any) {
+          console.warn(`   ⚠️  Azure MCP server connected but tools not ready: ${toolError.message}`);
+          // Don't throw - connection is established, tools might be available later
+        }
+      }
       
       const totalTime = Date.now() - startTime;
       console.log(`⏱️  [MCP] Total client creation time: ${totalTime}ms`);
@@ -232,10 +268,24 @@ export class MCPClientManager {
         console.error(`   Process killed: ${childProcess.killed}`);
       }
       
+      // Wait a bit for stderr to be fully captured before killing process
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
       childProcess.kill(); // Clean up the spawned process
       
       // Provide more specific error message
       let errorMessage = error.message || 'Unknown error';
+      
+      // Include stderr output if available (contains actual server error)
+      if (stderrOutput.trim()) {
+        errorMessage += `\n\nServer Error Output:\n${stderrOutput.trim()}`;
+      }
+      
+      // Include stdout output if available (may contain useful info)
+      if (stdoutOutput.trim() && !errorMessage.includes(stdoutOutput.trim())) {
+        errorMessage += `\n\nServer Output:\n${stdoutOutput.trim()}`;
+      }
+      
       if (errorMessage.includes('Connection closed') || errorMessage.includes('-32000')) {
         // Special handling for Terraform MCP server
         if (provider === 'terraform') {
@@ -256,12 +306,41 @@ TROUBLESHOOTING STEPS:
 
 NOTE: The package name is 'terraform-mcp-server' (not @hashicorp/terraform-mcp-server).
 The system will fall back to GitHub API for version information and OpenAI for code generation.`;
+        } else if (provider === 'azure' && serverType === 'resources') {
+          // Special handling for Azure MCP server
+          errorMessage = `Azure MCP server connection closed immediately. This usually means:
+1. The MCP server process crashed on startup (likely authentication failure)
+2. Azure credentials are not configured correctly
+3. The MCP server is not installed correctly
+4. There's a compatibility issue with the MCP server
+
+AUTHENTICATION REQUIREMENTS:
+The Azure MCP server requires one of these authentication methods:
+- Service Principal (AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID)
+- Azure CLI login (az login)
+- Managed Identity (if running on Azure)
+- Visual Studio credentials
+- Azure PowerShell credentials
+
+TROUBLESHOOTING STEPS:
+1. Check Azure credentials: echo $AZURE_CLIENT_ID (should be set)
+2. Test Azure CLI: az account show (should show your subscription)
+3. Try manual start: npx -y @azure/mcp@latest server start
+4. Check Node.js version: node --version (should be >= 18)
+5. Verify npx is working: npx --version
+
+${stderrOutput.trim() ? `\nACTUAL SERVER ERROR:\n${stderrOutput.trim()}` : ''}
+
+Try running manually: ${config.command} ${config.args.join(' ')}
+Check if the MCP server package is properly installed.`;
         } else {
           errorMessage = `MCP server connection closed immediately. This usually means:
 1. The MCP server process crashed on startup
 2. The MCP server is not installed correctly
 3. There's a compatibility issue with the MCP server
 4. The server requires additional configuration or environment variables
+
+${stderrOutput.trim() ? `\nACTUAL SERVER ERROR:\n${stderrOutput.trim()}` : ''}
 
 Try running manually: ${config.command} ${config.args.join(' ')}
 Check if the MCP server package is properly installed.`;
@@ -691,40 +770,46 @@ Check if the MCP server package is properly installed.`;
     }
   }
 
-  async listRepositories(provider: MCPProvider): Promise<any[]> {
+  async listRepositories(provider: MCPProvider, credentials: RepositoryCredentials = {}): Promise<any[]> {
     const startTime = Date.now();
     try {
       if (provider === 'github') {
-        const owner = process.env.GITHUB_OWNER || '';
-        console.log(`📡 [GitHub] Starting repository fetch for owner: ${owner}`);
-        const connectionStart = Date.now();
-        
-        const result = await this.callTool(provider, 'search_repositories', {
-          query: `user:${owner}`,
-        });
-        
-        const connectionTime = Date.now() - connectionStart;
-        console.log(`⏱️  [GitHub] Repository fetch completed in ${connectionTime}ms`);
-        // Parse MCP content parts
-        if (result.content && Array.isArray(result.content)) {
-          const textContent = result.content.find((item: any) => item.type === 'text');
-          if (textContent && textContent.text) {
-            const parsed = JSON.parse(textContent.text);
-            const repos = parsed.items || parsed || [];
-            // Convert repository IDs to strings for schema compatibility
-            return repos.map((repo: any) => ({
-              ...repo,
-              id: String(repo.id)
-            }));
-          }
+        const owner = credentials.github?.owner || process.env.GITHUB_OWNER || '';
+        const token = credentials.github?.token || process.env.GITHUB_TOKEN || '';
+        if (!token) {
+          throw new Error("Missing GITHUB_TOKEN environment variable.");
         }
-        return [];
+        console.log(`📡 [GitHub] Fetching repositories for owner: ${owner || 'authenticated user'}`);
+        const octokit = new Octokit({ auth: token });
+        const response = await octokit.paginate(octokit.rest.repos.listForAuthenticatedUser, {
+          visibility: "all",
+          affiliation: "owner,collaborator,organization_member",
+          per_page: 100,
+        });
+        const filteredResponse = owner
+          ? response.filter(
+              (repo) =>
+                repo.owner?.login &&
+                repo.owner.login.toLowerCase() === owner.toLowerCase()
+            )
+          : response;
+        console.log(
+          `✅ [GitHub] Retrieved ${filteredResponse.length} repositories via REST API`
+        );
+        return filteredResponse.map((repo) => ({
+          id: String(repo.id),
+          name: repo.name || repo.full_name,
+          full_name: repo.full_name,
+          default_branch: repo.default_branch || "main",
+          updated_at: repo.updated_at,
+          url: repo.html_url,
+        }));
       } else if (provider === 'azure') {
         // Azure DevOps - Use REST API directly (MCP is unreliable/hangs)
         // MCP has known issues with Azure DevOps, so we'll use REST API as primary
-        const org = process.env.AZURE_DEVOPS_ORG;
-        const pat = process.env.AZURE_DEVOPS_PAT;
-        const project = process.env.AZURE_DEVOPS_PROJECT;
+        const org = credentials.azure?.org || process.env.AZURE_DEVOPS_ORG;
+        const pat = credentials.azure?.pat || process.env.AZURE_DEVOPS_PAT;
+        const project = credentials.azure?.project || process.env.AZURE_DEVOPS_PROJECT;
         
         console.log(`📡 [Azure DevOps] Starting repository listing...`);
         console.log(`   Organization: ${org || 'NOT SET'}`);
@@ -743,6 +828,77 @@ Check if the MCP server package is properly installed.`;
       }
     } catch (error) {
       console.error(`Error listing repositories for ${provider}:`, error);
+      throw error;
+    }
+  }
+
+  async listRepositoryBranches(
+    provider: MCPProvider,
+    repoName: string,
+    limit: number = 50
+  ): Promise<string[]> {
+    try {
+      if (provider === 'github') {
+        const octokit = new Octokit({
+          auth: process.env.GITHUB_TOKEN,
+        });
+
+        let owner = process.env.GITHUB_OWNER || '';
+        let repo = repoName;
+
+        if (repoName.includes("/")) {
+          const parts = repoName.split("/");
+          owner = parts[0];
+          repo = parts[1];
+        }
+
+        if (!owner || !repo) {
+          throw new Error("Unable to determine GitHub owner/repo from selection.");
+        }
+
+        const perPage = Math.min(limit, 100);
+        const { data } = await octokit.rest.repos.listBranches({
+          owner,
+          repo,
+          per_page: perPage,
+        });
+
+        return data.map((branch) => branch.name).filter(Boolean);
+      } else if (provider === "azure") {
+        const org = process.env.AZURE_DEVOPS_ORG;
+        const pat = process.env.AZURE_DEVOPS_PAT;
+        const project = process.env.AZURE_DEVOPS_PROJECT;
+
+        if (!org || !pat || !project) {
+          throw new Error("Azure DevOps credentials not configured.");
+        }
+
+        const repoId = await this.getAzureDevOpsRepositoryId(org, pat, project, repoName);
+        const url = `https://dev.azure.com/${org}/${project}/_apis/git/repositories/${repoId}/refs?filter=heads/&api-version=7.1`;
+        const authHeader = Buffer.from(`:${pat}`).toString("base64");
+
+        const response = await fetch(url, {
+          method: "GET",
+          headers: {
+            Authorization: `Basic ${authHeader}`,
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to list branches: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        const refs = Array.isArray(data.value) ? data.value : [];
+        return refs
+          .map((ref: any) => typeof ref.name === "string" && ref.name.replace("refs/heads/", ""))
+          .filter((name): name is string => typeof name === "string" && name.length > 0)
+          .slice(0, limit);
+      } else {
+        throw new Error(`Unsupported provider: ${provider}`);
+      }
+    } catch (error: any) {
+      console.error(`Error listing branches for ${provider} ${repoName}:`, error);
       throw error;
     }
   }
@@ -1279,6 +1435,134 @@ Check if the MCP server package is properly installed.`;
       console.error(`Error scanning repository ${repoName}:`, error);
       throw error;
     }
+  }
+
+  private parseGitHubRepoName(repoName: string): { owner: string; repo: string } {
+    let owner = process.env.GITHUB_OWNER || '';
+    let repo = repoName;
+    if (repoName.includes('/')) {
+      const parts = repoName.split('/');
+      owner = parts[0];
+      repo = parts[1];
+    }
+    if (!owner || !repo) {
+      throw new Error('Unable to resolve GitHub repository owner or name.');
+    }
+    return { owner, repo };
+  }
+
+  private async resolveGitHubCommitSha(
+    octokit: Octokit,
+    owner: string,
+    repo: string,
+    branch: string
+  ): Promise<string> {
+    try {
+      const { data: ref } = await octokit.rest.git.getRef({
+        owner,
+        repo,
+        ref: `heads/${branch}`,
+      });
+      return ref.object.sha;
+    } catch (error: any) {
+      console.warn(`   ⚠️  Could not resolve branch '${branch}': ${error.message}`);
+      return branch;
+    }
+  }
+
+  async listRepositoryPaths(
+    provider: MCPProvider,
+    repoName: string,
+    branch: string = 'main'
+  ): Promise<string[]> {
+    if (provider === 'github') {
+      const octokit = new Octokit({
+        auth: process.env.GITHUB_TOKEN,
+      });
+      const { owner, repo } = this.parseGitHubRepoName(repoName);
+      const commitSha = await this.resolveGitHubCommitSha(octokit, owner, repo, branch);
+      try {
+        const { data: treeData } = await octokit.rest.git.getTree({
+          owner,
+          repo,
+          tree_sha: commitSha,
+          recursive: 'true',
+        });
+        return (treeData.tree || [])
+          .filter((item) => item.type === 'blob' && item.path)
+          .map((item) => item.path || '')
+          .filter(Boolean);
+      } catch (error: any) {
+        if (error.status === 409 || error.message?.includes("Git Repository is empty")) {
+          console.log(`Repository ${owner}/${repo} is empty`);
+          return [];
+        }
+        console.error(`Error fetching repository tree for ${owner}/${repo}:`, error.message || error);
+        throw error;
+      }
+    } else if (provider === 'azure') {
+      const files = await this.scanRepositoryFilesViaAzureDevOpsAPI(repoName, branch);
+      return files.map((file) => file.path);
+    }
+    throw new Error(`Unsupported provider: ${provider}`);
+  }
+
+  async getRepositoryFile(
+    provider: MCPProvider,
+    repoName: string,
+    filePath: string,
+    branch: string = 'main'
+  ): Promise<{ path: string; content: string }> {
+    if (provider === 'github') {
+      const octokit = new Octokit({
+        auth: process.env.GITHUB_TOKEN,
+      });
+      const { owner, repo } = this.parseGitHubRepoName(repoName);
+      const response = await octokit.rest.repos.getContent({
+        owner,
+        repo,
+        path: filePath,
+        ref: branch,
+      });
+      if (Array.isArray(response.data)) {
+        throw new Error(`Expected file but got directory for path: ${filePath}`);
+      }
+      const data = response.data as { content?: string };
+      if (!data.content) {
+        throw new Error(`File ${filePath} has no content`);
+      }
+      return {
+        path: filePath,
+        content: Buffer.from(data.content, 'base64').toString('utf-8'),
+      };
+    } else if (provider === 'azure') {
+      const org = process.env.AZURE_DEVOPS_ORG;
+      const pat = process.env.AZURE_DEVOPS_PAT;
+      const project = process.env.AZURE_DEVOPS_PROJECT;
+      if (!org || !pat || !project) {
+        throw new Error('Azure DevOps credentials not configured.');
+      }
+      const repoId = await this.getAzureDevOpsRepositoryId(org, pat, project, repoName);
+      const authHeader = Buffer.from(`:${pat}`).toString('base64');
+      const targetPath = filePath.startsWith('/') ? filePath : `/${filePath}`;
+      const url = `https://dev.azure.com/${org}/${project}/_apis/git/repositories/${repoId}/items?path=${encodeURIComponent(
+        targetPath
+      )}&versionDescriptor.version=${branch}&versionDescriptor.versionType=branch&api-version=7.1&$format=text`;
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Basic ${authHeader}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to download file ${filePath}: ${response.statusText}`);
+      }
+      const content = await response.text();
+      return {
+        path: filePath,
+        content,
+      };
+    }
+    throw new Error(`Unsupported provider: ${provider}`);
   }
 
   /**

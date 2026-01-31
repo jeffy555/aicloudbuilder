@@ -1,0 +1,41 @@
+check_id: CKV_AZURE_206
+check_name: Ensure that Storage Accounts use replication
+resource_types:
+  - azurerm_storage_account
+terraform_attribute: account_replication_type
+attribute_type: simple
+required_value: GRS
+description: Ensures storage account uses replication for redundancy (GRS, GZRS, RAGRS, or ZRS, not LRS)
+
+remediation_snippet: |
+  account_replication_type = "GRS"  # Options: GRS, GZRS, RAGRS, ZRS
+
+complete_example: |
+  resource "azurerm_storage_account" "example" {
+    name                     = "examplestorage"
+    resource_group_name      = azurerm_resource_group.example.name
+    location                 = azurerm_resource_group.example.location
+    account_tier             = "Standard"
+    
+    account_replication_type = "GRS"  # Options: GRS, GZRS, RAGRS, ZRS
+  }
+
+tags:
+  - storage
+  - replication
+  - redundancy
+  - azure
+  - high-availability
+
+keywords:
+  - storage replication
+  - account replication type
+  - GRS
+  - geo-redundant storage
+  - redundancy
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account#account_replication_type
+

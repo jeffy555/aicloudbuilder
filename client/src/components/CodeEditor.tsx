@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
@@ -16,6 +16,9 @@ interface CodeFile {
 interface CodeEditorProps {
   files: CodeFile[];
   onFileChange: (fileName: string, content: string) => void;
+  existingFiles?: string[]; // List of existing file paths (read-only)
+  activeFile?: string;
+  onFileSelect?: (fileName: string) => void;
 }
 
 // Group files by folder for better organization
@@ -35,18 +38,33 @@ function groupFilesByFolder(files: CodeFile[]): Map<string, CodeFile[]> {
   return groups;
 }
 
-export default function CodeEditor({ files, onFileChange }: CodeEditorProps) {
+export default function CodeEditor({ files, onFileChange, existingFiles = [], activeFile, onFileSelect }: CodeEditorProps) {
   const [selectedFile, setSelectedFile] = useState<string>(files[0]?.name || '');
+  useEffect(() => {
+    setSelectedFile((prev) => {
+      if (activeFile && files.some((file) => file.name === activeFile)) {
+        return activeFile;
+      }
+      if (files.some((file) => file.name === prev)) {
+        return prev;
+      }
+      return files[0]?.name || '';
+    });
+  }, [activeFile, files]);
   const fileGroups = groupFilesByFolder(files);
   const currentFile = files.find(f => f.name === selectedFile);
+  const isExistingFile = currentFile ? existingFiles.includes(currentFile.name) : false;
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
       {/* File List Panel */}
       <Card className="p-4 md:col-span-1">
-        <h3 className="text-lg font-semibold mb-4">Generated Files</h3>
+        <h3 className="text-lg font-semibold mb-4">Repository Files</h3>
         <ScrollArea className="h-[500px] pr-4">
-          <RadioGroup value={selectedFile} onValueChange={setSelectedFile}>
+        <RadioGroup value={selectedFile} onValueChange={(value) => {
+          setSelectedFile(value);
+          onFileSelect?.(value);
+        }}>
             {Array.from(fileGroups.entries()).map(([folder, folderFiles], groupIndex) => (
               <div key={folder} className="mb-4">
                 {/* Folder Header */}
@@ -77,6 +95,9 @@ export default function CodeEditor({ files, onFileChange }: CodeEditorProps) {
                         >
                           <FileTextIcon className="w-4 h-4" />
                           <span>{fileName}</span>
+                          {existingFiles.includes(file.name) && (
+                            <span className="text-xs text-muted-foreground ml-auto">(existing)</span>
+                          )}
                         </Label>
                       </div>
                     );
@@ -102,13 +123,21 @@ export default function CodeEditor({ files, onFileChange }: CodeEditorProps) {
         </div>
         
         {currentFile ? (
-          <Textarea
-            value={currentFile.content}
-            onChange={(e) => onFileChange(currentFile.name, e.target.value)}
-            className="min-h-[450px] font-mono text-sm resize-none"
-            placeholder={`Edit ${currentFile.name}...`}
-            data-testid={`editor-${currentFile.name}`}
-          />
+          <>
+            {isExistingFile && (
+              <div className="mb-2 text-xs text-muted-foreground bg-muted/50 p-2 rounded">
+                This is an existing file in the repository. Only the generated automation script can be edited.
+              </div>
+            )}
+            <Textarea
+              value={currentFile.content}
+              onChange={(e) => onFileChange(currentFile.name, e.target.value)}
+              className="min-h-[450px] font-mono text-sm resize-none"
+              placeholder={`Edit ${currentFile.name}...`}
+              data-testid={`editor-${currentFile.name}`}
+              readOnly={isExistingFile}
+            />
+          </>
         ) : (
           <div className="min-h-[450px] flex items-center justify-center text-muted-foreground">
             <p>Select a file to preview</p>

@@ -1,0 +1,40 @@
+check_id: CKV_AZURE_139
+check_name: Ensure ACR set to disable public networking
+resource_types:
+  - azurerm_container_registry
+terraform_attribute: public_network_access_enabled
+attribute_type: simple
+required_value: false
+description: Disables public network access for container registry
+
+remediation_snippet: |
+  public_network_access_enabled = false
+
+complete_example: |
+  resource "azurerm_container_registry" "example" {
+    name                = "exampleacr"
+    resource_group_name = azurerm_resource_group.example.name
+    location            = azurerm_resource_group.example.location
+    sku                 = "Basic"
+    
+    public_network_access_enabled = false
+  }
+
+tags:
+  - container-registry
+  - security
+  - networking
+  - azure
+  - acr
+
+keywords:
+  - container registry
+  - public network
+  - network access
+  - acr security
+
+confidence_factors:
+  exact_match: true
+  tested: true
+  documentation_url: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/container_registry#public_network_access_enabled
+
