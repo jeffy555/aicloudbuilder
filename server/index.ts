@@ -3,6 +3,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { remediationRAGService } from "./rag/remediation-rag";
+import { logFeatureFlagStatus, featureFlagMiddleware } from "./middleware/feature-flags";
 
 const app = express();
 
@@ -17,6 +18,9 @@ app.use(express.json({
   }
 }));
 app.use(express.urlencoded({ extended: false }));
+
+// Phase 0: Feature flag middleware
+app.use(featureFlagMiddleware);
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -49,6 +53,9 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Phase 0: Log feature flag status
+  logFeatureFlagStatus();
+
   // Initialize RAG service on server startup
   try {
     await remediationRAGService.initialize();

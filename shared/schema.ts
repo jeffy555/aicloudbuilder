@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, jsonb, real, integer, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -60,6 +60,30 @@ export const generatedFiles = pgTable("generated_files", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+// Phase 1: User-specific fix preferences table
+export const userFixPreferences = pgTable("user_fix_preferences", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
+  checkId: text("check_id").notNull(), // e.g., "CKV_AZURE_59"
+  resourceType: text("resource_type").notNull(), // e.g., "azurerm_storage_account"
+  fixSnippet: text("fix_snippet").notNull(), // The actual fix code
+  confidence: real("confidence").notNull().default(1.0), // 0.0 to 1.0
+  timesUsed: integer("times_used").notNull().default(0),
+  successCount: integer("success_count").notNull().default(0),
+  failureCount: integer("failure_count").notNull().default(0),
+  source: text("source").notNull(), // 'user_verified' | 'checkov' | 'ai_generated' | 'user_preference'
+  lastUsedAt: timestamp("last_used_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  // Composite index for fast lookups by user + check + resource
+  userFixLookupIdx: index("idx_user_fix_lookup").on(table.userId, table.checkId, table.resourceType),
+  // Index for finding all fixes for a specific check
+  checkLookupIdx: index("idx_check_lookup").on(table.checkId, table.resourceType),
+  // Index for finding user's most used fixes
+  userTimesUsedIdx: index("idx_user_times_used").on(table.userId, table.timesUsed),
+}));
+
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).pick({
   username: true,
@@ -84,6 +108,19 @@ export const insertGeneratedFileSchema = createInsertSchema(generatedFiles).omit
   updatedAt: true,
 });
 
+export const insertUserFixPreferenceSchema = createInsertSchema(userFixPreferences).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  // Add custom validation
+  confidence: z.number().min(0).max(1.0),
+  timesUsed: z.number().int().min(0),
+  successCount: z.number().int().min(0),
+  failureCount: z.number().int().min(0),
+  source: z.enum(['user_verified', 'checkov', 'ai_generated', 'user_preference']),
+});
+
 // Types
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
@@ -96,6 +133,9 @@ export type Message = typeof messages.$inferSelect;
 
 export type InsertGeneratedFile = z.infer<typeof insertGeneratedFileSchema>;
 export type GeneratedFile = typeof generatedFiles.$inferSelect;
+
+export type InsertUserFixPreference = z.infer<typeof insertUserFixPreferenceSchema>;
+export type UserFixPreference = typeof userFixPreferences.$inferSelect;
 
 // Additional types for API
 export const repositorySchema = z.object({

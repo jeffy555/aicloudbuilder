@@ -1,9 +1,28 @@
 /**
  * Vector Store Wrapper for Checkov Remediation Templates
- * 
+ *
  * This module provides a simple in-memory vector store implementation.
  * For production, consider using ChromaDB, Pinecone, or Qdrant.
  */
+
+import { performanceLogger } from '../utils/performance-logger';
+
+// Cost tracking
+interface CostTracker {
+  totalOpenAICalls: number;
+  totalTokensUsed: number;
+  estimatedCostUSD: number;
+}
+
+const costTracker: CostTracker = {
+  totalOpenAICalls: 0,
+  totalTokensUsed: 0,
+  estimatedCostUSD: 0,
+};
+
+export function getCostStats(): CostTracker {
+  return { ...costTracker };
+}
 
 interface VectorDocument {
   id: string;
@@ -79,24 +98,30 @@ const vectorStore = new SimpleVectorStore();
  * Now with caching to avoid redundant API calls
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
+  const perfId = performanceLogger.start('generateEmbedding', {
+    textLength: text.length,
+  });
+
   const model = 'text-embedding-3-small';
-  
+
   // Import cache (dynamic import to avoid circular dependencies)
   const { embeddingCache } = await import('./embedding-cache');
-  
+
   // Generate cache key
   const cacheKey = embeddingCache.generateHash(text, model);
-  
+
   // Check cache first
   const cached = await embeddingCache.get(cacheKey);
   if (cached) {
     console.log(`   💾 Using cached embedding (hash: ${cacheKey.substring(0, 8)}...)`);
+    performanceLogger.end(perfId, true);
     return cached;
   }
 
   // Cache miss - generate new embedding
   let embedding: number[];
   let source: 'openai' | 'local' | 'fallback' = 'fallback';
+  let tokensUsed = 0;
 
   try {
     const openaiApiKey = process.env.OPENAI_API_KEY;
@@ -104,6 +129,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
       console.warn('⚠️  OPENAI_API_KEY not set. Using fallback embeddings.');
       embedding = createSimpleEmbedding(text);
       source = 'fallback';
+      performanceLogger.end(perfId, true);
     } else {
       const response = await fetch('https://api.openai.com/v1/embeddings', {
         method: 'POST',
@@ -120,23 +146,36 @@ export async function generateEmbedding(text: string): Promise<number[]> {
       if (!response.ok) {
         const error = await response.json();
         const errorMessage = error.error?.message || response.statusText;
-        
+
         // Check for quota/billing errors
         if (errorMessage.includes('quota') || errorMessage.includes('billing')) {
           console.warn('⚠️  OpenAI API quota exceeded. Using fallback embeddings. This is fine for development.');
           console.warn('   To use OpenAI embeddings: Check your OpenAI billing at https://platform.openai.com/account/billing');
           embedding = createSimpleEmbedding(text);
           source = 'fallback';
+          performanceLogger.end(perfId, false, 'Quota exceeded');
         } else {
           console.error('❌ Failed to generate embedding:', errorMessage);
           embedding = createSimpleEmbedding(text);
           source = 'fallback';
+          performanceLogger.end(perfId, false, errorMessage);
         }
       } else {
         const data = await response.json();
         embedding = data.data[0].embedding;
         source = 'openai';
-        console.log(`   ✅ Generated new OpenAI embedding (hash: ${cacheKey.substring(0, 8)}...)`);
+        tokensUsed = data.usage?.total_tokens || Math.ceil(text.length / 4); // Estimate if not provided
+
+        // Track cost
+        costTracker.totalOpenAICalls++;
+        costTracker.totalTokensUsed += tokensUsed;
+        // text-embedding-3-small: $0.00002 per 1K tokens
+        const costPerToken = 0.00002 / 1000;
+        const callCost = tokensUsed * costPerToken;
+        costTracker.estimatedCostUSD += callCost;
+
+        console.log(`   ✅ Generated new OpenAI embedding (hash: ${cacheKey.substring(0, 8)}..., tokens: ${tokensUsed}, cost: $${callCost.toFixed(6)})`);
+        performanceLogger.end(perfId, true);
       }
     }
   } catch (error: any) {
@@ -148,6 +187,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
     }
     embedding = createSimpleEmbedding(text);
     source = 'fallback';
+    performanceLogger.end(perfId, false, error.message);
   }
 
   // Cache the embedding (whether from OpenAI or fallback)

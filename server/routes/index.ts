@@ -15,6 +15,8 @@ import { registerActivityRoutes } from "./activities";
 import { registerCommitRoutes } from "./commit";
 import { registerDebugRoutes } from "./debug";
 import { registerScoreMeRoutes } from "./scoreme";
+import { registerMetricsRoutes } from "./metrics";
+import { registerUserFixPreferencesRoutes } from "./user-fix-preferences";
 // Import legacy routes for routes not yet migrated
 import { registerLegacyRoutes } from "../routes-legacy";
 
@@ -53,7 +55,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerCommitRoutes(app);
   registerDebugRoutes(app);
   registerScoreMeRoutes(app);
-  
+  registerMetricsRoutes(app); // Phase 0: Performance monitoring
+  registerUserFixPreferencesRoutes(app); // Phase 2: User fix preferences
+
   // Register legacy routes for large/complex endpoints (deferred migration)
   // These endpoints are fully functional and will be migrated incrementally in a future phase:
   // - POST /api/sessions/:id/generate-terraform (~1,700 lines)

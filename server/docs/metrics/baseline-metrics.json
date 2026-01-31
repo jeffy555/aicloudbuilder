@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-01-31T16:08:59.852Z",
+  "aiApiCalls": {
+    "totalEmbeddingCalls": 0,
+    "openaiCalls": 0,
+    "fallbackCalls": 0,
+    "cacheHitRate": 0,
+    "estimatedMonthlyCost": 0
+  },
+  "fixRetrieval": {
+    "totalFixes": 0,
+    "averageResponseTimeMs": 0,
+    "bySource": {},
+    "bySourcePercentage": {}
+  },
+  "successRate": {
+    "totalVerified": 0,
+    "successful": 0,
+    "failed": 0,
+    "successRate": "N/A",
+    "unverified": 0
+  },
+  "checkovCoverage": {
+    "totalChecks": 0,
+    "uniqueCheckIds": [],
+    "byCloudProvider": {},
+    "topChecks": []
+  },
+  "cacheStats": {
+    "fixSnippetsSize": "0.00 B",
+    "embeddingCacheSize": "0.00 B",
+    "fixLogsSize": "0.00 B",
+    "totalCacheSizeMB": 0
+  }
+}

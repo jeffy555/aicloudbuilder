@@ -2,6 +2,7 @@ import { loadTemplatesFromDirectory, type RemediationTemplate } from './template
 import { generateEmbedding, queryVectorStore, addToVectorStore, initializeVectorStore } from './vector-store';
 import { calculateConfidence } from './confidence-scorer';
 import { fixSnippetStore, type FixSnippet, type FixSnippetResult } from './fix-snippet-store';
+import { performanceLogger } from '../utils/performance-logger';
 
 export interface RemediationResult {
   template?: RemediationTemplate; // Keep for backward compatibility
@@ -189,29 +190,42 @@ export class RemediationRAGService {
     guideline: string,
     resourceType: string
   ): Promise<RemediationResult | null> {
-    // Ensure service is initialized
-    if (!this.initialized) {
-      await this.initialize();
-    }
-
-    // 1. Try exact match in fix snippet store first (fast lookup)
-    const exactMatch = await fixSnippetStore.getByKey(checkId, resourceType);
-    if (exactMatch && !exactMatch.deprecated && exactMatch.confidence >= 0.7) {
-      console.log(`✅ Exact match found for ${checkId} in fix snippet store`);
-      return {
-        snippet: exactMatch,
-        confidence: exactMatch.confidence,
-        matchReason: 'Exact match from fix snippet store',
-        source: 'retrieved',
-      };
-    }
-
-    // 2. Semantic search in vector DB
-    const queryText = `${checkId} ${checkName} ${guideline} ${resourceType}`;
-    const results = await queryVectorStore({
-      query: queryText,
-      topK: 5,
+    // Track performance
+    const perfId = performanceLogger.start('findRemediation', {
+      checkId,
+      resourceType,
     });
+
+    try {
+      // Ensure service is initialized
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
+      // 1. Try exact match in fix snippet store first (fast lookup)
+      const exactMatchPerfId = performanceLogger.start('findRemediation.exactMatch');
+      const exactMatch = await fixSnippetStore.getByKey(checkId, resourceType);
+      performanceLogger.end(exactMatchPerfId, !!exactMatch);
+
+      if (exactMatch && !exactMatch.deprecated && exactMatch.confidence >= 0.7) {
+        console.log(`✅ Exact match found for ${checkId} in fix snippet store`);
+        performanceLogger.end(perfId, true);
+        return {
+          snippet: exactMatch,
+          confidence: exactMatch.confidence,
+          matchReason: 'Exact match from fix snippet store',
+          source: 'retrieved',
+        };
+      }
+
+      // 2. Semantic search in vector DB
+      const semanticPerfId = performanceLogger.start('findRemediation.semanticSearch');
+      const queryText = `${checkId} ${checkName} ${guideline} ${resourceType}`;
+      const results = await queryVectorStore({
+        query: queryText,
+        topK: 5,
+      });
+      performanceLogger.end(semanticPerfId, true);
 
     if (results.length === 0) {
       // 3. Fallback to template search for backward compatibility
@@ -301,7 +315,12 @@ export class RemediationRAGService {
 
     // 6. No good match - will generate
     console.log(`⚠️  No suitable remediation found for ${checkId} (confidence < 0.7)`);
+    performanceLogger.end(perfId, false, 'No suitable match found');
     return null;
+    } catch (error) {
+      performanceLogger.end(perfId, false, error instanceof Error ? error.message : String(error));
+      throw error;
+    }
   }
 
   /**
