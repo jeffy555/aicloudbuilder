@@ -7,6 +7,8 @@ import { insertMessageSchema, insertGeneratedFileSchema, insertSessionSchema, ty
 import { analyzeTerraformFiles } from "./terraform-parser";
 import { validateTerraformRequest, formatValidationErrors, type ValidationResult } from "./terraform-validator";
 import { remediationRAGService } from "./rag/remediation-rag";
+import { intelligentFixRetriever } from "./rag/intelligent-fix-retriever";
+import { featureFlags } from "./middleware/feature-flags";
 import { fixLogStore } from "./audit/fix-log";
 import { getFixGuidance, generateFixMessage } from "./checkov-fix-guidance";
 import { generateArchitectureDiagram } from "./diagram/terraform-diagram-generator";
@@ -37,6 +39,69 @@ function repairJson(jsonText: string): string {
     return match;
   });
   return repaired;
+}
+
+/**
+ * Phase 6: Unified remediation retrieval wrapper.
+ * When ENABLE_INTELLIGENT_FIX_RETRIEVAL is on, delegates to intelligentFixRetriever
+ * and maps the result back to the RAG-compatible shape so all downstream prompt-building
+ * and verification logic works without changes.
+ * When the flag is off, calls remediationRAGService.findRemediation() directly.
+ */
+async function getRemediation(
+  checkId: string,
+  checkName: string,
+  guideline: string,
+  resourceType: string,
+  userId?: string,
+  cloudProvider?: string
+): Promise<ReturnType<typeof remediationRAGService.findRemediation>> {
+  if (featureFlags.intelligentFixRetrieval) {
+    const result = await intelligentFixRetriever.getFixForCheck(
+      checkId,
+      resourceType,
+      checkName,
+      guideline,
+      userId,
+      undefined, // context
+      cloudProvider
+    );
+
+    if (!result) return null;
+
+    // Map IntelligentFixResult → RAG-compatible shape
+    return {
+      snippet: {
+        id: require('crypto').createHash('sha256')
+          .update(`${checkId}:${resourceType}`)
+          .digest('hex')
+          .substring(0, 16),
+        checkId,
+        resourceType,
+        cloudProvider: cloudProvider || 'azure',
+        fixSnippet: result.fix,
+        context: '',
+        guideline,
+        source: result.source === 'checkov_official' ? 'retrieved'
+              : result.source === 'ai_generated' ? 'generated'
+              : 'retrieved',
+        confidence: result.confidence,
+        successCount: result.metadata?.timesUsed || 0,
+        failureCount: 0,
+        verified: result.confidence >= 0.8,
+        deprecated: false,
+        lastUsed: new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      template: null,
+      confidence: result.confidence,
+      matchReason: `[intelligent] source=${result.source}`,
+    };
+  }
+
+  // Flag off — original path, zero behaviour change
+  return remediationRAGService.findRemediation(checkId, checkName, guideline, resourceType);
 }
 
 // Helper function to find matching brace for Terraform blocks
@@ -7810,12 +7875,14 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
                 description += `   - Resource Type: ${resourceType}\n`;
               }
               
-              // Use RAG to find remediation template
-              const remediation = await remediationRAGService.findRemediation(
+              // Use unified retrieval (intelligent when flag on, RAG otherwise)
+              const remediation = await getRemediation(
                 check.checkId,
                 check.checkName,
                 check.guideline || '',
-                resourceType
+                resourceType,
+                session.userId || undefined,
+                session.cloudProvider || 'azure'
               );
 
               if (remediation) {
@@ -7882,11 +7949,13 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
           batchChecks.map(async (check: any) => {
             const resourceMatch = check.resource?.match(/^([a-z_]+)/);
             const resourceType = resourceMatch?.[1] || '';
-            const remediation = await remediationRAGService.findRemediation(
+            const remediation = await getRemediation(
               check.checkId,
               check.checkName,
               check.guideline || '',
-              resourceType
+              resourceType,
+              session.userId || undefined,
+              session.cloudProvider || 'azure'
             );
             return { check, remediation };
           })
@@ -8021,11 +8090,13 @@ Return ONLY the complete fixed Terraform code in a code block, nothing else.`;
               batchChecks.map(async (check: any) => {
                 const resourceMatch = check.resource?.match(/^([a-z_]+)/);
                 const resourceType = resourceMatch?.[1] || '';
-                const remediation = await remediationRAGService.findRemediation(
+                const remediation = await getRemediation(
                   check.checkId,
                   check.checkName,
                   check.guideline || '',
-                  resourceType
+                  resourceType,
+                  session.userId || undefined,
+                  session.cloudProvider || 'azure'
                 );
                 return { check, remediation };
               })
@@ -8237,41 +8308,56 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
                 verificationDate: new Date(),
               });
               
-              // Update fix snippet confidence if it was retrieved
-              if (remediationResult?.remediation?.snippet) {
-                const snippet = remediationResult.remediation.snippet;
-                await remediationRAGService.updateFixFromVerification(snippet.id, true);
-                console.log(`   📈 Updated fix snippet confidence: ${snippet.id} → passed`);
-              }
-              
-              // Store generated fix if it was newly generated
-              if (!remediationResult?.remediation || remediationResult.remediation.confidence < 0.7) {
-                // This was a generated fix - extract and store it
-                try {
-                  // Extract fix snippet from fixed content (simplified - in production, use AST parsing)
-                  const fixSnippet = extractFixSnippet(fixedContent, check, resourceType);
-                  
-                  if (fixSnippet) {
-                    const cloudProvider = session.cloudProvider || 'azure';
-                    await remediationRAGService.storeGeneratedFix(
-                      checkId,
-                      resourceType,
-                      cloudProvider,
-                      fixSnippet,
-                      fixedContent,
-                      check.guideline || check.checkName
-                    );
-                    console.log(`   💾 Stored generated fix snippet: ${checkId} → ${resourceType}`);
-                    
-                    // Update confidence since it passed verification
-                    const snippetId = require('crypto').createHash('sha256')
-                      .update(`${checkId}:${resourceType}`)
-                      .digest('hex')
-                      .substring(0, 16);
-                    await remediationRAGService.updateFixFromVerification(snippetId, true);
+              // Phase 6: route verification feedback through the appropriate path
+              if (featureFlags.intelligentFixRetrieval) {
+                // Intelligent path: storeVerifiedFix handles both global + user preference updates
+                const fixText = remediationResult?.remediation?.snippet?.fixSnippet
+                  || extractFixSnippet(fixedContent, check, resourceType)
+                  || '';
+                if (fixText) {
+                  await intelligentFixRetriever.storeVerifiedFix(
+                    checkId,
+                    resourceType,
+                    fixText,
+                    session.userId || undefined,
+                    true,
+                    session.cloudProvider || 'azure'
+                  );
+                  console.log(`   📈 [intelligent] Stored verified fix: ${checkId} → ${resourceType}`);
+                }
+              } else {
+                // Legacy path: direct RAG updates (unchanged)
+                if (remediationResult?.remediation?.snippet) {
+                  const snippet = remediationResult.remediation.snippet;
+                  await remediationRAGService.updateFixFromVerification(snippet.id, true);
+                  console.log(`   📈 Updated fix snippet confidence: ${snippet.id} → passed`);
+                }
+
+                if (!remediationResult?.remediation || remediationResult.remediation.confidence < 0.7) {
+                  try {
+                    const fixSnippet = extractFixSnippet(fixedContent, check, resourceType);
+
+                    if (fixSnippet) {
+                      const cloudProvider = session.cloudProvider || 'azure';
+                      await remediationRAGService.storeGeneratedFix(
+                        checkId,
+                        resourceType,
+                        cloudProvider,
+                        fixSnippet,
+                        fixedContent,
+                        check.guideline || check.checkName
+                      );
+                      console.log(`   💾 Stored generated fix snippet: ${checkId} → ${resourceType}`);
+
+                      const snippetId = require('crypto').createHash('sha256')
+                        .update(`${checkId}:${resourceType}`)
+                        .digest('hex')
+                        .substring(0, 16);
+                      await remediationRAGService.updateFixFromVerification(snippetId, true);
+                    }
+                  } catch (error: any) {
+                    console.warn(`   ⚠️  Failed to store generated fix: ${error.message}`);
                   }
-                } catch (error: any) {
-                  console.warn(`   ⚠️  Failed to store generated fix: ${error.message}`);
                 }
               }
             } else {
@@ -8283,11 +8369,20 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
                 verificationDate: new Date(),
               });
               
-              // Update fix snippet confidence if it failed
-              if (remediationResult?.remediation?.snippet) {
-                const snippet = remediationResult.remediation.snippet;
-                await remediationRAGService.updateFixFromVerification(snippet.id, false);
-                console.log(`   📉 Updated fix snippet confidence: ${snippet.id} → failed`);
+              // Phase 6: route failure feedback through the appropriate path
+              if (featureFlags.intelligentFixRetrieval) {
+                await intelligentFixRetriever.reportFixFailure(
+                  checkId,
+                  resourceType,
+                  session.userId || undefined
+                );
+                console.log(`   📉 [intelligent] Reported fix failure: ${checkId} → ${resourceType}`);
+              } else {
+                if (remediationResult?.remediation?.snippet) {
+                  const snippet = remediationResult.remediation.snippet;
+                  await remediationRAGService.updateFixFromVerification(snippet.id, false);
+                  console.log(`   📉 Updated fix snippet confidence: ${snippet.id} → failed`);
+                }
               }
             }
             

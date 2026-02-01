@@ -242,6 +242,14 @@ class FixSnippetStore {
   /**
    * Get statistics
    */
+  /**
+   * Get count of verified, non-deprecated snippets.
+   * Used by Phase 5 template deprecation gate.
+   */
+  getVerifiedCount(): number {
+    return Array.from(this.snippets.values()).filter(s => s.verified && !s.deprecated).length;
+  }
+
   getStats(): {
     total: number;
     active: number;
@@ -268,6 +276,7 @@ class FixSnippetStore {
 }
 
 export const fixSnippetStore = new FixSnippetStore();
+export { FixSnippetStore };
 
 
 

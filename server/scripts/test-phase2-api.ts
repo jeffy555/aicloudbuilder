@@ -5,8 +5,6 @@
  * Tests all user fix preferences API endpoints
  */
 
-import axios from 'axios';
-
 const BASE_URL = 'http://localhost:9005';
 let authToken: string | null = null;
 let testUserId: string | null = null;
@@ -42,61 +40,50 @@ async function testEndpoint(
   expectedStatus: number = 200
 ): Promise<any> {
   const start = Date.now();
-  try {
-    const config: any = {
-      method,
-      url: `${BASE_URL}${endpoint}`,
-      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
-    };
-
-    if (data && (method === 'POST' || method === 'PUT')) {
-      config.data = data;
-    }
-
-    const response = await axios(config);
-    const duration = Date.now() - start;
-
-    if (response.status === expectedStatus) {
-      logTest({ endpoint, method, status: 'PASS', statusCode: response.status, duration });
-    } else {
-      logTest({
-        endpoint,
-        method,
-        status: 'FAIL',
-        statusCode: response.status,
-        error: `Expected ${expectedStatus}, got ${response.status}`,
-        duration,
-      });
-    }
-
-    return response.data;
-  } catch (error: any) {
-    const duration = Date.now() - start;
-    const statusCode = error.response?.status;
-
-    if (statusCode === expectedStatus) {
-      // Expected error (like 404)
-      logTest({ endpoint, method, status: 'PASS', statusCode, duration });
-    } else {
-      logTest({
-        endpoint,
-        method,
-        status: 'FAIL',
-        statusCode,
-        error: error.message,
-        duration,
-      });
-    }
-
-    if (statusCode !== expectedStatus) {
-      throw error;
-    }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`;
   }
+
+  const fetchOptions: RequestInit = { method, headers };
+  if (data && (method === 'POST' || method === 'PUT')) {
+    fetchOptions.body = JSON.stringify(data);
+  }
+
+  const response = await fetch(`${BASE_URL}${endpoint}`, fetchOptions);
+  const duration = Date.now() - start;
+
+  let body: any = null;
+  try {
+    body = await response.json();
+  } catch {
+    // Non-JSON response
+  }
+
+  if (response.status === expectedStatus) {
+    logTest({ endpoint, method, status: 'PASS', statusCode: response.status, duration });
+    return body;
+  }
+
+  logTest({
+    endpoint,
+    method,
+    status: 'FAIL',
+    statusCode: response.status,
+    error: `Expected ${expectedStatus}, got ${response.status}${body?.error ? ' - ' + body.error : ''}`,
+    duration,
+  });
+
+  if (response.status !== expectedStatus) {
+    throw new Error(`${method} ${endpoint}: expected ${expectedStatus}, got ${response.status}`);
+  }
+
+  return body;
 }
 
 async function runTests() {
   console.log('🧪 Phase 2: API Endpoint Testing\n');
-  console.log('=' .repeat(70));
+  console.log('='.repeat(70));
   console.log('\n');
 
   // ============================================================
@@ -105,19 +92,37 @@ async function runTests() {
   console.log('🔐 Test Suite 1: Authentication Setup');
   console.log('-'.repeat(70));
 
-  try {
-    // Login to get auth token
-    const loginData = await testEndpoint('POST', '/api/auth/login', {
-      username: 'test_phase1_user',
-      password: 'hashedpassword123',
-    });
+  // Create test user first (signup), then login
+  const testUsername = `phase2_test_${Date.now()}`;
+  const testEmail = `${testUsername}@test.com`;
+  const testPassword = 'TestPass123!';
 
-    authToken = loginData.token;
-    testUserId = loginData.user.id;
-    console.log(`   ℹ️  Authenticated as user: ${testUserId}\n`);
+  try {
+    const signupData = await testEndpoint('POST', '/api/auth/signup', {
+      username: testUsername,
+      email: testEmail,
+      password: testPassword,
+    }, 201);
+
+    authToken = signupData.token;
+    testUserId = signupData.user.id;
+    console.log(`   ℹ️  Signed up as user: ${testUserId}`);
   } catch (error) {
-    console.log('   ⚠️  Using existing session\n');
+    console.log('   ⚠️  Signup failed, trying login...');
+    // Fallback: try login
+    try {
+      const loginData = await testEndpoint('POST', '/api/auth/login', {
+        usernameOrEmail: testUsername,
+        password: testPassword,
+      });
+      authToken = loginData.token;
+      testUserId = loginData.user.id;
+      console.log(`   ℹ️  Logged in as user: ${testUserId}`);
+    } catch {
+      throw new Error('Authentication failed - cannot proceed with tests');
+    }
   }
+  console.log('');
 
   // ============================================================
   // 2. Create Preference
@@ -323,10 +328,10 @@ async function runTests() {
   console.log('⚠️  Test Suite 10: Error Handling');
   console.log('-'.repeat(70));
 
-  // Try to get non-existent preference (should 404)
+  // Try to get non-existent preference by checkId/resourceType (should 404)
   await testEndpoint(
     'GET',
-    '/api/users/me/fix-preferences/nonexistent-id',
+    '/api/users/me/fix-preferences/CKV_NONEXISTENT/nonexistent_resource',
     undefined,
     404
   );
@@ -338,19 +343,15 @@ async function runTests() {
   authToken = savedToken2;
 
   // Try invalid data (should 400)
-  try {
-    await testEndpoint(
-      'POST',
-      '/api/users/me/fix-preferences',
-      {
-        // Missing required fields
-        checkId: 'TEST',
-      },
-      400
-    );
-  } catch {
-    // Expected to fail
-  }
+  await testEndpoint(
+    'POST',
+    '/api/users/me/fix-preferences',
+    {
+      // Missing required fields
+      checkId: 'TEST',
+    },
+    400
+  );
 
   console.log('');
 

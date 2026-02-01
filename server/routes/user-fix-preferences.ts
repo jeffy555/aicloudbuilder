@@ -6,7 +6,7 @@
 
 import type { Express } from 'express';
 import { userFixPreferencesStore } from '../rag/user-fix-preferences-store';
-import { authenticateToken, optionalAuth } from '../middleware/auth';
+import { requireAuth, optionalAuth } from '../middleware/auth';
 import { insertUserFixPreferenceSchema } from '../../shared/schema';
 import { z } from 'zod';
 
@@ -15,7 +15,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * GET /api/users/me/fix-preferences
    * Get all fix preferences for the authenticated user
    */
-  app.get('/api/users/me/fix-preferences', authenticateToken, async (req, res) => {
+  app.get('/api/users/me/fix-preferences', requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
       const limit = parseInt(req.query.limit as string) || 100;
@@ -43,7 +43,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * GET /api/users/me/fix-preferences/stats
    * Get statistics for user's fix preferences
    */
-  app.get('/api/users/me/fix-preferences/stats', authenticateToken, async (req, res) => {
+  app.get('/api/users/me/fix-preferences/stats', requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
       const stats = await userFixPreferencesStore.getUserStats(userId);
@@ -59,7 +59,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * GET /api/users/me/fix-preferences/top
    * Get user's most used fixes
    */
-  app.get('/api/users/me/fix-preferences/top', authenticateToken, async (req, res) => {
+  app.get('/api/users/me/fix-preferences/top', requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
       const limit = parseInt(req.query.limit as string) || 10;
@@ -80,7 +80,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * GET /api/users/me/fix-preferences/search
    * Search preferences by check ID pattern
    */
-  app.get('/api/users/me/fix-preferences/search', authenticateToken, async (req, res) => {
+  app.get('/api/users/me/fix-preferences/search', requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
       const query = req.query.q as string;
@@ -113,7 +113,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    */
   app.get(
     '/api/users/me/fix-preferences/:checkId/:resourceType',
-    authenticateToken,
+    requireAuth,
     async (req, res) => {
       try {
         const userId = req.user!.id;
@@ -177,7 +177,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * POST /api/users/me/fix-preferences
    * Create a new fix preference
    */
-  app.post('/api/users/me/fix-preferences', authenticateToken, async (req, res) => {
+  app.post('/api/users/me/fix-preferences', requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
 
@@ -209,7 +209,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * PUT /api/users/me/fix-preferences/:id
    * Update an existing preference
    */
-  app.put('/api/users/me/fix-preferences/:id', authenticateToken, async (req, res) => {
+  app.put('/api/users/me/fix-preferences/:id', requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
       const { id } = req.params;
@@ -258,7 +258,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    */
   app.post(
     '/api/users/me/fix-preferences/:id/use',
-    authenticateToken,
+    requireAuth,
     async (req, res) => {
       try {
         const userId = req.user!.id;
@@ -295,7 +295,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * DELETE /api/users/me/fix-preferences/:id
    * Delete a specific preference
    */
-  app.delete('/api/users/me/fix-preferences/:id', authenticateToken, async (req, res) => {
+  app.delete('/api/users/me/fix-preferences/:id', requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
       const { id } = req.params;
@@ -327,7 +327,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * DELETE /api/users/me/fix-preferences
    * Delete all preferences for the user
    */
-  app.delete('/api/users/me/fix-preferences', authenticateToken, async (req, res) => {
+  app.delete('/api/users/me/fix-preferences', requireAuth, async (req, res) => {
     try {
       const userId = req.user!.id;
       const count = await userFixPreferencesStore.deleteUserPreferences(userId);
@@ -349,7 +349,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    */
   app.get(
     '/api/users/me/fix-preferences/low-confidence',
-    authenticateToken,
+    requireAuth,
     async (req, res) => {
       try {
         const userId = req.user!.id;
@@ -378,7 +378,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    */
   app.post(
     '/api/users/me/fix-preferences/cleanup',
-    authenticateToken,
+    requireAuth,
     async (req, res) => {
       try {
         const userId = req.user!.id;

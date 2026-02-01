@@ -3,6 +3,8 @@ import { generateEmbedding, queryVectorStore, addToVectorStore, initializeVector
 import { calculateConfidence } from './confidence-scorer';
 import { fixSnippetStore, type FixSnippet, type FixSnippetResult } from './fix-snippet-store';
 import { performanceLogger } from '../utils/performance-logger';
+import { featureFlags } from '../middleware/feature-flags';
+import { checkovFetcher } from './checkov-fetcher';
 
 export interface RemediationResult {
   template?: RemediationTemplate; // Keep for backward compatibility
@@ -53,10 +55,17 @@ export class RemediationRAGService {
     console.log(`   Active: ${snippetStats.active}, Deprecated: ${snippetStats.deprecated}`);
     console.log(`   By Source: ${JSON.stringify(snippetStats.bySource)}`);
 
-    // Also load templates for backward compatibility
-    this.templates = await loadTemplatesFromDirectory();
-    if (this.templates.length > 0) {
-      console.log(`📚 Also loaded ${this.templates.length} template(s) for backward compatibility`);
+    // Phase 5: Conditional template loading — skip once verified fixes reach threshold
+    const deprecationThreshold = parseInt(process.env.TEMPLATE_DEPRECATION_THRESHOLD || '50', 10);
+    const verifiedCount = fixSnippetStore.getVerifiedCount();
+
+    if (verifiedCount >= deprecationThreshold) {
+      console.log(`📚 Templates deprecated: ${verifiedCount} verified snippet(s) >= threshold (${deprecationThreshold}). Skipping template load.`);
+    } else {
+      this.templates = await loadTemplatesFromDirectory();
+      if (this.templates.length > 0) {
+        console.log(`📚 Loaded ${this.templates.length} template(s) (${verifiedCount} verified snippets < threshold ${deprecationThreshold})`);
+      }
     }
 
     // Index fix snippets in vector database
@@ -202,7 +211,7 @@ export class RemediationRAGService {
         await this.initialize();
       }
 
-      // 1. Try exact match in fix snippet store first (fast lookup)
+      // Tier 1: Exact match in fix snippet store (fast lookup)
       const exactMatchPerfId = performanceLogger.start('findRemediation.exactMatch');
       const exactMatch = await fixSnippetStore.getByKey(checkId, resourceType);
       performanceLogger.end(exactMatchPerfId, !!exactMatch);
@@ -218,7 +227,7 @@ export class RemediationRAGService {
         };
       }
 
-      // 2. Semantic search in vector DB
+      // Tier 2: Semantic search in vector DB — return best match if confidence >= 0.7
       const semanticPerfId = performanceLogger.start('findRemediation.semanticSearch');
       const queryText = `${checkId} ${checkName} ${guideline} ${resourceType}`;
       const results = await queryVectorStore({
@@ -227,11 +236,76 @@ export class RemediationRAGService {
       });
       performanceLogger.end(semanticPerfId, true);
 
-    if (results.length === 0) {
-      // 3. Fallback to template search for backward compatibility
+      if (results.length > 0) {
+        const validResults = results
+          .map(r => {
+            const snippet = r.metadata.snippet as FixSnippet | undefined;
+            const template = r.metadata.template as RemediationTemplate | undefined;
+
+            if (snippet && !snippet.deprecated && snippet.confidence >= 0.6) {
+              const baseConfidence = snippet.confidence;
+              const similarityBoost = r.score * 0.2;
+              const successBoost = Math.min(0.1, snippet.successCount * 0.01);
+              const confidence = Math.min(1.0, baseConfidence + similarityBoost + successBoost);
+
+              return {
+                snippet,
+                confidence,
+                score: r.score,
+                type: 'snippet' as const,
+              };
+            } else if (template) {
+              const confidence = calculateConfidence(checkId, template, r.score);
+              return {
+                template,
+                confidence,
+                score: r.score,
+                type: 'template' as const,
+              };
+            }
+            return null;
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== null)
+          .sort((a, b) => {
+            if (a.type === 'snippet' && b.type === 'template') return -1;
+            if (a.type === 'template' && b.type === 'snippet') return 1;
+            return b.confidence - a.confidence;
+          });
+
+        if (validResults.length > 0 && validResults[0].confidence >= 0.7) {
+          const best = validResults[0];
+          const matchReason = best.type === 'snippet'
+            ? `Fix snippet match (confidence: ${(best.confidence * 100).toFixed(1)}%)`
+            : `Template match (backward compatibility)`;
+
+          console.log(`🔍 Found remediation for ${checkId}:`);
+          if (best.type === 'snippet') {
+            console.log(`   Snippet: ${best.snippet.checkId} → ${best.snippet.resourceType}`);
+            console.log(`   Confidence: ${(best.confidence * 100).toFixed(1)}%`);
+            console.log(`   Source: ${best.snippet.source}`);
+          } else {
+            console.log(`   Template: ${best.template.check_id}`);
+            console.log(`   Confidence: ${(best.confidence * 100).toFixed(1)}%`);
+          }
+          console.log(`   Reason: ${matchReason}`);
+
+          performanceLogger.end(perfId, true);
+          return {
+            snippet: best.type === 'snippet' ? best.snippet : undefined,
+            template: best.type === 'template' ? best.template : undefined,
+            confidence: best.confidence,
+            matchReason,
+            similarityScore: best.score,
+            source: 'retrieved',
+          };
+        }
+      }
+
+      // Tier 3: Template fallback (backward compatibility)
       const templateMatch = this.templates.find(t => t.check_id === checkId);
       if (templateMatch) {
         console.log(`✅ Found template match for ${checkId} (backward compatibility)`);
+        performanceLogger.end(perfId, true);
         return {
           template: templateMatch,
           confidence: 1.0,
@@ -241,82 +315,50 @@ export class RemediationRAGService {
         };
       }
 
-      console.log(`⚠️  No remediation found for ${checkId}`);
-      return null;
-    }
-
-    // 4. Filter and score results (prioritize fix snippets over templates)
-    const validResults = results
-      .map(r => {
-        // Check if it's a fix snippet or template
-        const snippet = r.metadata.snippet as FixSnippet | undefined;
-        const template = r.metadata.template as RemediationTemplate | undefined;
-
-        if (snippet && !snippet.deprecated && snippet.confidence >= 0.6) {
-          // Calculate confidence based on similarity and success count
-          const baseConfidence = snippet.confidence;
-          const similarityBoost = r.score * 0.2; // Boost from similarity
-          const successBoost = Math.min(0.1, snippet.successCount * 0.01); // Small boost per success
-          const confidence = Math.min(1.0, baseConfidence + similarityBoost + successBoost);
-
-          return {
-            snippet,
-            confidence,
-            score: r.score,
-            type: 'snippet' as const,
-          };
-        } else if (template) {
-          // Backward compatibility: use template
-          const confidence = calculateConfidence(checkId, template, r.score);
-          return {
-            template,
-            confidence,
-            score: r.score,
-            type: 'template' as const,
-          };
+      // Tier 4: Checkov native fetch (feature-flag guarded)
+      if (featureFlags.checkovNativeFetch) {
+        const checkovPerfId = performanceLogger.start('findRemediation.checkovFetch', { checkId, resourceType });
+        try {
+          const inferred = await checkovFetcher.fetchRemediation(checkId, resourceType);
+          if (inferred) {
+            const storedSnippet = await fixSnippetStore.store({
+              checkId,
+              resourceType,
+              cloudProvider: 'azure',
+              fixSnippet: inferred.fixSnippet,
+              context: `Inferred from Checkov: ${inferred.attributeName} = ${JSON.stringify(inferred.expectedValue)}`,
+              guideline,
+              source: 'retrieved',
+              confidence: inferred.confidence,
+              successCount: 0,
+              failureCount: 0,
+              verified: false,
+              deprecated: false,
+              lastUsed: new Date(),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+            performanceLogger.end(checkovPerfId, true);
+            console.log(`✅ Checkov native fetch succeeded for ${checkId}`);
+            performanceLogger.end(perfId, true);
+            return {
+              snippet: storedSnippet,
+              confidence: inferred.confidence,
+              matchReason: 'Checkov native remediation (inferred from source)',
+              source: 'retrieved',
+            };
+          }
+          performanceLogger.end(checkovPerfId, false, 'No remediation inferred');
+        } catch (error: any) {
+          console.warn(`⚠️  Checkov fetch failed for ${checkId}: ${error.message}`);
+          performanceLogger.end(checkovPerfId, false, error.message);
         }
-        return null;
-      })
-      .filter((r): r is NonNullable<typeof r> => r !== null)
-      .sort((a, b) => {
-        // Prioritize snippets over templates, then by confidence
-        if (a.type === 'snippet' && b.type === 'template') return -1;
-        if (a.type === 'template' && b.type === 'snippet') return 1;
-        return b.confidence - a.confidence;
-      });
-
-    // 5. Return best match if confidence >= 0.7
-    if (validResults.length > 0 && validResults[0].confidence >= 0.7) {
-      const best = validResults[0];
-      const matchReason = best.type === 'snippet'
-        ? `Fix snippet match (confidence: ${(best.confidence * 100).toFixed(1)}%)`
-        : `Template match (backward compatibility)`;
-
-      console.log(`🔍 Found remediation for ${checkId}:`);
-      if (best.type === 'snippet') {
-        console.log(`   Snippet: ${best.snippet.checkId} → ${best.snippet.resourceType}`);
-        console.log(`   Confidence: ${(best.confidence * 100).toFixed(1)}%`);
-        console.log(`   Source: ${best.snippet.source}`);
-      } else {
-        console.log(`   Template: ${best.template.check_id}`);
-        console.log(`   Confidence: ${(best.confidence * 100).toFixed(1)}%`);
       }
-      console.log(`   Reason: ${matchReason}`);
 
-      return {
-        snippet: best.type === 'snippet' ? best.snippet : undefined,
-        template: best.type === 'template' ? best.template : undefined,
-        confidence: best.confidence,
-        matchReason,
-        similarityScore: best.score,
-        source: 'retrieved',
-      };
-    }
-
-    // 6. No good match - will generate
-    console.log(`⚠️  No suitable remediation found for ${checkId} (confidence < 0.7)`);
-    performanceLogger.end(perfId, false, 'No suitable match found');
-    return null;
+      // Tier 5: No match found — caller triggers AI generation + auto-storage via storeGeneratedFix()
+      console.log(`⚠️  No remediation found for ${checkId}`);
+      performanceLogger.end(perfId, false, 'No suitable match found');
+      return null;
     } catch (error) {
       performanceLogger.end(perfId, false, error instanceof Error ? error.message : String(error));
       throw error;
