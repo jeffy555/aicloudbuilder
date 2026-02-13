@@ -1,4 +1,4 @@
-import { useState, forwardRef, useImperativeHandle } from "react";
+import { useState, useMemo, forwardRef, useImperativeHandle } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -6,7 +6,7 @@ import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Shield, CheckCircle2, XCircle, AlertTriangle, Loader2, CheckCircle } from "lucide-react";
+import { Shield, CheckCircle2, XCircle, AlertTriangle, Loader2, CheckCircle, ChevronDown, ChevronRight } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { apiRequest } from "@/lib/queryClient";
 import { useQueryClient } from "@tanstack/react-query";
@@ -92,12 +92,41 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
   const [hasUnapprovedFixes, setHasUnapprovedFixes] = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [expandedModules, setExpandedModules] = useState<Set<string>>(new Set());
+
+  const selectionKey = (check: FailedCheck) => `${check.checkId}:${check.resource}`;
+
+  const groupedChecks = useMemo((): [string, FailedCheck[]][] => {
+    if (!scanResult) return [];
+    const groups = new Map<string, FailedCheck[]>();
+    scanResult.failedChecks.forEach(check => {
+      const file = check.file || 'Unknown File';
+      if (!groups.has(file)) groups.set(file, []);
+      groups.get(file)!.push(check);
+    });
+    const entries: [string, FailedCheck[]][] = [];
+    groups.forEach((value, key) => entries.push([key, value]));
+    return entries.sort((a, b) => b[1].length - a[1].length);
+  }, [scanResult]);
+
+  const groupedFixedChecks = useMemo((): [string, FixedCheck[]][] => {
+    const groups = new Map<string, FixedCheck[]>();
+    fixedChecks.forEach(check => {
+      const file = check.file || 'Unknown File';
+      if (!groups.has(file)) groups.set(file, []);
+      groups.get(file)!.push(check);
+    });
+    const entries: [string, FixedCheck[]][] = [];
+    groups.forEach((value, key) => entries.push([key, value]));
+    return entries.sort((a, b) => b[1].length - a[1].length);
+  }, [fixedChecks]);
 
   const runScan = async () => {
     setIsScanning(true);
     onScanStart?.();
-    // Clear selected checks when starting a new scan
+    // Clear selected checks and collapsed modules when starting a new scan
     setSelectedChecks(new Set());
+    setExpandedModules(new Set());
     try {
       let endpoint: string;
       if (framework === 'kubernetes') {
@@ -266,8 +295,8 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
     }
 
     // Filter to only selected checks
-      const checksToFix = scanResult.failedChecks.filter(check => 
-      selectedChecks.has(check.checkId)
+    const checksToFix = scanResult.failedChecks.filter(check =>
+      selectedChecks.has(selectionKey(check))
     );
 
     setIsFixing(true);
@@ -857,8 +886,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                             variant="ghost"
                             size="sm"
                             onClick={() => {
-                              // Select all
-                              setSelectedChecks(new Set(scanResult.failedChecks.map(c => c.checkId)));
+                              setSelectedChecks(new Set(scanResult.failedChecks.map(c => selectionKey(c))));
                             }}
                             className="text-xs h-7"
                           >
@@ -867,10 +895,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => {
-                              // Deselect all
-                              setSelectedChecks(new Set());
-                            }}
+                            onClick={() => setSelectedChecks(new Set())}
                             className="text-xs h-7"
                           >
                             Deselect All
@@ -895,69 +920,108 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                           )}
                         </div>
                       </div>
-                      <ScrollArea className="h-[250px] rounded-md border">
+                      <ScrollArea className="h-[400px] rounded-md border">
                         <div className="p-4 space-y-3">
-                          {scanResult.failedChecks.map((check, idx) => {
-                            const isSelected = selectedChecks.has(check.checkId);
+                          {groupedChecks.map(([file, checks]) => {
+                            const isExpanded = expandedModules.has(file);
+                            const moduleSelected = checks.every(c => selectedChecks.has(selectionKey(c)));
+                            const modulePartial = !moduleSelected && checks.some(c => selectedChecks.has(selectionKey(c)));
                             return (
-                              <Card 
-                                key={idx} 
-                                className={"p-3 " + (isSelected ? 'border-blue-500 bg-blue-50 dark:bg-blue-950' : '')}
-                                data-testid={"failed-check-" + idx}
-                              >
-                                <div className="space-y-2">
-                                  <div className="flex items-start gap-3">
-                                    <Checkbox
-                                      checked={isSelected}
-                                      onCheckedChange={(checked) => {
-                                        const newSelected = new Set(selectedChecks);
-                                        if (checked) {
-                                          newSelected.add(check.checkId);
-                                        } else {
-                                          newSelected.delete(check.checkId);
-                                        }
-                                        setSelectedChecks(newSelected);
-                                      }}
-                                      className="mt-1"
-                                    />
-                                    <div className="flex-1">
-                                      <div className="flex items-start justify-between gap-2">
-                                        <div className="flex-1">
-                                          <p className="font-medium text-sm">{check.checkName}</p>
-                                          <p className="text-xs text-muted-foreground font-mono mt-1">
-                                            {check.resource}
-                                          </p>
-                                        </div>
-                                        <Badge variant="destructive" className="text-xs">
-                                          {check.checkId}
-                                        </Badge>
-                                      </div>
-                                      <p className="text-xs text-muted-foreground mt-2">
-                                        File: {check.file}
-                                      </p>
-                                      {check.reason && (
-                                        <div className="text-xs mt-2 p-2 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded">
-                                          <p className="font-semibold text-red-700 dark:text-red-400 mb-1">
-                                            Why this failed:
-                                          </p>
-                                          <p className="text-red-600 dark:text-red-300">
-                                            {check.reason}
-                                          </p>
-                                          {check.evaluatedKeys && check.evaluatedKeys.length > 0 && (
-                                            <p className="text-red-500 dark:text-red-400 mt-1 text-xs">
-                                              Missing attributes: {check.evaluatedKeys.join(', ')}
-                                            </p>
-                                          )}
-                                        </div>
-                                      )}
-                                      {check.guideline && !check.reason && (
-                                        <p className="text-xs text-muted-foreground border-l-2 border-muted pl-2 mt-2">
-                                          {check.guideline}
-                                        </p>
-                                      )}
+                              <Card key={file} className="overflow-hidden">
+                                {/* Module Header */}
+                                <div
+                                  className="flex items-center gap-3 p-3 cursor-pointer hover:bg-muted/50 transition-colors"
+                                  onClick={() => {
+                                    setExpandedModules(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(file)) next.delete(file);
+                                      else next.add(file);
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  <Checkbox
+                                    checked={moduleSelected ? true : modulePartial ? "indeterminate" : false}
+                                    onCheckedChange={(checked) => {
+                                      const newSelected = new Set(selectedChecks);
+                                      checks.forEach(c => {
+                                        if (checked) newSelected.add(selectionKey(c));
+                                        else newSelected.delete(selectionKey(c));
+                                      });
+                                      setSelectedChecks(newSelected);
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                  {isExpanded ? (
+                                    <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                                  ) : (
+                                    <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                                  )}
+                                  <span className="text-sm font-medium font-mono flex-1 truncate">{file}</span>
+                                  <Badge variant="destructive" className="text-xs flex-shrink-0">
+                                    {checks.length} failed
+                                  </Badge>
+                                </div>
+                                {/* Expanded Check List */}
+                                {isExpanded && (
+                                  <div className="border-t">
+                                    <div className="divide-y">
+                                      {checks.map((check, idx) => {
+                                        const isSelected = selectedChecks.has(selectionKey(check));
+                                        return (
+                                          <div
+                                            key={idx}
+                                            className={"p-3 " + (isSelected ? 'bg-blue-50 dark:bg-blue-950' : '')}
+                                          >
+                                            <div className="flex items-start gap-3">
+                                              <Checkbox
+                                                checked={isSelected}
+                                                onCheckedChange={(checked) => {
+                                                  const newSelected = new Set(selectedChecks);
+                                                  if (checked) newSelected.add(selectionKey(check));
+                                                  else newSelected.delete(selectionKey(check));
+                                                  setSelectedChecks(newSelected);
+                                                }}
+                                                className="mt-0.5"
+                                              />
+                                              <div className="flex-1 min-w-0">
+                                                <div className="flex items-start justify-between gap-2">
+                                                  <p className="font-medium text-sm">{check.checkName}</p>
+                                                  <Badge variant="destructive" className="text-xs flex-shrink-0">
+                                                    {check.checkId}
+                                                  </Badge>
+                                                </div>
+                                                <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                                                  {check.resource}
+                                                </p>
+                                                {check.reason && (
+                                                  <div className="text-xs mt-2 p-2 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded">
+                                                    <p className="font-semibold text-red-700 dark:text-red-400 mb-1">
+                                                      Why this failed:
+                                                    </p>
+                                                    <p className="text-red-600 dark:text-red-300">
+                                                      {check.reason}
+                                                    </p>
+                                                    {check.evaluatedKeys && check.evaluatedKeys.length > 0 && (
+                                                      <p className="text-red-500 dark:text-red-400 mt-1 text-xs">
+                                                        Missing attributes: {check.evaluatedKeys.join(', ')}
+                                                      </p>
+                                                    )}
+                                                  </div>
+                                                )}
+                                                {check.guideline && !check.reason && (
+                                                  <p className="text-xs text-muted-foreground border-l-2 border-muted pl-2 mt-2">
+                                                    {check.guideline}
+                                                  </p>
+                                                )}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                   </div>
-                                </div>
+                                )}
                               </Card>
                             );
                           })}
@@ -987,7 +1051,6 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                           variant="ghost"
                           size="sm"
                           onClick={() => {
-                            // Clear fixed checks
                             setFixedChecks([]);
                             toast({
                               title: "Fixed checks cleared",
@@ -999,47 +1062,85 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                           Clear All
                         </Button>
                       </div>
-                      <ScrollArea className="h-[250px] rounded-md border">
+                      <ScrollArea className="h-[400px] rounded-md border">
                         <div className="p-4 space-y-3">
-                          {fixedChecks.map((check, idx) => (
-                            <Card 
-                              key={idx} 
-                              className="p-3 border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950"
-                              data-testid={"fixed-check-" + idx}
-                            >
-                              <div className="space-y-2">
-                                <div className="flex items-start gap-3">
-                                  <CheckCircle2 className="w-4 h-4 text-green-600 mt-1" />
-                                  <div className="flex-1">
-                                    <div className="flex items-start justify-between gap-2">
-                                      <div className="flex-1">
-                                        <p className="font-medium text-sm">{check.checkName}</p>
-                                        <p className="text-xs text-muted-foreground font-mono mt-1">
-                                          {check.resource}
-                                        </p>
-                                      </div>
+                          {groupedFixedChecks.map(([file, checks]) => {
+                            const isExpanded = expandedModules.has('fixed:' + file);
+                            const verifiedCount = checks.filter(c => c.verified).length;
+                            return (
+                              <Card key={file} className="border-green-200 dark:border-green-800 overflow-hidden">
+                                {/* Module Header */}
+                                <div
+                                  className="flex items-center gap-3 p-3 cursor-pointer hover:bg-green-50 dark:hover:bg-green-950/50 transition-colors"
+                                  onClick={() => {
+                                    setExpandedModules(prev => {
+                                      const next = new Set(prev);
+                                      const key = 'fixed:' + file;
+                                      if (next.has(key)) next.delete(key);
+                                      else next.add(key);
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  <CheckCircle2 className="w-4 h-4 text-green-600 flex-shrink-0" />
+                                  {isExpanded ? (
+                                    <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                                  ) : (
+                                    <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                                  )}
+                                  <span className="text-sm font-medium font-mono flex-1 truncate">{file}</span>
+                                  <div className="flex items-center gap-2 flex-shrink-0">
+                                    <Badge variant="outline" className="text-xs border-green-600 text-green-700 dark:text-green-400">
+                                      {checks.length} fixed
+                                    </Badge>
+                                    {verifiedCount > 0 && (
                                       <Badge variant="outline" className="text-xs border-green-600 text-green-700 dark:text-green-400">
-                                        {check.checkId}
+                                        {verifiedCount} verified
                                       </Badge>
-                                    </div>
-                                    <p className="text-xs text-muted-foreground mt-2">
-                                      File: {check.file}
-                                    </p>
-                                    <div className="flex items-center gap-2 mt-2">
-                                      {check.verified && (
-                                        <Badge variant="outline" className="text-xs border-green-600 text-green-700 dark:text-green-400">
-                                          Verified
-                                        </Badge>
-                                      )}
-                                      <span className="text-xs text-muted-foreground">
-                                        Fixed: {check.fixedAt.toLocaleTimeString()}
-                                      </span>
-                                    </div>
+                                    )}
                                   </div>
                                 </div>
-                              </div>
-                            </Card>
-                          ))}
+                                {/* Expanded Check List */}
+                                {isExpanded && (
+                                  <div className="border-t border-green-200 dark:border-green-800">
+                                    <div className="divide-y divide-green-100 dark:divide-green-900">
+                                      {checks.map((check, idx) => (
+                                        <div
+                                          key={idx}
+                                          className="p-3 bg-green-50 dark:bg-green-950"
+                                        >
+                                          <div className="flex items-start gap-3">
+                                            <CheckCircle2 className="w-4 h-4 text-green-600 mt-0.5 flex-shrink-0" />
+                                            <div className="flex-1 min-w-0">
+                                              <div className="flex items-start justify-between gap-2">
+                                                <p className="font-medium text-sm">{check.checkName}</p>
+                                                <Badge variant="outline" className="text-xs border-green-600 text-green-700 dark:text-green-400 flex-shrink-0">
+                                                  {check.checkId}
+                                                </Badge>
+                                              </div>
+                                              <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                                                {check.resource}
+                                              </p>
+                                              <div className="flex items-center gap-2 mt-1.5">
+                                                {check.verified && (
+                                                  <Badge variant="outline" className="text-xs border-green-600 text-green-700 dark:text-green-400">
+                                                    Verified
+                                                  </Badge>
+                                                )}
+                                                <span className="text-xs text-muted-foreground">
+                                                  Fixed: {check.fixedAt.toLocaleTimeString()}
+                                                </span>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </Card>
+                            );
+                          })}
                         </div>
                       </ScrollArea>
                     </div>

@@ -189,11 +189,18 @@ export const scoreMeFindingSchema = z.object({
   remediation: z.string(),
 });
 
+export const scoreMeFileDetailSchema = z.object({
+  path: z.string(),
+  description: z.string(),
+  resources: z.array(z.string()).optional(),
+});
+
 export const scoreMeInventorySchema = z.object({
-  type: z.enum(['terraform', 'kubernetes', 'helm', 'dockerfile', 'automation']),
+  type: z.enum(['terraform', 'kubernetes', 'helm', 'automation', 'bicep', 'arm', 'dockerfile', 'docker-compose']),
   path: z.string(),
   summary: z.string(),
   files: z.array(z.string()).optional(),
+  fileDetails: z.array(scoreMeFileDetailSchema).optional(),
 });
 
 export const scoreMePillarSchema = z.object({
@@ -210,8 +217,73 @@ export const scoreMeReportSchema = z.object({
   findings: z.array(scoreMeFindingSchema),
   pillarScores: z.array(scoreMePillarSchema),
   finalScore: z.number().min(0).max(100),
-  confidence: z.enum(['Production-ready', 'Needs minor fixes', 'Risky', 'Not recommended']),
+  confidence: z.enum(['Production-ready', 'Needs minor fixes', 'Risky', 'Not recommended', 'Empty Repository', 'Application Code Only']),
   updatedAt: z.string(),
 });
 
 export type ScoreMeReport = z.infer<typeof scoreMeReportSchema>;
+
+// ─── Cost Analysis Types ────────────────────────────────────────────────────
+
+export const costStatusSchema = z.enum(['exact', 'estimated', 'needs_input']);
+export type CostStatus = z.infer<typeof costStatusSchema>;
+
+export const usageProfileSchema = z.enum(['low', 'medium', 'high', 'custom']);
+export type UsageProfile = z.infer<typeof usageProfileSchema>;
+
+export const costResourceSchema = z.object({
+  resourceName: z.string(),
+  resourceType: z.string(),
+  serviceName: z.string(),
+  monthlyCost: z.number(),
+  yearlyCost: z.number(),
+  currency: z.string(),
+  status: costStatusSchema,
+  pricingMatchType: z.enum(['config_exact', 'config_broad', 'fallback', 'free', 'parent', 'unsupported']),
+  confidenceScore: z.number().min(0).max(1),
+  confidenceLabel: z.enum(['high', 'medium', 'low']),
+  assumptionsUsed: z.array(z.string()),
+  requiredUsageFields: z.array(z.string()).optional(),
+  providedUsage: z.record(z.string(), z.number()).optional(),
+  unresolvedVariables: z.array(z.string()).optional(),
+  details: z.any().optional(),
+});
+
+export type CostResource = z.infer<typeof costResourceSchema>;
+
+export const costSummarySchema = z.object({
+  monthlyTotalExact: z.number(),
+  monthlyTotalEstimated: z.number(),
+  monthlyGrandTotal: z.number(),
+  yearlyGrandTotal: z.number(),
+  currency: z.string(),
+  exactCount: z.number(),
+  estimatedCount: z.number(),
+  needsInputCount: z.number(),
+  freeCount: z.number(),
+  resourceCount: z.number(),
+  profile: usageProfileSchema,
+});
+
+export type CostSummary = z.infer<typeof costSummarySchema>;
+
+export const costAnalysisResultSchema = z.object({
+  success: z.boolean(),
+  summary: costSummarySchema,
+  resources: z.array(costResourceSchema),
+  skippedResources: z.array(z.object({
+    resourceType: z.string(),
+    resourceName: z.string(),
+    reason: z.string(),
+  })).optional(),
+  logs: z.array(z.string()).optional(),
+});
+
+export type CostAnalysisResult = z.infer<typeof costAnalysisResultSchema>;
+
+export const costAnalysisRequestSchema = z.object({
+  profile: usageProfileSchema.optional().default('medium'),
+  customUsage: z.record(z.string(), z.record(z.string(), z.number())).optional(),
+});
+
+export type CostAnalysisRequest = z.infer<typeof costAnalysisRequestSchema>;

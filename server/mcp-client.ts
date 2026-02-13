@@ -26,6 +26,28 @@ interface MCPClientConfig {
 
 export class MCPClientManager {
   private clients: Map<string, { client: Client; process: ChildProcess }> = new Map();
+  private repoCache: Map<string, { data: any[]; timestamp: number }> = new Map();
+  private readonly CACHE_TTL_MS = 60_000; // Cache repos for 60 seconds
+
+  /**
+   * Retry a function with exponential backoff for 429 errors
+   */
+  private async withRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs = 2000): Promise<T> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        const is429 = error.status === 429 || error.response?.status === 429;
+        if (!is429 || attempt === maxRetries) {
+          throw error;
+        }
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        console.log(`   ⏳ Rate limited (429). Retrying in ${delay / 1000}s... (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    throw new Error('Max retries exceeded');
+  }
   
   // Pre-warm connection for a provider (call this when provider is selected)
   async prewarmConnection(provider: MCPProvider, serverType: MCPServerType = 'devops'): Promise<void> {
@@ -779,13 +801,26 @@ Check if the MCP server package is properly installed.`;
         if (!token) {
           throw new Error("Missing GITHUB_TOKEN environment variable.");
         }
+
+        // Check cache first to avoid hitting rate limits
+        const cacheKey = `github:${owner}`;
+        const cached = this.repoCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < this.CACHE_TTL_MS) {
+          console.log(`📡 [GitHub] Returning ${cached.data.length} cached repositories (${Math.round((Date.now() - cached.timestamp) / 1000)}s old)`);
+          return cached.data;
+        }
+
         console.log(`📡 [GitHub] Fetching repositories for owner: ${owner || 'authenticated user'}`);
         const octokit = new Octokit({ auth: token });
-        const response = await octokit.paginate(octokit.rest.repos.listForAuthenticatedUser, {
-          visibility: "all",
-          affiliation: "owner,collaborator,organization_member",
-          per_page: 100,
+
+        const response = await this.withRetry(async () => {
+          return await octokit.paginate(octokit.rest.repos.listForAuthenticatedUser, {
+            visibility: "all",
+            affiliation: "owner,collaborator,organization_member",
+            per_page: 100,
+          });
         });
+
         const filteredResponse = owner
           ? response.filter(
               (repo) =>
@@ -796,7 +831,7 @@ Check if the MCP server package is properly installed.`;
         console.log(
           `✅ [GitHub] Retrieved ${filteredResponse.length} repositories via REST API`
         );
-        return filteredResponse.map((repo) => ({
+        const result = filteredResponse.map((repo) => ({
           id: String(repo.id),
           name: repo.name || repo.full_name,
           full_name: repo.full_name,
@@ -804,6 +839,10 @@ Check if the MCP server package is properly installed.`;
           updated_at: repo.updated_at,
           url: repo.html_url,
         }));
+
+        // Cache the result
+        this.repoCache.set(cacheKey, { data: result, timestamp: Date.now() });
+        return result;
       } else if (provider === 'azure') {
         // Azure DevOps - Use REST API directly (MCP is unreliable/hangs)
         // MCP has known issues with Azure DevOps, so we'll use REST API as primary
@@ -1366,25 +1405,20 @@ Check if the MCP server package is properly installed.`;
           // Get the branch reference first to get the commit SHA
           let commitSha = branch;
           try {
-            const { data: ref } = await octokit.rest.git.getRef({
-              owner,
-              repo: repo,
-              ref: `heads/${branch}`,
-            });
-            commitSha = ref.object.sha;
+            const refResult = await this.withRetry(() =>
+              octokit.rest.git.getRef({ owner, repo: repo, ref: `heads/${branch}` })
+            );
+            commitSha = refResult.data.object.sha;
             console.log(`   Branch '${branch}' points to commit: ${commitSha.substring(0, 7)}...`);
           } catch (refError: any) {
             // If branch ref doesn't exist, try using branch name directly as SHA (might work)
             console.warn(`   ⚠️  Could not get branch ref for '${branch}': ${refError.message}`);
             // Will try branch name as SHA below
           }
-          
-          const { data: tree } = await octokit.rest.git.getTree({
-            owner,
-            repo: repo,
-            tree_sha: commitSha,
-            recursive: 'true',
-          });
+
+          const { data: tree } = await this.withRetry(() =>
+            octokit.rest.git.getTree({ owner, repo: repo, tree_sha: commitSha, recursive: 'true' })
+          );
 
           // CRITICAL: Include both .tf and .tfvars files (not just .tf)
           const tfFiles = tree.tree.filter(
@@ -1396,12 +1430,9 @@ Check if the MCP server package is properly installed.`;
               if (!file.path) return null;
 
               try {
-                const { data } = await octokit.rest.repos.getContent({
-                  owner,
-                  repo: repo,
-                  path: file.path,
-                  ref: branch,
-                });
+                const { data } = await this.withRetry(() =>
+                  octokit.rest.repos.getContent({ owner, repo: repo, path: file.path!, ref: branch })
+                );
 
                 if ('content' in data && data.content) {
                   const content = Buffer.from(data.content, 'base64').toString('utf-8');

@@ -455,10 +455,29 @@ export default function ArchMeWorkflow() {
       return hasChanges ? updated : prev;
     });
   };
-  const handleFixesApproved = (diffs: Array<{ fileName: string; fixedContent: string }>) => {
+  const handleFixesApproved = async (diffs: Array<{ fileName: string; fixedContent: string }>) => {
     if (!diffs.length) return;
-    handleCheckovFixesApplied(diffs);
-    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+
+    // Persist fixed files to session storage so the code view syncs reliably
+    try {
+      await apiRequest('POST', `/api/sessions/${sessionId}/files/bulk`, {
+        files: diffs.map(d => ({ fileName: d.fileName, content: d.fixedContent }))
+      });
+    } catch (e) {
+      console.error('Failed to persist fixed files:', e);
+    }
+
+    // Update local generatedCode state with fixed content
+    setGeneratedCode((prev) =>
+      prev.map((code) => {
+        const diff = diffs.find(d => d.fileName === code.fileName);
+        return diff ? { ...code, content: diff.fixedContent } : code;
+      })
+    );
+
+    // Force fresh data from backend so the sessionFiles → generatedCode useEffect stays in sync
+    await queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+    await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
   };
   const diagramRef = useRef<ArchitectureDiagramRef>(null);
   const checkovRef = useRef<CheckovScannerRef>(null);
@@ -877,62 +896,6 @@ export default function ArchMeWorkflow() {
     generateCodeMutation.mutate();
   };
 
-  // Scan generated code mutation - uses same endpoint as Terraform
-  const scanCodeMutation = useMutation({
-    mutationFn: async (code: GeneratedCode[]) => {
-      // First, save files to session storage
-      await apiRequest('POST', `/api/sessions/${sessionId}/scan-archme-code`, {
-        code
-      });
-      
-      // Then, use the existing Terraform scan endpoint (SAME LOGIC as Terraform workflow)
-      const hasKubernetes = code.some((c: any) => c.codeType === 'kubernetes' || c.codeType === 'yaml');
-      const scanEndpoint = hasKubernetes 
-        ? `/api/sessions/${sessionId}/scan-kubernetes`
-        : `/api/sessions/${sessionId}/scan`; // Same endpoint as Terraform workflow
-      
-      const res = await apiRequest('POST', scanEndpoint);
-      
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        const text = await res.text();
-        if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
-          throw new Error('Server returned HTML instead of JSON. Please check the server logs.');
-        }
-        throw new Error(`Unexpected content type: ${contentType}`);
-      }
-      
-      return res.json();
-    },
-    onSuccess: (data) => {
-      // Format scan result to match our UI expectations (same format as Terraform scan)
-      setScanResult({
-        summary: data.summary || {
-          total: 0,
-          passed: 0,
-          failed: 0,
-          skipped: 0,
-          passPercentage: 0
-        },
-        checks: data.failedChecks || []
-      });
-      setIsScanning(false);
-      const summary = data.summary || { passed: 0, total: 0 };
-      toast({
-        title: "Security Scan Complete",
-        description: `${summary.passed}/${summary.total} checks passed`,
-      });
-    },
-    onError: (error: any) => {
-      setIsScanning(false);
-      toast({
-        title: "Scan Failed",
-        description: error.message || "Failed to scan code",
-        variant: "destructive"
-      });
-    }
-  });
-
   // Generate README mutation
   const generateReadmeMutation = useMutation({
     mutationFn: async (code: GeneratedCode[]) => {
@@ -958,155 +921,6 @@ export default function ArchMeWorkflow() {
       console.error('Failed to generate README:', error);
     }
   });
-
-  const scanGeneratedCode = async (code: GeneratedCode[]) => {
-    setIsScanning(true);
-    setSelectedChecks(new Set()); // Clear previous selections
-    scanCodeMutation.mutate(code);
-  };
-
-  // Fix issues function - same as Kubernetes workflow
-  const fixIssues = async () => {
-    if (!scanResult || scanResult.checks.length === 0) {
-      toast({
-        title: "No issues to fix",
-        description: "There are no failed checks to fix",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (selectedChecks.size === 0) {
-      toast({
-        title: "No issues selected",
-        description: "Please select at least one issue to fix",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // Filter to only selected checks
-    const checksToFix = scanResult.checks.filter((check: any) => 
-      selectedChecks.has(check.checkId || check.check_id)
-    );
-
-    setIsFixing(true);
-    try {
-      // Determine framework based on generated code
-      const hasKubernetes = generatedCode.some((c: any) => c.codeType === 'kubernetes' || c.codeType === 'yaml');
-      const framework = hasKubernetes ? 'kubernetes' : 'terraform';
-
-      const response = await apiRequest('POST', `/api/sessions/${sessionId}/fix-issues`, {
-        failedChecks: checksToFix,
-        framework: framework
-      });
-      
-      const result = await response.json();
-      
-      // Show detailed results
-      if (result.fixResults) {
-        const { fixed, failed, skipped, details } = result.fixResults;
-        let message = "Fixed " + fixed + " check(s)";
-        if (failed > 0) {
-          message += ", " + failed + " failed";
-        }
-        if (skipped > 0) {
-          message += ", " + skipped + " skipped";
-        }
-        
-        if (failed > 0 || skipped > 0) {
-          toast({
-            title: "Fix completed with issues",
-            description: message,
-            variant: failed > 0 ? "destructive" : "default",
-          });
-        } else {
-          toast({
-            title: "Issues fixed",
-            description: message,
-          });
-        }
-
-        // Track fixed checks
-        const successfullyFixed: string[] = [];
-        const newlyFixedChecks: any[] = [];
-        
-        details.forEach((detail: any) => {
-          if (detail.status === 'fixed') {
-            const checkKey = detail.checkId + ':' + detail.resource;
-            successfullyFixed.push(checkKey);
-            newlyFixedChecks.push({
-              checkId: detail.checkId,
-              checkName: detail.checkName || detail.check_id,
-              resource: detail.resource,
-              file: detail.file,
-              fixedAt: new Date(),
-              verified: false
-            });
-          }
-        });
-
-        // Add newly fixed checks to the fixed list
-        if (newlyFixedChecks.length > 0) {
-          setFixedChecks(prev => {
-            const existingKeys = new Set(prev.map(f => f.checkId + ':' + f.resource));
-            const uniqueNew = newlyFixedChecks.filter(f => !existingKeys.has(f.checkId + ':' + f.resource));
-            return [...prev, ...uniqueNew];
-          });
-          setActiveTab('fixed');
-        }
-
-        // Re-scan to verify fixes
-        try {
-          await scanGeneratedCode(generatedCode);
-          // Mark fixed checks as verified after re-scan
-          setFixedChecks(prev => prev.map(f => {
-            const checkKey = f.checkId + ':' + f.resource;
-            if (successfullyFixed.includes(checkKey)) {
-              return { ...f, verified: true };
-            }
-            return f;
-          }));
-        } catch (error) {
-          console.error('Re-scan failed:', error);
-        }
-      } else {
-        toast({
-          title: "Issues fixed",
-          description: "Successfully fixed " + (result.fixedFiles?.length || 0) + " file(s)",
-        });
-      }
-
-      // Invalidate files query to refresh the UI with updated files
-      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      
-      // Update scan result to remove fixed checks
-      if (scanResult && result.fixResults) {
-        const successfullyFixed = result.fixResults.details
-          .filter((d: any) => d.status === 'fixed')
-          .map((d: any) => d.checkId + ':' + d.resource);
-        
-        setScanResult({
-          ...scanResult,
-          checks: scanResult.checks.filter((check: any) => {
-            const checkKey = (check.checkId || check.check_id) + ':' + check.resource;
-            return !successfullyFixed.includes(checkKey);
-          })
-        });
-      }
-
-      // Clear selected checks
-      setSelectedChecks(new Set());
-    } catch (error: any) {
-      toast({
-        title: "Fix Failed",
-        description: error.message || "Failed to fix issues",
-        variant: "destructive"
-      });
-    } finally {
-      setIsFixing(false);
-    }
-  };
 
   const generateReadmeForCode = async (code: GeneratedCode[]) => {
     generateReadmeMutation.mutate(code);

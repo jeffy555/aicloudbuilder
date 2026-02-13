@@ -1,0 +1,50 @@
+# Test Kubernetes manifest with intentional security issues
+# Use this to test the Kubernetes RAG fix retrieval system
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: insecure-app
+  labels:
+    app: insecure-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: insecure-app
+  template:
+    metadata:
+      labels:
+        app: insecure-app
+    spec:
+      # Issue: CKV_K8S_38 - Service account token auto-mounted
+      # automountServiceAccountToken: false  # MISSING
+
+      # Issue: CKV_K8S_9 - Host network enabled
+      hostNetwork: true
+
+      containers:
+        - name: app
+          # Issue: CKV_K8S_14 - Using :latest tag
+          image: nginx:latest
+
+          ports:
+            - containerPort: 80
+
+          # Issue: CKV_K8S_40 - Privileged container
+          # Issue: CKV_K8S_20 - Privilege escalation allowed
+          # Issue: CKV_K8S_22 - Read-only filesystem not set
+          # Issue: CKV_K8S_23 - Running as root
+          # Issue: CKV_K8S_28 - Capabilities not dropped
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            # readOnlyRootFilesystem: false  # MISSING
+            # runAsNonRoot: false  # MISSING
+
+          # Issue: CKV_K8S_30 - No resource limits
+          # Issue: CKV_K8S_1 - No liveness probe
+          # Issue: CKV_K8S_2 - No readiness probe
+          # resources:  # MISSING
+          # livenessProbe:  # MISSING
+          # readinessProbe:  # MISSING

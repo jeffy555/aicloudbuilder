@@ -450,11 +450,37 @@ Keep responses brief and automation-focused.`;
       // Get AI response with context
       const aiResponse = await openaiService.chatWithContext(contextPrompt, chatHistory);
 
+      // Clean AI response - for generation requests, just use a simple message
+      let cleanedResponse = aiResponse;
+      if (shouldAutoGenerate || isResourceGenerationRequest(message)) {
+        // For code generation requests, check if response contains code patterns
+        const hasCodeBlock = /```/.test(aiResponse);
+        const hasTerraformCode = /resource\s+"[^"]+"/.test(aiResponse) || /provider\s+"[^"]+"/.test(aiResponse);
+        const hasKubernetesCode = /apiVersion:|kind:/.test(aiResponse);
+
+        if (hasCodeBlock || hasTerraformCode || hasKubernetesCode) {
+          // Response contains code - use simple message instead
+          cleanedResponse = "Generating your infrastructure code...";
+        } else {
+          // No code detected - clean up any remaining formatting
+          cleanedResponse = aiResponse
+            .replace(/```[\s\S]*?```/g, '')
+            .replace(/```[\s\S]*/g, '') // Incomplete code blocks
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+
+          // If still too short or empty, use default
+          if (!cleanedResponse || cleanedResponse.length < 20) {
+            cleanedResponse = "Generating your infrastructure code...";
+          }
+        }
+      }
+
       // Save AI message
       const aiMessage = await storage.createMessage({
         sessionId,
         type: 'ai',
-        content: aiResponse,
+        content: cleanedResponse,
       });
 
       // If this is a generation request, trigger generation in the background

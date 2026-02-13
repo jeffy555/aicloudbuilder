@@ -63,6 +63,130 @@ function repairJson(jsonText: string): string {
   return repaired;
 }
 
+interface TerraformResourceBlock {
+  type: string;
+  localName: string;
+  body: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+function parseTerraformResourceBlocks(terraform: string): TerraformResourceBlock[] {
+  const blocks: TerraformResourceBlock[] = [];
+  const resourceHeaderRegex = /^resource\s+"([^"]+)"\s+"([^"]+)"\s*\{/gm;
+  let match: RegExpExecArray | null;
+
+  while ((match = resourceHeaderRegex.exec(terraform)) !== null) {
+    const [header, type, localName] = match;
+    const startIndex = match.index;
+    const bodyStart = startIndex + header.length;
+    let depth = 1;
+    let cursor = bodyStart;
+
+    while (cursor < terraform.length && depth > 0) {
+      const char = terraform[cursor];
+      if (char === '{') depth += 1;
+      if (char === '}') depth -= 1;
+      cursor += 1;
+    }
+
+    const endIndex = cursor;
+    const body = terraform.slice(bodyStart, endIndex - 1).trim();
+    blocks.push({ type, localName, body, startIndex, endIndex });
+    resourceHeaderRegex.lastIndex = endIndex;
+  }
+
+  return blocks;
+}
+
+function normalizeTerraformValue(input: string): string {
+  return input.replace(/\s+/g, " ").replace(/"/g, "").trim().toLowerCase();
+}
+
+function extractTerraformAttribute(body: string, key: string): string | null {
+  const regex = new RegExp(`^\\s*${key}\\s*=\\s*([^\\n#]+)`, "m");
+  const match = body.match(regex);
+  return match ? match[1].trim() : null;
+}
+
+function removeDuplicateTerraformResources(terraform: string): string {
+  const blocks = parseTerraformResourceBlocks(terraform);
+  if (blocks.length <= 1) return terraform;
+
+  const seen = new Set<string>();
+  const rangesToRemove: Array<{ start: number; end: number }> = [];
+
+  for (const block of blocks) {
+    if (/\bcount\s*=/.test(block.body) || /\bfor_each\s*=/.test(block.body)) {
+      continue;
+    }
+
+    const configuredName = extractTerraformAttribute(block.body, "name");
+    const semanticName = configuredName
+      ? normalizeTerraformValue(configuredName)
+      : normalizeTerraformValue(block.localName);
+    const bodyFingerprint = normalizeTerraformValue(
+      block.body
+        .replace(/^\s*name\s*=.*$/gm, "")
+        .replace(/^\s*resource_group_name\s*=.*$/gm, "")
+    );
+    const dedupeKey = `${block.type}|${semanticName}|${bodyFingerprint}`;
+
+    if (seen.has(dedupeKey)) {
+      rangesToRemove.push({ start: block.startIndex, end: block.endIndex });
+      continue;
+    }
+    seen.add(dedupeKey);
+  }
+
+  if (rangesToRemove.length === 0) return terraform;
+
+  let output = "";
+  let cursor = 0;
+  for (const range of rangesToRemove.sort((a, b) => a.start - b.start)) {
+    output += terraform.slice(cursor, range.start);
+    cursor = range.end;
+  }
+  output += terraform.slice(cursor);
+
+  return output.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function explicitlyRequestsDuplicates(description: string): boolean {
+  const normalized = description.toLowerCase();
+  const patterns = [
+    /\bmultiple\b/,
+    /\bduplicate\b/,
+    /\b2x\b|\b3x\b|\b4x\b/,
+    /\btwo\b|\bthree\b|\bfour\b/,
+    /\bprod\b.*\bdev\b|\bdev\b.*\bprod\b/,
+    /\bstaging\b.*\bprod\b|\bprod\b.*\bstaging\b/,
+    /\bactive[-\s]?active\b/,
+    /\bmulti[-\s]?region\b/,
+    /\bsecondary\b|\bprimary\b/,
+  ];
+  return patterns.some((pattern) => pattern.test(normalized));
+}
+
+function postProcessTerraformFiles(
+  files: Array<{ path: string; content: string }>,
+  description: string
+): Array<{ path: string; content: string }> {
+  if (explicitlyRequestsDuplicates(description)) {
+    return files;
+  }
+
+  return files.map((file) => {
+    if (!file.path.toLowerCase().endsWith(".tf")) {
+      return file;
+    }
+    return {
+      ...file,
+      content: removeDuplicateTerraformResources(file.content),
+    };
+  });
+}
+
 export class OpenAIService {
   private getSystemPrompt(sessionContext?: {
     isExistingRepo?: boolean;
@@ -134,17 +258,33 @@ Keep responses conversational and helpful. Always confirm actions before they're
   }): Promise<string> {
     const systemPrompt = this.getSystemPrompt(sessionContext);
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...messages
-      ],
-      temperature: 0.7,
-      max_tokens: 2000,
-    });
+    try {
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...messages
+        ],
+        temperature: 0.7,
+        max_tokens: 4000, // Increased for larger code fixes
+      });
 
-    return completion.choices[0]?.message?.content || '';
+      return completion.choices[0]?.message?.content || '';
+    } catch (error: any) {
+      console.error('OpenAI API error in chat:', error.message);
+      // Check for quota exceeded or rate limit errors
+      if (error.code === 'insufficient_quota' ||
+          error.status === 429 ||
+          error.message?.includes('quota') ||
+          error.message?.includes('rate limit') ||
+          error.message?.includes('exceeded')) {
+        const quotaError = new Error('OpenAI quota exceeded - please check your API key billing or try again later');
+        (quotaError as any).code = 'QUOTA_EXCEEDED';
+        (quotaError as any).isQuotaError = true;
+        throw quotaError;
+      }
+      throw error; // Re-throw to be handled by caller
+    }
   }
 
   async chatWithContext(contextPrompt: string, messages: ChatMessage[]): Promise<string> {
@@ -933,7 +1073,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       }
       
       return {
-        files: validFiles
+        files: postProcessTerraformFiles(validFiles, refinedDescription)
       };
     } else if (moduleApproach === 'standalone-root') {
       // Standalone root modules use flat structure
@@ -1330,7 +1470,7 @@ REMEMBER: Generate production-ready code that follows ALL these best practices. 
             throw new Error('No valid files in repaired JSON');
           }
           
-          return { files: validFiles };
+          return { files: postProcessTerraformFiles(validFiles, refinedDescription) };
         } catch (repairError: any) {
           console.error('   ❌ Failed to repair truncated JSON:', repairError.message);
           throw new Error(`Response was truncated and could not be repaired. The generated Terraform code is too large (${response.length} chars). Please try with fewer resources or split into multiple requests.`);
@@ -1408,7 +1548,7 @@ REMEMBER: Generate production-ready code that follows ALL these best practices. 
       }
       
       return {
-        files: validFiles
+        files: postProcessTerraformFiles(validFiles, refinedDescription)
       };
     } else if (moduleApproach === 'aggregated-root') {
       // Aggregated root modules use module blocks to call child modules
@@ -1577,7 +1717,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       }
       
       return {
-        files: validFiles
+        files: postProcessTerraformFiles(validFiles, refinedDescription)
       };
     } else {
       // Default fallback
@@ -1680,7 +1820,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
           if (!parsed.files || !Array.isArray(parsed.files)) {
             throw new Error('Repaired JSON missing files array');
           }
-          return { files: parsed.files };
+          return { files: postProcessTerraformFiles(parsed.files, refinedDescription) };
         } catch (repairError: any) {
           console.error('   ❌ Failed to repair truncated JSON:', repairError.message);
           throw new Error(`Response was truncated and could not be repaired. The generated Terraform code is too large (${response.length} chars). Please try with fewer resources or split into multiple requests.`);
@@ -1743,7 +1883,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       }
       
       return {
-        files: validFiles
+        files: postProcessTerraformFiles(validFiles, refinedDescription)
       };
     }
   }

@@ -251,33 +251,100 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
     setIsDownloadingJpg(true);
 
     try {
-      const response = await fetch(`/api/sessions/${sessionId}/diagram-image`, {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ diagramType }),
-      });
+      // For ArchMe workflow, use backend endpoint (which stores analysis)
+      // For Terraform/Kubernetes, render SVG to canvas client-side
+      if (useArchMeEndpoint) {
+        const response = await fetch(`/api/sessions/${sessionId}/diagram-image`, {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ diagramType }),
+        });
 
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null);
-        throw new Error(
-          payload?.details || payload?.message || payload?.error || response.statusText
-        );
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          throw new Error(
+            payload?.details || payload?.message || payload?.error || response.statusText
+          );
+        }
+
+        const blob = await response.blob();
+        const link = document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        link.href = url;
+        link.download = `archme-diagram-${Date.now()}.jpg`;
+        link.click();
+        URL.revokeObjectURL(url);
+      } else {
+        // Client-side rendering for Terraform/Kubernetes diagrams
+        // Get the actual rendered dimensions from the SVG
+        const bbox = svgElement.getBoundingClientRect();
+        const svgWidth = bbox.width || svgElement.clientWidth || 800;
+        const svgHeight = bbox.height || svgElement.clientHeight || 600;
+
+        // Clone the SVG and set explicit dimensions
+        const svgClone = svgElement.cloneNode(true) as SVGSVGElement;
+        svgClone.setAttribute('width', String(svgWidth));
+        svgClone.setAttribute('height', String(svgHeight));
+
+        // Ensure viewBox is set if not present
+        if (!svgClone.getAttribute('viewBox')) {
+          svgClone.setAttribute('viewBox', `0 0 ${svgWidth} ${svgHeight}`);
+        }
+
+        // Serialize the cloned SVG with explicit dimensions
+        const svgData = new XMLSerializer().serializeToString(svgClone);
+
+        // Encode SVG to base64 data URL (avoids cross-origin tainting)
+        const svgBase64 = btoa(unescape(encodeURIComponent(svgData)));
+        const dataUrl = `data:image/svg+xml;base64,${svgBase64}`;
+
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          // Scale up for better quality
+          const scale = 2;
+          // Use the known dimensions, not img.width/height which may be 0
+          const width = img.naturalWidth || svgWidth;
+          const height = img.naturalHeight || svgHeight;
+          canvas.width = width * scale;
+          canvas.height = height * scale;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            // Fill with white background for better visibility
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.scale(scale, scale);
+            ctx.drawImage(img, 0, 0, width, height);
+
+            canvas.toBlob((blob) => {
+              if (blob) {
+                const link = document.createElement('a');
+                const url = URL.createObjectURL(blob);
+                link.href = url;
+                link.download = `${workflowType}-diagram-${Date.now()}.jpg`;
+                link.click();
+                URL.revokeObjectURL(url);
+              }
+              setIsDownloadingJpg(false);
+            }, 'image/jpeg', 0.95);
+          } else {
+            setIsDownloadingJpg(false);
+          }
+        };
+        img.onerror = () => {
+          toast({
+            title: "Download failed",
+            description: "Failed to render diagram image",
+            variant: "destructive",
+          });
+          setIsDownloadingJpg(false);
+        };
+        img.src = dataUrl;
+        return; // Early return - callback will handle setIsDownloadingJpg
       }
-
-      if (!response.ok) {
-        throw new Error("Failed to export diagram");
-      }
-
-      const blob = await response.blob();
-      const link = document.createElement("a");
-      const url = URL.createObjectURL(blob);
-      link.href = url;
-      link.download = `archme-diagram-${Date.now()}.jpg`;
-      link.click();
-      URL.revokeObjectURL(url);
     } catch (error: any) {
       toast({
         title: "Download failed",
@@ -285,7 +352,9 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
         variant: "destructive",
       });
     } finally {
-      setIsDownloadingJpg(false);
+      if (useArchMeEndpoint) {
+        setIsDownloadingJpg(false);
+      }
     }
   };
 

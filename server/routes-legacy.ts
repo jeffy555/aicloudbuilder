@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { createHash } from "crypto";
 import { storage } from "./storage";
 import { mcpClient, type MCPProvider } from "./mcp-client";
 import { openaiService, type ChatMessage } from "./openai-service";
@@ -24,6 +25,26 @@ import { runCheckovKubernetes } from "./kubernetes/checkov-validator";
 import { analyzeKubernetesBestPractices } from "./kubernetes/best-practices-analyzer";
 import { validateKubernetesYAML } from "./kubernetes/kubeval-validator";
 import type { DiagramType } from "./diagram/diagram-type-generator";
+import {
+  HOURS_PER_MONTH,
+  resolveAzureLocation,
+  getPricingConfig,
+  isFreeResource,
+  getServiceName,
+  buildPricingApiFilter,
+  selectBestPricingItem,
+  calculateMonthlyCost,
+  calculateFallbackMonthlyCost,
+} from "./azure-pricing-config";
+import { hasUsageDimensions, getUsageDefaults, getUsageCatalog, applyUsageToAttrs } from "./azure-usage-catalog";
+import {
+  buildVariableMap,
+  resolveResourceAttributes,
+  resolveLocation,
+  resolveResourceCount,
+  type TerraformFile,
+} from "./terraform-variable-resolver";
+import type { CostStatus, UsageProfile, CostResource, CostAnalysisResult } from "../shared/schema";
 
 // Helper function to repair JSON (same as in openai-service.ts)
 function repairJson(jsonText: string): string {
@@ -72,13 +93,14 @@ async function getRemediation(
     // Map IntelligentFixResult → RAG-compatible shape
     return {
       snippet: {
-        id: require('crypto').createHash('sha256')
+        id: createHash('sha256')
           .update(`${checkId}:${resourceType}`)
           .digest('hex')
           .substring(0, 16),
         checkId,
         resourceType,
         cloudProvider: cloudProvider || 'azure',
+        framework: 'terraform' as const,
         fixSnippet: result.fix,
         context: '',
         guideline,
@@ -94,7 +116,7 @@ async function getRemediation(
         createdAt: new Date(),
         updatedAt: new Date(),
       },
-      template: null,
+      template: undefined,
       confidence: result.confidence,
       matchReason: `[intelligent] source=${result.source}`,
     };
@@ -729,11 +751,37 @@ Keep responses brief and automation-focused.`;
       // Get AI response with context
       const aiResponse = await openaiService.chatWithContext(contextPrompt, chatHistory);
 
+      // Clean AI response - for generation requests, just use a simple message
+      let cleanedResponse = aiResponse;
+      if (shouldAutoGenerate || isResourceGenerationRequest(message)) {
+        // For code generation requests, check if response contains code patterns
+        const hasCodeBlock = /```/.test(aiResponse);
+        const hasTerraformCode = /resource\s+"[^"]+"/.test(aiResponse) || /provider\s+"[^"]+"/.test(aiResponse);
+        const hasKubernetesCode = /apiVersion:|kind:/.test(aiResponse);
+
+        if (hasCodeBlock || hasTerraformCode || hasKubernetesCode) {
+          // Response contains code - use simple message instead
+          cleanedResponse = "Generating your infrastructure code...";
+        } else {
+          // No code detected - clean up any remaining formatting
+          cleanedResponse = aiResponse
+            .replace(/```[\s\S]*?```/g, '')
+            .replace(/```[\s\S]*/g, '') // Incomplete code blocks
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+
+          // If still too short or empty, use default
+          if (!cleanedResponse || cleanedResponse.length < 20) {
+            cleanedResponse = "Generating your infrastructure code...";
+          }
+        }
+      }
+
       // Save AI message
       const aiMessage = await storage.createMessage({
         sessionId,
         type: 'ai',
-        content: aiResponse,
+        content: cleanedResponse,
       });
 
       // If this is a generation request, trigger generation in the background
@@ -4188,9 +4236,18 @@ Please check the server console logs for detailed error information.`;
               // Ensure Python launcher is in PATH on Windows
               if (isWindows) {
                 const username = process.env.USERNAME || process.env.USER || '';
+                const pythonBase = `C:\\Users\\${username}\\AppData\\Local\\Programs\\Python`;
+                let pythonScriptDirs: string[] = [];
+                try {
+                  pythonScriptDirs = require('fs').readdirSync(pythonBase, { withFileTypes: true })
+                    .filter((d: any) => d.isDirectory() && d.name.startsWith('Python'))
+                    .map((d: any) => `${pythonBase}\\${d.name}\\scripts`);
+                } catch { /* Python not installed at standard path */ }
                 const pythonPaths = [
-                  // Python launcher (py.exe) - this is critical!
-                  `C:\\Users\\${username}\\AppData\\Local\\Programs\\Python\\Launcher`,
+                  // Python launcher (py.exe)
+                  `${pythonBase}\\Launcher`,
+                  // Python scripts directories (checkov, pip, etc.)
+                  ...pythonScriptDirs,
                 ];
                 
                 const currentPath = env.PATH || '';
@@ -7660,16 +7717,75 @@ Please check the server console logs for detailed error information.`;
             console.log(`         Guideline: ${check.guideline || 'No guideline'}`);
           });
 
-          // For Kubernetes, use YAML-specific fix logic
+          // For Kubernetes, use RAG-based fix retrieval with YAML-specific logic
           if (framework === 'kubernetes') {
-            const kubernetesIssues = batchChecks.map((check: any, idx: number) => {
-              let desc = `${idx + 1}. ${check.checkName} (${check.checkId})\n`;
-              desc += `   - Resource: ${check.resource}\n`;
-              if (check.guideline) {
-                desc += `   - Guideline: ${check.guideline}\n`;
+            // Phase 6: Get fixes from RAG system for each check
+            console.log(`   🔍 Retrieving fixes from RAG system...`);
+            const ragFixes: Array<{
+              check: any;
+              fix: string | null;
+              confidence: number;
+              source: string;
+            }> = [];
+
+            for (const check of batchChecks) {
+              try {
+                // Extract resource kind from resource string (e.g., "Deployment.app-name" -> "Deployment")
+                const resourceKind = check.resource?.split('.')[0] || 'Deployment';
+
+                const ragResult = await intelligentFixRetriever.getFixForCheck(
+                  check.checkId,
+                  resourceKind,
+                  check.checkName || check.checkId,
+                  check.guideline || '',
+                  session.userId || undefined,
+                  currentFileContent, // Pass current YAML as context
+                  'kubernetes', // cloudProvider
+                  'kubernetes'  // framework
+                );
+
+                if (ragResult) {
+                  console.log(`      ✅ RAG fix found for ${check.checkId} (source: ${ragResult.source}, confidence: ${(ragResult.confidence * 100).toFixed(0)}%)`);
+                  ragFixes.push({
+                    check,
+                    fix: ragResult.fix,
+                    confidence: ragResult.confidence,
+                    source: ragResult.source
+                  });
+                } else {
+                  console.log(`      ⚠️  No RAG fix found for ${check.checkId}`);
+                  ragFixes.push({
+                    check,
+                    fix: null,
+                    confidence: 0,
+                    source: 'none'
+                  });
+                }
+              } catch (ragError: any) {
+                console.warn(`      ❌ RAG retrieval failed for ${check.checkId}: ${ragError.message}`);
+                ragFixes.push({
+                  check,
+                  fix: null,
+                  confidence: 0,
+                  source: 'error'
+                });
               }
-              if (check.reason) {
-                desc += `   - Reason: ${check.reason}\n`;
+            }
+
+            // Build prompt with RAG-provided fix snippets as guidance
+            const kubernetesIssues = ragFixes.map((item, idx) => {
+              let desc = `${idx + 1}. ${item.check.checkName} (${item.check.checkId})\n`;
+              desc += `   - Resource: ${item.check.resource}\n`;
+              if (item.check.guideline) {
+                desc += `   - Guideline: ${item.check.guideline}\n`;
+              }
+              if (item.check.reason) {
+                desc += `   - Reason: ${item.check.reason}\n`;
+              }
+              // Include RAG-provided fix snippet if available
+              if (item.fix) {
+                desc += `   - RECOMMENDED FIX (${item.source}, ${(item.confidence * 100).toFixed(0)}% confidence):\n`;
+                desc += item.fix.split('\n').map(line => `     ${line}`).join('\n') + '\n';
               }
               return desc;
             }).join('\n');
@@ -7685,15 +7801,14 @@ FAILED SECURITY CHECKS TO FIX:
 ${kubernetesIssues}
 
 REQUIREMENTS:
-1. Fix ALL the security issues listed above
+1. Apply the RECOMMENDED FIX snippets provided above to the appropriate resources
 2. Maintain valid YAML syntax
 3. Preserve all existing resources and configurations
 4. Only modify what needs to be fixed
-5. Add missing security attributes (e.g., securityContext, resource limits, probes)
-6. Update existing attributes to meet security requirements
-7. Do NOT remove or rename existing resources
-8. Maintain proper YAML indentation and structure
-9. Ensure all YAML is properly formatted
+5. Merge fix snippets into existing securityContext/resources blocks if they exist
+6. Do NOT remove or rename existing resources
+7. Maintain proper YAML indentation (2 spaces)
+8. Ensure all YAML is properly formatted
 
 Return ONLY the complete fixed YAML code in a code block, nothing else.`;
 
@@ -7701,7 +7816,7 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
               const completion = await openaiService.chat([
                 {
                   role: 'system',
-                  content: 'You are a Kubernetes security expert. Fix security issues in Kubernetes YAML manifests based on Checkov scan results. Return only the fixed YAML in a code block.'
+                  content: 'You are a Kubernetes security expert. Apply the recommended fix snippets to the YAML manifest. Return only the fixed YAML in a code block.'
                 },
                 {
                   role: 'user',
@@ -7771,8 +7886,28 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
                   
                   if (stillFailing.length === 0) {
                     console.log(`   ✅ Verification passed: All ${batchChecks.length} check(s) now pass Checkov`);
-                    // Mark as fixed
-                    batchChecks.forEach((check: any) => {
+                    // Mark as fixed and report success to RAG for learning
+                    for (const check of batchChecks) {
+                      const resourceKind = check.resource?.split('.')[0] || 'Deployment';
+                      // Find the RAG fix that was used for this check
+                      const ragFix = ragFixes.find(rf => rf.check.checkId === check.checkId);
+                      if (ragFix?.fix) {
+                        // Report verified fix to RAG system for confidence boost
+                        try {
+                          await intelligentFixRetriever.storeVerifiedFix(
+                            check.checkId,
+                            resourceKind,
+                            ragFix.fix,
+                            session.userId || undefined,
+                            true, // verified
+                            'kubernetes',
+                            'kubernetes'
+                          );
+                          console.log(`      📈 RAG confidence updated for ${check.checkId}`);
+                        } catch (ragErr: any) {
+                          console.warn(`      ⚠️  Failed to update RAG confidence: ${ragErr.message}`);
+                        }
+                      }
                       fixResults.push({
                         checkId: check.checkId,
                         checkName: check.checkName,
@@ -7780,12 +7915,47 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
                         resource: check.resource,
                         status: 'fixed',
                       });
-                    });
+                    }
                   } else {
                     console.warn(`   ⚠️  Verification warning: ${stillFailing.length} check(s) still failing after fix`);
-                    // Mark as partially fixed or failed
-                    batchChecks.forEach((check: any) => {
+                    // Mark as partially fixed or failed and report to RAG
+                    for (const check of batchChecks) {
                       const stillFails = stillFailing.some(f => f.checkId === check.checkId);
+                      const resourceKind = check.resource?.split('.')[0] || 'Deployment';
+
+                      if (stillFails) {
+                        // Report failure to RAG system for confidence decrease
+                        try {
+                          await intelligentFixRetriever.reportFixFailure(
+                            check.checkId,
+                            resourceKind,
+                            session.userId || undefined,
+                            'kubernetes'
+                          );
+                          console.log(`      📉 RAG confidence decreased for ${check.checkId}`);
+                        } catch (ragErr: any) {
+                          console.warn(`      ⚠️  Failed to update RAG confidence: ${ragErr.message}`);
+                        }
+                      } else {
+                        // Report success for checks that passed
+                        const ragFix = ragFixes.find(rf => rf.check.checkId === check.checkId);
+                        if (ragFix?.fix) {
+                          try {
+                            await intelligentFixRetriever.storeVerifiedFix(
+                              check.checkId,
+                              resourceKind,
+                              ragFix.fix,
+                              session.userId || undefined,
+                              true,
+                              'kubernetes',
+                              'kubernetes'
+                            );
+                          } catch (ragErr: any) {
+                            console.warn(`      ⚠️  Failed to update RAG confidence: ${ragErr.message}`);
+                          }
+                        }
+                      }
+
                       fixResults.push({
                         checkId: check.checkId,
                         checkName: check.checkName,
@@ -7794,7 +7964,7 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
                         status: stillFails ? 'failed' : 'fixed',
                         reason: stillFails ? 'Check still failing after fix - may require manual intervention' : undefined
                       });
-                    });
+                    }
                   }
                 } catch (verifyError: any) {
                   console.warn(`   ⚠️  Verification scan failed: ${verifyError.message}`);
@@ -8349,7 +8519,7 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
                       );
                       console.log(`   💾 Stored generated fix snippet: ${checkId} → ${resourceType}`);
 
-                      const snippetId = require('crypto').createHash('sha256')
+                      const snippetId = createHash('sha256')
                         .update(`${checkId}:${resourceType}`)
                         .digest('hex')
                         .substring(0, 16);
@@ -8428,6 +8598,18 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
           console.log(`   ✅ Batch ${batchIdx + 1} complete`);
         } catch (error: any) {
           console.error(`   ❌ Failed to fix batch ${batchIdx + 1} in ${fileName}:`, error.message);
+          console.error(`      Stack trace:`, error.stack);
+
+          // Extract more detailed error info
+          let errorReason = error.message || 'Unknown error during fix';
+          if (error.response) {
+            // OpenAI API error
+            errorReason = `OpenAI API Error: ${error.response.status}`;
+            console.error(`      OpenAI Error Details:`, error.response.data);
+          } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+            errorReason = 'Network error: Could not connect to AI service';
+          }
+
           // Mark all checks in this batch as failed
           batchChecks.forEach((check: any) => {
             fixResults.push({
@@ -8436,7 +8618,7 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
               file: fileName,
               resource: check.resource,
               status: 'failed',
-              reason: error.message || 'Unknown error during fix'
+              reason: errorReason
             });
           });
           // Continue with next batch even if one fails
@@ -8546,9 +8728,22 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
 
     } catch (error: any) {
       console.error('❌ Error in auto-fix:', error);
-      res.status(500).json({ 
+      console.error('   Stack trace:', error.stack);
+
+      // Extract more detailed error info
+      let errorDetails = error.message || 'Unknown error';
+      if (error.response) {
+        // OpenAI API error
+        errorDetails = `OpenAI API Error: ${error.response.status} - ${JSON.stringify(error.response.data)}`;
+      } else if (error.code) {
+        // Network or system error
+        errorDetails = `${error.code}: ${error.message}`;
+      }
+
+      res.status(500).json({
         error: 'Failed to auto-fix issues',
-        details: error.message 
+        details: errorDetails,
+        hint: 'Check server logs for more details. Common issues: OpenAI API rate limit, invalid API key, or service unavailable.'
       });
     }
   });
@@ -8681,6 +8876,23 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
 
       console.log(`📁 Found ${terraformFiles.length} Terraform file(s) with content`);
 
+      // Parse request body for profile and custom usage
+      const requestProfile: UsageProfile = (req.body?.profile as UsageProfile) || 'medium';
+      const customUsage: Record<string, Record<string, number>> = req.body?.customUsage || {};
+      console.log(`📊 Usage profile: ${requestProfile}`);
+      if (Object.keys(customUsage).length > 0) {
+        console.log(`   Custom usage overrides: ${JSON.stringify(customUsage)}`);
+      }
+
+      // Build variable resolution map from all terraform files
+      const tfFiles: TerraformFile[] = terraformFiles.map(f => ({
+        fileName: f.fileName,
+        content: f.content,
+      }));
+      const variableMap = buildVariableMap(tfFiles);
+      const resolvedVarCount = Object.keys(variableMap).filter(k => !k.startsWith('__')).length;
+      console.log(`🔧 Variable map built: ${resolvedVarCount} variable(s) resolved from tfvars/variables.tf`);
+
       if (terraformFiles.length === 0) {
         return res.status(400).json({ 
           success: false,
@@ -8802,9 +9014,9 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
           
           let location = defaultLocation;
           if (locationMatch) {
-            location = locationMatch[1].trim();
-            // Remove quotes if present
-            location = location.replace(/^["']|["']$/g, '');
+            const rawLocation = locationMatch[1].trim().replace(/^["']|["']$/g, '');
+            const locResult = resolveLocation(rawLocation, variableMap, defaultLocation);
+            location = locResult.location;
           }
           
           // Extract attributes
@@ -8856,39 +9068,122 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
           
           // Azure-specific attributes
           if (cloudProvider === 'azure') {
-            // Common Azure attributes (handles quoted and unquoted values, and nested blocks)
-            const tierMatch = match.body.match(/account_tier\s*=\s*"?([^"\s\n}]+)"?/);
-            if (tierMatch) attributes.account_tier = tierMatch[1].trim().replace(/^["']|["']$/g, '');
-            
-            const replicationMatch = match.body.match(/account_replication_type\s*=\s*"?([^"\s\n}]+)"?/);
-            if (replicationMatch) attributes.account_replication_type = replicationMatch[1].trim().replace(/^["']|["']$/g, '');
-            
+            // Helper to extract a simple attribute value, resolving var. references via variableMap
+            const extractAttr = (key: string): string | undefined => {
+              const m = match.body.match(new RegExp(`${key}\\s*=\\s*"?([^"\\s\\n}]+)"?`));
+              if (!m) return undefined;
+              let value = m[1].trim().replace(/^["']|["']$/g, '');
+              // Resolve var. references using the pre-built variable map
+              if (value.startsWith('var.')) {
+                const varName = value.replace('var.', '');
+                if (varName in variableMap) {
+                  value = variableMap[varName];
+                } else {
+                  return undefined; // Unresolved -> use defaults
+                }
+              }
+              return value;
+            };
+
+            // Storage account attributes
+            const tierVal = extractAttr('account_tier');
+            if (tierVal) attributes.account_tier = tierVal;
+            const replVal = extractAttr('account_replication_type');
+            if (replVal) attributes.account_replication_type = replVal;
+            const kindVal = extractAttr('account_kind');
+            if (kindVal) attributes.account_kind = kindVal;
+            const accessTierVal = extractAttr('access_tier');
+            if (accessTierVal) attributes.access_tier = accessTierVal;
+
             // Handle nested sku blocks
             const skuBlockMatch = match.body.match(/sku\s*\{([^}]+)\}/);
             if (skuBlockMatch) {
               const skuBody = skuBlockMatch[1];
-              const tierMatch = skuBody.match(/tier\s*=\s*"?([^"\s\n}]+)"?/);
-              const sizeMatch = skuBody.match(/size\s*=\s*"?([^"\s\n}]+)"?/);
-              if (tierMatch) attributes.sku = tierMatch[1].trim().replace(/^["']|["']$/g, '');
-              if (sizeMatch) attributes.sku_size = sizeMatch[1].trim().replace(/^["']|["']$/g, '');
-              if (tierMatch && sizeMatch) {
+              const skuTierMatch = skuBody.match(/tier\s*=\s*"?([^"\s\n}]+)"?/);
+              const skuSizeMatch = skuBody.match(/size\s*=\s*"?([^"\s\n}]+)"?/);
+              if (skuTierMatch) attributes.sku = skuTierMatch[1].trim().replace(/^["']|["']$/g, '');
+              if (skuSizeMatch) attributes.sku_size = skuSizeMatch[1].trim().replace(/^["']|["']$/g, '');
+              if (skuTierMatch && skuSizeMatch) {
                 attributes.sku_name = `${attributes.sku}${attributes.sku_size}`;
               }
             } else {
-              // Simple sku attribute
-              const skuMatch = match.body.match(/sku\s*=\s*"?([^"\s\n}]+)"?/);
-              if (skuMatch) attributes.sku = skuMatch[1].trim().replace(/^["']|["']$/g, '');
+              const skuMatch = extractAttr('sku');
+              if (skuMatch) attributes.sku = skuMatch;
             }
-            
-            const skuNameMatch = match.body.match(/sku_name\s*=\s*"?([^"\s\n}]+)"?/);
-            if (skuNameMatch) attributes.sku_name = skuNameMatch[1].trim().replace(/^["']|["']$/g, '');
-            
-            const kindMatch = match.body.match(/account_kind\s*=\s*"?([^"\s\n}]+)"?/);
-            if (kindMatch) attributes.account_kind = kindMatch[1].trim().replace(/^["']|["']$/g, '');
-            
-            // Extract app_service_plan_id for App Service
-            const planIdMatch = match.body.match(/app_service_plan_id\s*=\s*([^\s\n}]+)/);
-            if (planIdMatch) attributes.app_service_plan_id = planIdMatch[1].trim();
+
+            // sku_name (standalone, overrides nested if present)
+            const skuNameVal = extractAttr('sku_name');
+            if (skuNameVal) attributes.sku_name = skuNameVal;
+
+            // sku_tier (for Firewall, etc.)
+            const skuTierVal = extractAttr('sku_tier');
+            if (skuTierVal) attributes.sku_tier = skuTierVal;
+
+            // VM size (for azurerm_virtual_machine, linux_virtual_machine, windows_virtual_machine)
+            const vmSizeVal = extractAttr('vm_size');
+            if (vmSizeVal) attributes.vm_size = vmSizeVal;
+            const sizeVal = extractAttr('size');
+            if (sizeVal) attributes.size = sizeVal;
+
+            // App Service plan reference
+            const planIdVal = extractAttr('app_service_plan_id');
+            if (planIdVal) attributes.app_service_plan_id = planIdVal;
+            const servicePlanIdVal = extractAttr('service_plan_id');
+            if (servicePlanIdVal) attributes.service_plan_id = servicePlanIdVal;
+
+            // Managed disk attributes
+            const storageAcctTypeVal = extractAttr('storage_account_type');
+            if (storageAcctTypeVal) attributes.storage_account_type = storageAcctTypeVal;
+            const diskSizeVal = extractAttr('disk_size_gb');
+            if (diskSizeVal) attributes.disk_size_gb = diskSizeVal;
+            const sizeGbVal = extractAttr('size_gb');
+            if (sizeGbVal) attributes.size_gb = sizeGbVal;
+
+            // Public IP attributes
+            const allocMethodVal = extractAttr('allocation_method');
+            if (allocMethodVal) attributes.allocation_method = allocMethodVal;
+
+            // Redis Cache attributes
+            const capacityVal = extractAttr('capacity');
+            if (capacityVal) attributes.capacity = capacityVal;
+            const familyVal = extractAttr('family');
+            if (familyVal) attributes.family = familyVal;
+
+            // Cognitive Services / Search
+            const cogKindVal = extractAttr('kind');
+            if (cogKindVal) attributes.kind = cogKindVal;
+
+            // Application Insights
+            const dailyCapVal = extractAttr('daily_data_cap_in_gb');
+            if (dailyCapVal) attributes.daily_data_cap_in_gb = dailyCapVal;
+
+            // AKS default_node_pool attributes (nested block)
+            const nodePoolBlock = match.body.match(/default_node_pool\s*\{([^}]+)\}/);
+            if (nodePoolBlock) {
+              const npBody = nodePoolBlock[1];
+              const npVmSize = npBody.match(/vm_size\s*=\s*"?([^"\s\n}]+)"?/);
+              if (npVmSize) attributes.default_node_pool_vm_size = npVmSize[1].trim().replace(/^["']|["']$/g, '');
+              const npNodeCount = npBody.match(/node_count\s*=\s*"?([^"\s\n}]+)"?/);
+              if (npNodeCount) attributes.default_node_pool_node_count = npNodeCount[1].trim().replace(/^["']|["']$/g, '');
+              const npMinCount = npBody.match(/min_count\s*=\s*"?([^"\s\n}]+)"?/);
+              if (npMinCount) attributes.node_count = npMinCount[1].trim().replace(/^["']|["']$/g, '');
+            }
+
+            // Container Group attributes (cpu, memory)
+            const cpuVal = extractAttr('cpu');
+            if (cpuVal) attributes.cpu = cpuVal;
+            const memVal = extractAttr('memory');
+            if (memVal) attributes.memory = memVal;
+
+            // Container / resources block for container_group
+            const containerBlock = match.body.match(/container\s*\{([\s\S]*?)\}/);
+            if (containerBlock) {
+              const cBody = containerBlock[1];
+              const cCpu = cBody.match(/cpu\s*=\s*"?([^"\s\n}]+)"?/);
+              if (cCpu && !attributes.cpu) attributes.cpu = cCpu[1].trim().replace(/^["']|["']$/g, '');
+              const cMem = cBody.match(/memory\s*=\s*"?([^"\s\n}]+)"?/);
+              if (cMem && !attributes.memory) attributes.memory = cMem[1].trim().replace(/^["']|["']$/g, '');
+            }
           }
           
           // AWS-specific attributes
@@ -8935,53 +9230,12 @@ Return the COMPLETE fixed Terraform code with ALL necessary security fixes appli
             if (numCacheNodesMatch) attributes.num_cache_nodes = numCacheNodesMatch[1].trim().replace(/^["']|["']$/g, '');
           }
           
-          // If count/for_each is a variable, try to resolve from tfvars
-          if (attributes.count && typeof attributes.count === 'string' && attributes.count.startsWith('var.')) {
-            const varName = attributes.count.replace('var.', '');
-            // Try to find in tfvars files
-            for (const tfvarsFile of terraformFiles.filter(f => f.fileName.endsWith('.tfvars'))) {
-              const varMatch = tfvarsFile.content.match(new RegExp(`${varName}\\s*=\\s*([^\\n]+)`));
-              if (varMatch) {
-                const varValue = varMatch[1].trim().replace(/^["']|["']$/g, '');
-                const varNum = parseInt(varValue, 10);
-                if (!isNaN(varNum)) {
-                  actualResourceCount = varNum;
-                  attributes.count = varNum;
-                  attributes.resource_count = varNum;
-                  console.log(`   ✅ Resolved count variable ${varName} = ${varNum} from ${tfvarsFile.fileName}`);
-                  break;
-                }
-              }
-            }
-          }
-          
-          // Also resolve for_each variables from tfvars
-          if (attributes.for_each && typeof attributes.for_each === 'string' && attributes.for_each.startsWith('var.')) {
-            const varName = attributes.for_each.replace('var.', '');
-            // Try to find in tfvars files
-            for (const tfvarsFile of terraformFiles.filter(f => f.fileName.endsWith('.tfvars'))) {
-              // Try to match list/set: var_name = ["item1", "item2", "item3"]
-              const listMatch = tfvarsFile.content.match(new RegExp(`${varName}\\s*=\\s*\\[([^\\]]+)\\]`));
-              if (listMatch) {
-                const items = listMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
-                actualResourceCount = items.length;
-                attributes.for_each_count = items.length;
-                attributes.resource_count = items.length;
-                console.log(`   ✅ Resolved for_each variable ${varName} = ${items.length} items from ${tfvarsFile.fileName}`);
-                break;
-              }
-              // Try to match map: var_name = { key1 = "value1", key2 = "value2" }
-              const mapMatch = tfvarsFile.content.match(new RegExp(`${varName}\\s*=\\s*\\{([^}]+)\\}`));
-              if (mapMatch) {
-                const mapBody = mapMatch[1];
-                const mapKeys = mapBody.split(',').filter(s => s.trim().includes('='));
-                actualResourceCount = mapKeys.length;
-                attributes.for_each_count = mapKeys.length;
-                attributes.resource_count = mapKeys.length;
-                console.log(`   ✅ Resolved for_each variable ${varName} = ${mapKeys.length} keys from ${tfvarsFile.fileName}`);
-                break;
-              }
-            }
+          // Resolve count/for_each using the variable resolver
+          const countResult = resolveResourceCount(match.body, variableMap);
+          actualResourceCount = countResult.count;
+          if (countResult.count > 1) {
+            attributes.resource_count = countResult.count;
+            console.log(`   ✅ Resolved resource count = ${countResult.count} (${countResult.resolved ? 'resolved' : 'default'})`);
           }
           
           // Create resource entries - if count > 1, create multiple entries for accurate cost calculation
@@ -9143,16 +9397,16 @@ Remember: Return ONLY the JSON object, no other text.`;
             directMap.set(key, r);
           });
           
-          // Merge AI attributes into direct parsed resources
+          // Merge AI attributes into direct parsed resources (DO NOT add AI-only resources)
           aiParsedResources.forEach(aiRes => {
             const key = `${aiRes.resourceType}.${aiRes.resourceName}`;
             const directRes = directMap.get(key);
             if (directRes) {
-              // Merge attributes
+              // Merge attributes from AI into directly-parsed resource
               directRes.attributes = { ...directRes.attributes, ...aiRes.attributes };
             } else {
-              // AI found a resource that direct parsing didn't - add it
-              parsedResources.push(aiRes);
+              // AI hallucinated a resource not in the Terraform files - ignore it
+              console.warn(`   ⚠️  Ignoring AI-only resource ${key} (not found by direct parsing)`);
             }
           });
         }
@@ -9195,816 +9449,362 @@ Remember: Return ONLY the JSON object, no other text.`;
         }
       });
 
-      // Step 2: Use AI to map Terraform resource types to service names for pricing
-      console.log(`\n🤖 Using AI to map resource types to service names...`);
+      // Step 2: Map Terraform resource types to Azure service names (deterministic lookup)
+      console.log(`\n📋 Mapping resource types to service names (deterministic)...`);
       const uniqueResourceTypes = Array.from(new Set(parsedResources.map(r => r.resourceType)));
       const resourceTypeToService: Record<string, string> = {};
-      
-      // Use AI to map resource types to service names
-      try {
-        const mappingPrompt = cloudProvider === 'azure' ? `You are an Azure infrastructure expert. Map the following Terraform resource types to their Azure service names for cost analysis.
 
-Resource types to map:
-${uniqueResourceTypes.map((rt, idx) => `${idx + 1}. ${rt}`).join('\n')}
-
-CRITICAL: Use these EXACT Azure service names (case-sensitive) for Azure Pricing API:
-- "Storage" (for azurerm_storage_account)
-- "Azure App Service" (for azurerm_app_service_plan - NOT "App Service")
-- "Functions" (for azurerm_function_app)
-- "Azure Container Registry" (for azurerm_container_registry - NOT "Container Registry")
-- "Azure Container Apps" (for azurerm_container_app and azurerm_container_app_environment - NOT "Container Apps")
-- "Logic Apps" (for azurerm_logic_app_workflow)
-- "Front Door" (for azurerm_frontdoor)
-- "Static Web Apps" (for azurerm_static_site)
-
-For each resource type, provide:
-1. The official Azure service name (MUST match one of the names above)
-2. A brief description of what the service does
-
-Return a JSON object mapping resource types to service names:
-{
-  "resource_type": "Service Name",
-  ...
-}
-
-Example:
-{
-  "azurerm_storage_account": "Storage",
-  "azurerm_app_service_plan": "Azure App Service",
-  "azurerm_function_app": "Functions",
-  "azurerm_container_registry": "Azure Container Registry",
-  "azurerm_container_app": "Azure Container Apps",
-  "azurerm_container_app_environment": "Azure Container Apps"
-}
-
-Return ONLY the JSON object, nothing else.` : `You are a cloud infrastructure expert. Map the following Terraform resource types to their ${cloudProvider === 'aws' ? 'AWS' : 'GCP'} service names for cost analysis.
-
-Resource types to map:
-${uniqueResourceTypes.map((rt, idx) => `${idx + 1}. ${rt}`).join('\n')}
-
-For each resource type, provide:
-1. The official service name (e.g., "S3", "EC2", "Storage", "Functions")
-2. A brief description of what the service does
-
-Return a JSON object mapping resource types to service names:
-{
-  "resource_type": "Service Name",
-  ...
-}
-
-Example for AWS:
-{
-  "aws_s3_bucket": "S3",
-  "aws_ec2_instance": "EC2",
-  "aws_lambda_function": "Lambda"
-}
-
-Example for Azure:
-{
-  "azurerm_storage_account": "Storage",
-  "azurerm_function_app": "Functions",
-  "azurerm_app_service_plan": "Azure App Service",
-  "azurerm_container_registry": "Azure Container Registry",
-  "azurerm_container_app": "Azure Container Apps"
-}
-
-Return ONLY the JSON object, nothing else.`;
-
-        const mappingResponse = await openaiService.chat([
-          {
-            role: 'system',
-            content: `You are a cloud infrastructure expert. Map Terraform resource types to their cloud service names. Return only valid JSON.`
-          },
-          {
-            role: 'user',
-            content: mappingPrompt
-          }
-        ]);
-
-        // Parse AI response
-        let mappingJson = mappingResponse.trim();
-        // Remove markdown code blocks if present
-        if (mappingJson.startsWith('```json')) {
-          mappingJson = mappingJson.replace(/^```json\s*\n/, '').replace(/\n```\s*$/, '');
-        } else if (mappingJson.startsWith('```')) {
-          mappingJson = mappingJson.replace(/^```\s*\n/, '').replace(/\n```\s*$/, '');
-        }
-        
-        const aiMapping = JSON.parse(repairJson(mappingJson));
-        Object.assign(resourceTypeToService, aiMapping);
-        console.log(`   ✅ AI mapped ${Object.keys(resourceTypeToService).length} resource type(s) to service names`);
-      } catch (error: any) {
-        console.warn(`   ⚠️  AI mapping failed: ${error.message}, using fallback`);
-        // Fallback: Use resource type as service name
-        uniqueResourceTypes.forEach(rt => {
-          resourceTypeToService[rt] = rt;
-        });
+      for (const rt of uniqueResourceTypes) {
+        resourceTypeToService[rt] = getServiceName(rt);
       }
+      console.log(`   ✅ Mapped ${Object.keys(resourceTypeToService).length} resource type(s) to service names`);
 
       // Step 3: Query pricing for each resource
       console.log(`\n💰 Step 2: Querying ${cloudProvider === 'aws' ? 'AWS' : 'Azure'} Pricing...`);
       
-      const costEstimates: Array<{
-        resourceName: string;
-        resourceType: string;
-        serviceName: string;
-        monthlyCost: number;
-        yearlyCost: number;
-        currency: string;
-        details?: any;
-      }> = [];
+      const costEstimates: CostResource[] = [];
+      const skippedResources: Array<{ resourceType: string; resourceName: string; reason: string }> = [];
 
       console.log(`\n💰 Step 2: Querying ${cloudProvider === 'aws' ? 'AWS' : 'Azure'} Pricing API for ${parsedResources.length} resource(s)...`);
-      
+
       // AWS pricing handling
       if (cloudProvider === 'aws') {
         console.log(`\n⚠️  AWS Pricing: Full pricing requires AWS Pricing API setup.`);
-        console.log(`   Providing basic cost estimation based on resource types.`);
-        console.log(`   For accurate pricing, AWS Pricing Calculator API integration is recommended.`);
-        
+
         for (const resource of parsedResources) {
           const serviceName = resourceTypeToService[resource.resourceType] || resource.resourceType;
-          const region = resource.region || resource.location || 'us-east-1';
-          
-          console.log(`\n   [${parsedResources.indexOf(resource) + 1}/${parsedResources.length}] Estimating cost for: ${serviceName} (${resource.resourceName})`);
-          console.log(`      Type: ${resource.resourceType}`);
-          console.log(`      Region: ${region}`);
-          
-          // Skip free AWS resources
+
           if (resource.resourceType === 'aws_iam_role' || resource.resourceType === 'aws_iam_policy') {
-            console.log(`      ⏭️  Skipping IAM resource (free)`);
             costEstimates.push({
               resourceName: resource.resourceName,
               resourceType: resource.resourceType,
-              serviceName: serviceName,
+              serviceName,
               monthlyCost: 0,
               yearlyCost: 0,
               currency: 'USD',
-              details: { note: 'IAM resources are free' }
+              status: 'exact',
+              pricingMatchType: 'free',
+              confidenceScore: 1.0,
+              confidenceLabel: 'high',
+              assumptionsUsed: ['IAM resources are free'],
             });
             continue;
           }
-          
-          // REMOVED: AI cost estimation for AWS resources
-          // Only official AWS Pricing API should be used (when implemented)
-          // For now, skip AWS resources if pricing API is not available
-          console.warn(`      ⚠️  Skipping ${resource.resourceName} - AWS Pricing API not implemented`);
-          console.warn(`      💡 AWS cost analysis requires official AWS Pricing API integration`);
-          // Continue to next resource without adding AI-estimated cost
+
+          skippedResources.push({
+            resourceType: resource.resourceType,
+            resourceName: resource.resourceName,
+            reason: 'AWS Pricing API not implemented',
+          });
         }
       } else {
-        // Azure pricing (existing logic)
+        // Azure pricing (deterministic lookup-based) with status classification
         for (const resource of parsedResources) {
           const serviceName = resourceTypeToService[resource.resourceType] || resource.resourceType;
+          const resourceAddr = `${resource.resourceType}.${resource.resourceName}`;
           console.log(`\n   [${parsedResources.indexOf(resource) + 1}/${parsedResources.length}] Querying pricing for: ${serviceName} (${resource.resourceName})`);
           console.log(`      Type: ${resource.resourceType}`);
           console.log(`      Location: ${resource.location || 'eastus'}`);
-          
-          // Skip resource groups (they're free)
-          if (resource.resourceType === 'azurerm_resource_group') {
-            console.log(`      ⏭️  Skipping resource group (free)`);
+
+          // Resolve attributes using the variable map, track unresolved
+          const { attrs: resolvedAttrs, unresolved: unresolvedVars } = resolveResourceAttributes(
+            resource.attributes || {},
+            variableMap
+          );
+          if (unresolvedVars.length > 0) {
+            console.log(`      ⚠️  Unresolved variables: ${unresolvedVars.join(', ')}`);
+          }
+
+          // Get usage dimensions and apply profile/custom overrides
+          const usageCatalog = getUsageCatalog(resource.resourceType);
+          const usageDefaults = getUsageDefaults(resource.resourceType, requestProfile);
+          const resourceCustomUsage = customUsage[resourceAddr] || {};
+          const appliedUsage = { ...usageDefaults, ...resourceCustomUsage };
+          const isUsageBased = hasUsageDimensions(resource.resourceType);
+
+          // Skip free Azure resources (no direct cost)
+          const freeReason = isFreeResource(resource.resourceType);
+          if (freeReason) {
+            console.log(`      ⏭️  Free: ${freeReason}`);
+            costEstimates.push({
+              resourceName: resource.resourceName,
+              resourceType: resource.resourceType,
+              serviceName,
+              monthlyCost: 0,
+              yearlyCost: 0,
+              currency: 'USD',
+              status: 'exact',
+              pricingMatchType: 'free',
+              confidenceScore: 1.0,
+              confidenceLabel: 'high',
+              assumptionsUsed: [freeReason],
+            });
             continue;
           }
 
-        try {
-          // Build search query based on resource type
-          let searchArgs: Record<string, any> = {
-            serviceName: serviceName,
-            location: resource.location || 'eastus'
-          };
-
-          // Add service-specific filters
-          if (resource.resourceType === 'azurerm_storage_account') {
-            const tier = resource.attributes?.account_tier || 'Standard';
-            const replication = resource.attributes?.account_replication_type || 'LRS';
-            searchArgs.sku = `${tier}_${replication}`;
-          } else if (resource.resourceType === 'azurerm_function_app') {
-            // Function Apps are typically consumption-based
-            searchArgs.plan = 'Consumption';
-          } else if (resource.resourceType === 'azurerm_app_service' || resource.resourceType === 'azurerm_app_service_plan') {
-            // App Service cost comes from the plan, not the app itself
-            // Filter for plan pricing, not per-request or per-GB pricing
-            searchArgs.productName = 'Azure App Service';
-            // Try to get plan tier from attributes
-            if (resource.attributes?.sku) {
-              searchArgs.sku = resource.attributes.sku;
-            } else if (resource.attributes?.sku_name) {
-              searchArgs.sku = resource.attributes.sku_name;
-            }
-          } else if (resource.resourceType === 'azurerm_logic_app_workflow') {
-            searchArgs.productName = 'Logic Apps';
-          } else if (resource.resourceType === 'azurerm_frontdoor') {
-            searchArgs.productName = 'Azure Front Door';
-          } else if (resource.resourceType === 'azurerm_static_site') {
-            searchArgs.productName = 'Static Web Apps';
-          }
-
-          // Query Azure Retail Prices API directly for exact pricing (NO FALLBACKS)
-          let pricingData: any = null;
-          let items: any[] = [];
-          
-          // Build precise API query based on resource type
-          let filterParts: string[] = [];
-          
-          // Service name mapping for Azure API (comprehensive mapping)
-          const serviceNameMap: Record<string, string> = {
-            'Storage': 'Storage',
-            'Functions': 'Functions',
-            'Logic Apps': 'Logic Apps',
-            'Front Door': 'Front Door',
-            'App Service': 'Azure App Service',
-            'Static Web Apps': 'Static Web Apps',
-            'Container Registry': 'Azure Container Registry',
-            'Container Apps': 'Azure Container Apps',
-            'Container Apps Environment': 'Azure Container Apps',
-            'Container Instances': 'Container Instances',
-            'Kubernetes Service': 'Azure Kubernetes Service',
-            'Virtual Machines': 'Virtual Machines',
-            'Virtual Machine Scale Sets': 'Virtual Machine Scale Sets',
-            'Load Balancer': 'Load Balancer',
-            'Application Gateway': 'Application Gateway',
-            'VPN Gateway': 'VPN Gateway',
-            'ExpressRoute': 'ExpressRoute',
-            'Cosmos DB': 'Azure Cosmos DB',
-            'SQL Database': 'SQL Database',
-            'SQL Managed Instance': 'SQL Managed Instance',
-            'PostgreSQL': 'Azure Database for PostgreSQL',
-            'MySQL': 'Azure Database for MySQL',
-            'Redis Cache': 'Azure Cache for Redis',
-            'Key Vault': 'Key Vault',
-            'Event Hubs': 'Event Hubs',
-            'Service Bus': 'Service Bus',
-            'Event Grid': 'Event Grid',
-            'Storage Accounts': 'Storage',
-            'App Service Plans': 'Azure App Service'
-          };
-          
-          const apiServiceName = serviceNameMap[serviceName] || serviceName;
-          
-          // Alternative service names to try if first query fails
-          const alternativeServiceNames: Record<string, string[]> = {
-            'Azure App Service': ['App Service', 'Azure App Service Plans', 'App Service Plan'],
-            'Azure Container Registry': ['Container Registry', 'ACR'],
-            'Azure Container Apps': ['Container Apps', 'Container Instances'],
-            'Functions': ['Azure Functions', 'Function Apps']
-          };
-          
-          // Map Terraform location format (eastus) to Azure Pricing API format (US East)
-          const locationMap: Record<string, string> = {
-            'eastus': 'US East',
-            'eastus2': 'US East 2',
-            'westus': 'US West',
-            'westus2': 'US West 2',
-            'centralus': 'US Central',
-            'northcentralus': 'US North Central',
-            'southcentralus': 'US South Central',
-            'westcentralus': 'US West Central',
-            'canadacentral': 'Canada Central',
-            'canadaeast': 'Canada East',
-            'brazilsouth': 'Brazil South',
-            'northeurope': 'North Europe',
-            'westeurope': 'West Europe',
-            'uksouth': 'UK South',
-            'ukwest': 'UK West',
-            'francecentral': 'France Central',
-            'francesouth': 'France South',
-            'germanywestcentral': 'Germany West Central',
-            'germanynorth': 'Germany North',
-            'switzerlandnorth': 'Switzerland North',
-            'switzerlandwest': 'Switzerland West',
-            'norwayeast': 'Norway East',
-            'norwaywest': 'Norway West',
-            'swedencentral': 'Sweden Central',
-            'uaenorth': 'UAE North',
-            'uaecentral': 'UAE Central',
-            'southafricanorth': 'South Africa North',
-            'southafricawest': 'South Africa West',
-            'japaneast': 'Japan East',
-            'japanwest': 'Japan West',
-            'koreacentral': 'Korea Central',
-            'koreasouth': 'Korea South',
-            'southeastasia': 'Southeast Asia',
-            'eastasia': 'East Asia',
-            'australiaeast': 'Australia East',
-            'australiasoutheast': 'Australia Southeast',
-            'australiacentral': 'Australia Central',
-            'australiacentral2': 'Australia Central 2',
-            'chinanorth': 'China North',
-            'chinaeast': 'China East',
-            'chinanorth2': 'China North 2',
-            'chinaeast2': 'China East 2',
-            'indiacentral': 'India Central',
-            'indiasouth': 'India South',
-            'indiawest': 'India West'
-          };
-          
-          const azureLocation = locationMap[resource.location?.toLowerCase() || 'eastus'] || 'US East';
-          
-          // Use AI to determine Azure Pricing API filter based on resource type and attributes
           try {
-            const filterPrompt = `You are an Azure pricing expert. Determine the Azure Pricing API filter for this resource.
+            const pricingConfig = getPricingConfig(resource.resourceType);
+            const azureLocation = resolveAzureLocation(resource.location || 'eastus');
 
-Resource Type: ${resource.resourceType}
-Service Name: ${serviceName}
-Location: ${azureLocation}
-Attributes: ${JSON.stringify(resource.attributes || {}, null, 2)}
-
-Azure Pricing API uses OData filters. Common filter fields:
-- serviceName: The Azure service name (MUST use exact Azure service names from the list below)
-- serviceFamily: Service category (e.g., "Storage", "Compute", "Networking", "Containers")
-- meterName: Specific pricing meter (e.g., "LRS Data Stored", "Standard S1")
-- armSkuName: ARM SKU name (e.g., "S1", "Basic", "DynamicY1")
-- location: Azure region (e.g., "US East", "West Europe")
-
-CRITICAL: Use these EXACT service names (case-sensitive):
-- "Storage" (for storage accounts)
-- "Azure App Service" (for App Service Plans - NOT "App Service")
-- "Functions" (for Function Apps)
-- "Azure Container Registry" (for Container Registry - NOT "Container Registry")
-- "Azure Container Apps" (for Container Apps and Container Apps Environment - NOT "Container Apps")
-- "Logic Apps" (for Logic Apps)
-- "Front Door" (for Front Door)
-- "Static Web Apps" (for Static Web Apps)
-
-Based on the resource type and attributes, determine the appropriate filter parts.
-Consider:
-- Storage accounts: Use replication type to determine meterName (LRS, GRS, RAGRS, ZRS)
-- App Service Plans: Use SKU to determine armSkuName (e.g., "DynamicY1" for Dynamic plan)
-- Container Registry: Use SKU to determine armSkuName (e.g., "Basic", "Standard", "Premium")
-- Container Apps: Use serviceFamily eq 'Containers' and location
-- Other resources: Use serviceName and location
-
-IMPORTANT:
-- For App Service Plans with Dynamic SKU, use: serviceName eq 'Azure App Service' and armSkuName eq 'DynamicY1'
-- For Container Registry, use: serviceName eq 'Azure Container Registry' and armSkuName eq 'Basic' (or Standard/Premium)
-- For Container Apps, use: serviceName eq 'Azure Container Apps' and serviceFamily eq 'Containers'
-- Do NOT use generic names like "App Service" or "Container Registry" - use the full Azure service names above
-
-Return a JSON object with filter parts:
-{
-  "filterParts": ["serviceName eq 'Service Name'", "location eq 'Location'", ...],
-  "notes": "<any notes about the filter>"
-}
-
-Example for storage account with LRS:
-{
-  "filterParts": ["serviceName eq 'Storage'", "serviceFamily eq 'Storage'", "meterName eq 'LRS Data Stored'", "location eq 'US East'"],
-  "notes": "Storage account with LRS replication"
-}
-
-Example for App Service Plan with Dynamic SKU:
-{
-  "filterParts": ["serviceName eq 'Azure App Service'", "armSkuName eq 'DynamicY1'", "location eq 'US East'"],
-  "notes": "App Service Plan with Dynamic SKU Y1"
-}
-
-Example for Container Registry:
-{
-  "filterParts": ["serviceName eq 'Azure Container Registry'", "armSkuName eq 'Basic'", "location eq 'US East'"],
-  "notes": "Container Registry with Basic SKU"
-}
-
-Return ONLY the JSON object, nothing else.`;
-
-            const filterResponse = await openaiService.chat([
-              {
-                role: 'system',
-                content: 'You are an Azure pricing expert. Determine Azure Pricing API filters based on resource types and attributes. Return only valid JSON.'
-              },
-              {
-                role: 'user',
-                content: filterPrompt
-              }
-            ]);
-
-            // Parse AI response
-            let filterJson = filterResponse.trim();
-            if (filterJson.startsWith('```json')) {
-              filterJson = filterJson.replace(/^```json\s*\n/, '').replace(/\n```\s*$/, '');
-            } else if (filterJson.startsWith('```')) {
-              filterJson = filterJson.replace(/^```\s*\n/, '').replace(/\n```\s*$/, '');
-            }
-            
-            const filterResult = JSON.parse(repairJson(filterJson));
-            filterParts.push(...(filterResult.filterParts || []));
-            
-            console.log(`   🤖 AI determined filter: ${filterResult.filterParts?.join(' and ')}`);
-            if (filterResult.notes) {
-              console.log(`   📋 Notes: ${filterResult.notes}`);
-            }
-          } catch (error: any) {
-            console.warn(`   ⚠️  AI filter determination failed: ${error.message}, using generic filter`);
-            // Fallback: Generic filter
-            filterParts.push(`serviceName eq '${apiServiceName}'`);
-            filterParts.push(`location eq '${azureLocation}'`);
-          }
-          
-          const filter = filterParts.join(' and ');
-          const apiUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(filter)}&$top=50`;
-          
-          console.log(`   🔍 Querying Azure Pricing API: ${filter}`);
-          
-          const apiResponse = await fetch(apiUrl);
-          if (!apiResponse.ok) {
-            throw new Error(`Azure Pricing API returned ${apiResponse.status}: ${apiResponse.statusText}`);
-          }
-          
-          pricingData = await apiResponse.json();
-          items = pricingData?.Items || [];
-          
-          console.log(`   📊 Found ${items.length} pricing item(s)`);
-          
-          if (items.length === 0) {
-            console.warn(`   ⚠️  No pricing items found for ${serviceName} in ${azureLocation}`);
-            console.warn(`   Query: ${filter}`);
-            console.warn(`   Trying alternative service names...`);
-            
-            // Try alternative service names if available
-            const alternatives = alternativeServiceNames[apiServiceName] || [];
-            let foundItems = false;
-            
-            for (const altServiceName of alternatives) {
-              console.log(`   🔄 Trying alternative: ${altServiceName}`);
-              const altFilterParts = filterParts.map(part => {
-                if (part.includes(`serviceName eq '${apiServiceName}'`)) {
-                  return part.replace(`serviceName eq '${apiServiceName}'`, `serviceName eq '${altServiceName}'`);
-                }
-                return part;
+            // Check for resources with no direct cost (cost is in parent resource)
+            if (pricingConfig && pricingConfig.buildFilter(resolvedAttrs, azureLocation) === '') {
+              console.log(`      ℹ️  ${resource.resourceType} has no direct cost (cost is in parent resource)`);
+              costEstimates.push({
+                resourceName: resource.resourceName,
+                resourceType: resource.resourceType,
+                serviceName,
+                monthlyCost: 0,
+                yearlyCost: 0,
+                currency: 'USD',
+                status: 'exact',
+                pricingMatchType: 'parent',
+                confidenceScore: 1.0,
+                confidenceLabel: 'high',
+                assumptionsUsed: ['Cost billed through parent resource'],
+                details: resolvedAttrs,
               });
-              const altFilter = altFilterParts.join(' and ');
-              const altApiUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(altFilter)}&$top=50`;
-              
-              try {
-                const altResponse = await fetch(altApiUrl);
-                if (altResponse.ok) {
-                  const altData = await altResponse.json();
-                  const altItems = altData?.Items || [];
-                  if (altItems.length > 0) {
-                    console.log(`   ✅ Found ${altItems.length} pricing item(s) with alternative service name: ${altServiceName}`);
-                    items = altItems;
-                    filterParts = altFilterParts;
-                    foundItems = true;
-                    break;
-                  }
-                }
-              } catch (altError: any) {
-                console.warn(`   ⚠️  Alternative query failed: ${altError.message}`);
-              }
+              continue;
             }
-            
-            if (!foundItems) {
-              // Try a simpler filter (just serviceName and location) without SKU/armSkuName
-              console.log(`   🔄 Trying simplified filter (serviceName and location only)...`);
-              const simpleFilter = `serviceName eq '${apiServiceName}' and location eq '${azureLocation}'`;
-              const simpleApiUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(simpleFilter)}&$top=50`;
-              
-              try {
-                const simpleResponse = await fetch(simpleApiUrl);
-                if (simpleResponse.ok) {
-                  const simpleData = await simpleResponse.json();
-                  const simpleItems = simpleData?.Items || [];
-                  if (simpleItems.length > 0) {
-                    console.log(`   ✅ Found ${simpleItems.length} pricing item(s) with simplified filter`);
-                    items = simpleItems;
-                    filterParts = [simpleFilter.split(' and ')[0], simpleFilter.split(' and ')[1]];
-                    foundItems = true;
-                  }
-                }
-              } catch (simpleError: any) {
-                console.warn(`   ⚠️  Simplified query failed: ${simpleError.message}`);
-              }
-            }
-            
-            if (!foundItems) {
-              // For Container Registry, try different SKU approaches
-              if (resource.resourceType === 'azurerm_container_registry') {
-                console.log(`   🔄 Trying Container Registry with different SKU approaches...`);
-                const skuOptions = ['Basic', 'Standard', 'Premium'];
-                const resourceSku = resource.attributes?.sku || 'Basic';
-                
-                // Try without armSkuName first (just serviceName and location)
-                const noSkuFilter = `serviceName eq 'Azure Container Registry' and location eq '${azureLocation}'`;
-                const noSkuUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(noSkuFilter)}&$top=100`;
-                
-                try {
-                  const noSkuResponse = await fetch(noSkuUrl);
-                  if (noSkuResponse.ok) {
-                    const noSkuData = await noSkuResponse.json();
-                    const noSkuItems = noSkuData?.Items || [];
-                    if (noSkuItems.length > 0) {
-                      // Filter for the specific SKU or use first available
-                      const skuItems = noSkuItems.filter((item: any) => 
-                        item.armSkuName && skuOptions.includes(item.armSkuName)
-                      );
-                      if (skuItems.length > 0) {
-                        console.log(`   ✅ Found ${skuItems.length} Container Registry pricing item(s) without specific SKU filter`);
-                        items = skuItems;
-                        foundItems = true;
-                      } else if (noSkuItems.length > 0) {
-                        // Use any available pricing as fallback
-                        console.log(`   ✅ Found ${noSkuItems.length} Container Registry pricing item(s) (using first available)`);
-                        items = noSkuItems.slice(0, 1);
-                        foundItems = true;
-                      }
-                    }
-                  }
-                } catch (noSkuError: any) {
-                  console.warn(`   ⚠️  No-SKU query failed: ${noSkuError.message}`);
-                }
-              }
-              
-              if (!foundItems) {
-                console.warn(`   ❌ All query attempts failed`);
-                console.warn(`   This might be due to incorrect location mapping or service name`);
-                // For App Service, this is expected (cost is in the plan, not the app itself)
-                if (resource.resourceType === 'azurerm_app_service') {
-                  console.log(`   ℹ️  App Service typically has no direct cost (cost is in App Service Plan)`);
-                }
-                // For Container Registry, provide helpful message
-                if (resource.resourceType === 'azurerm_container_registry') {
-                  console.log(`   ℹ️  Container Registry pricing may not be available for this SKU/location combination`);
-                  console.log(`   ℹ️  Typical costs: Basic ~$5/month, Standard ~$20/month, Premium ~$50/month`);
-                }
-                // Don't throw - let it fall through to add resource with estimated cost
-                throw new Error(`No pricing items found for ${serviceName} in ${azureLocation}. Query: ${filter}`);
-              }
-            }
-          }
 
-          // Extract exact cost from Azure Pricing API
-          // Filter items to get the most relevant pricing
-          let priceItem: any = null;
-          
-          // For Storage Account, get data storage pricing (not operations)
-          if (resource.resourceType === 'azurerm_storage_account') {
-            // Prefer "Data Stored" meters (the actual storage cost)
-            const dataStorageItems = items.filter((item: any) => 
-              item.meterName && (
-                item.meterName.toLowerCase().includes('data stored') ||
-                item.meterName.toLowerCase().includes('storage')
-              ) &&
-              !item.meterName.toLowerCase().includes('retrieval') &&
-              !item.meterName.toLowerCase().includes('write') &&
-              !item.meterName.toLowerCase().includes('read') &&
-              !item.meterName.toLowerCase().includes('operation')
-            );
-            
-            if (dataStorageItems.length > 0) {
-              // Prefer items with "GB/Month" unit
-              const monthlyItems = dataStorageItems.filter((item: any) => 
-                item.unitOfMeasure?.includes('GB/Month')
-              );
-              priceItem = monthlyItems[0] || dataStorageItems[0];
-            } else {
-              // Fallback: get first item with GB/Month
-              const monthlyItems = items.filter((item: any) => 
-                item.unitOfMeasure?.includes('GB/Month')
-              );
-              priceItem = monthlyItems[0] || items[0];
+            // If critical SKU attributes are unresolved, mark as needs_input
+            const criticalAttrs = pricingConfig?.attributeKeys || [];
+            const hasCriticalUnresolved = criticalAttrs.some(key => {
+              const val = resolvedAttrs[key];
+              return typeof val === 'string' && val.startsWith('var.');
+            });
+
+            if (hasCriticalUnresolved && !pricingConfig?.defaults) {
+              console.warn(`      ⚠️  Critical attributes unresolved for ${resource.resourceType}`);
+              costEstimates.push({
+                resourceName: resource.resourceName,
+                resourceType: resource.resourceType,
+                serviceName,
+                monthlyCost: 0,
+                yearlyCost: 0,
+                currency: 'USD',
+                status: 'needs_input',
+                pricingMatchType: 'unsupported',
+                confidenceScore: 0,
+                confidenceLabel: 'low',
+                assumptionsUsed: [],
+                unresolvedVariables: unresolvedVars,
+                requiredUsageFields: criticalAttrs,
+              });
+              continue;
             }
-          } else if (resource.resourceType === 'azurerm_app_service_plan') {
-            // Filter for compute/instance pricing (the actual plan cost)
-            // Look for items that are per-hour compute costs
-            const computeItems = items.filter((item: any) => 
-              item.unitOfMeasure && (
-                item.unitOfMeasure.includes('Hour') || 
-                item.unitOfMeasure === '1 Hour'
-              ) &&
-              !item.meterName?.toLowerCase().includes('request') &&
-              !item.meterName?.toLowerCase().includes('bandwidth') &&
-              !item.meterName?.toLowerCase().includes('storage') &&
-              !item.meterName?.toLowerCase().includes('data transfer')
-            );
-            
-            if (computeItems.length > 0) {
-              // Prefer items that match the SKU tier (S1, P1, etc.)
-              const sku = resource.attributes?.sku || resource.attributes?.sku_name || 'S1';
-              const tier = sku.charAt(0);
-              const matchingSkuItem = computeItems.find((item: any) => 
-                item.meterName && item.meterName.includes(tier)
-              );
-              priceItem = matchingSkuItem || computeItems[0];
-            } else {
-              // Fallback: get any non-request item with hourly pricing
-              const hourlyItems = items.filter((item: any) => 
-                item.unitOfMeasure?.includes('Hour') &&
-                !item.meterName?.toLowerCase().includes('request')
-              );
-              priceItem = hourlyItems[0] || items[0];
+
+            // Build the API filter
+            let matchType: CostResource['pricingMatchType'] = pricingConfig ? 'config_exact' : 'fallback';
+            const filter = pricingConfig
+              ? buildPricingApiFilter(resource.resourceType, resolvedAttrs, resource.location || 'eastus')
+              : `serviceName eq '${serviceName}' and armRegionName eq '${azureLocation}' and priceType eq 'Consumption'`;
+
+            if (!filter) {
+              console.warn(`      ⚠️  No pricing filter available for ${resource.resourceType}`);
+              skippedResources.push({
+                resourceType: resource.resourceType,
+                resourceName: resource.resourceName,
+                reason: 'No pricing filter available',
+              });
+              continue;
             }
-          } else if (resource.resourceType === 'azurerm_app_service') {
-            // App Service itself - usually $0, but check for any additional costs
-            // Filter out plan costs (those are in the plan resource)
-            // Only include items that are NOT part of the plan (e.g., bandwidth, data transfer)
-            const appItems = items.filter((item: any) => 
-              !item.meterName?.toLowerCase().includes('plan') &&
-              !item.meterName?.toLowerCase().includes('compute') &&
-              !item.meterName?.toLowerCase().includes('instance') &&
-              !item.meterName?.toLowerCase().includes('hour')
-            );
-            // If no additional costs found, priceItem will be null and cost will be $0
-            priceItem = appItems.length > 0 ? appItems[0] : null;
+
+            console.log(`      🔍 Filter: ${filter}`);
+
+            const apiUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(filter)}&$top=50`;
+            const apiResponse = await fetch(apiUrl);
+            if (!apiResponse.ok) {
+              throw new Error(`Azure Pricing API returned ${apiResponse.status}: ${apiResponse.statusText}`);
+            }
+
+            const pricingData = await apiResponse.json();
+            let items: any[] = pricingData?.Items || [];
+            console.log(`      📊 Found ${items.length} pricing item(s)`);
+
+            // If no results, try a broader fallback filter (serviceName + region only)
+            if (items.length === 0 && pricingConfig) {
+              console.log(`      🔄 Trying broader filter...`);
+              matchType = 'config_broad';
+              const broadFilter = `serviceName eq '${pricingConfig.serviceName}' and armRegionName eq '${azureLocation}' and priceType eq 'Consumption'`;
+              const broadUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(broadFilter)}&$top=50`;
+              try {
+                const broadResponse = await fetch(broadUrl);
+                if (broadResponse.ok) {
+                  const broadData = await broadResponse.json();
+                  items = broadData?.Items || [];
+                  if (items.length > 0) {
+                    console.log(`      ✅ Found ${items.length} item(s) with broader filter`);
+                  }
+                }
+              } catch (broadErr: any) {
+                console.warn(`      ⚠️  Broader query failed: ${broadErr.message}`);
+              }
+            }
+
+            if (items.length === 0) {
+              console.warn(`      ❌ No pricing items found for ${serviceName} in ${azureLocation}`);
+              costEstimates.push({
+                resourceName: resource.resourceName,
+                resourceType: resource.resourceType,
+                serviceName,
+                monthlyCost: 0,
+                yearlyCost: 0,
+                currency: 'USD',
+                status: 'needs_input',
+                pricingMatchType: 'unsupported',
+                confidenceScore: 0,
+                confidenceLabel: 'low',
+                assumptionsUsed: ['No pricing data found in Azure Retail API'],
+                requiredUsageFields: usageCatalog?.dimensions.map(d => d.key),
+              });
+              continue;
+            }
+
+            // Select the best pricing item using the config's selector
+            const priceItem = pricingConfig
+              ? selectBestPricingItem(resource.resourceType, items, resolvedAttrs)
+              : (items.find((i: any) => i.retailPrice > 0 && i.unitOfMeasure?.includes('Hour')) ||
+                 items.find((i: any) => i.retailPrice > 0) || items[0]);
+
             if (!priceItem) {
-              console.log(`   ℹ️  App Service has no additional costs (cost is in App Service Plan)`);
+              console.log(`      ℹ️  No applicable pricing item (resource may have no direct cost)`);
+              costEstimates.push({
+                resourceName: resource.resourceName,
+                resourceType: resource.resourceType,
+                serviceName,
+                monthlyCost: 0,
+                yearlyCost: 0,
+                currency: 'USD',
+                status: 'exact',
+                pricingMatchType: matchType,
+                confidenceScore: 0.8,
+                confidenceLabel: 'medium',
+                assumptionsUsed: ['No billable pricing item found - may be included in parent'],
+                details: resolvedAttrs,
+              });
+              continue;
             }
-          } else if (resource.resourceType === 'azurerm_container_registry') {
-            // Container Registry - filter by SKU tier
-            const sku = resource.attributes?.sku || 'Basic';
-            const skuItems = items.filter((item: any) => 
-              item.productName && item.productName.toLowerCase().includes(sku.toLowerCase())
-            );
-            if (skuItems.length > 0) {
-              priceItem = skuItems[0];
-            } else {
-              // Fallback: get first item with monthly pricing
-              const monthlyItems = items.filter((item: any) => 
-                item.unitOfMeasure?.includes('Month')
-              );
-              priceItem = monthlyItems[0] || items[0];
-            }
-          } else if (resource.resourceType === 'azurerm_container_app_environment') {
-            // Container App Environment - prefer dedicated memory/compute pricing
-            // Filter for dedicated memory or vCPU usage (not GPU)
-            const computeItems = items.filter((item: any) => 
-              (item.unitOfMeasure?.includes('Hour') || item.unitOfMeasure?.includes('vCPU')) &&
-              !item.meterName?.toLowerCase().includes('gpu') &&
-              !item.meterName?.toLowerCase().includes('session')
-            );
-            if (computeItems.length > 0) {
-              // Prefer "Dedicated Memory Usage" or similar
-              const memoryItem = computeItems.find((item: any) => 
-                item.meterName?.toLowerCase().includes('memory')
-              );
-              priceItem = memoryItem || computeItems[0];
-            } else {
-              priceItem = items[0];
-            }
-          } else if (resource.resourceType === 'azurerm_log_analytics_workspace') {
-            // Log Analytics - prefer data ingestion pricing (first 5GB free, then per GB)
-            // Skip the free tier ($0) and get the paid tier
-            const paidDataItems = items.filter((item: any) => 
-              (item.meterName?.toLowerCase().includes('data ingestion') ||
-               item.meterName?.toLowerCase().includes('data')) &&
-              item.retailPrice > 0
-            );
-            if (paidDataItems.length > 0) {
-              priceItem = paidDataItems[0];
-            } else {
-              // Fallback to any data item
-              const dataItems = items.filter((item: any) => 
-                item.meterName?.toLowerCase().includes('data')
-              );
-              priceItem = dataItems[0] || items[0];
-            }
-          } else {
-            // For other resources, get the most relevant item
-            // Prefer items that match the resource type
-            priceItem = items[0];
-          }
-          
-          // Calculate monthly cost based on unit of measure
-          let monthlyCost = 0;
-          
-          // For App Service, if no priceItem found, it means no additional costs (cost is in plan)
-          if (!priceItem) {
-            if (resource.resourceType === 'azurerm_app_service') {
-              console.log(`   ✅ App Service has no additional costs - setting to $0`);
-              // Cost is already 0, continue to add resource
-            } else {
-              throw new Error('No valid pricing item found in API response');
-            }
-          } else {
-            const unitPrice = priceItem.retailPrice || 0;
-            const unitOfMeasure = priceItem.unitOfMeasure || '';
-            const meterName = priceItem.meterName || '';
-            const meterCategory = priceItem.meterCategory || '';
-            
-            console.log(`   📊 Selected pricing item:`);
-            console.log(`      Meter: ${meterName}`);
-            console.log(`      Category: ${meterCategory}`);
-            console.log(`      Unit: ${unitOfMeasure}`);
-            console.log(`      Price: ${unitPrice}`);
-            
-            // Calculate monthly cost based on unit of measure
-            if (unitOfMeasure.includes('Hour') || unitOfMeasure === '1 Hour') {
-            // Per hour pricing - convert to monthly
-            monthlyCost = unitPrice * 24 * 30;
-            console.log(`   💰 Calculation: $${unitPrice}/hour × 24 hours × 30 days = $${monthlyCost.toFixed(2)}/month`);
-          } else if (unitOfMeasure.includes('GB') || unitOfMeasure === '1 GB' || unitOfMeasure.includes('GB/Month')) {
-            // Per GB pricing - need to estimate usage
-            let sizeGB = 100; // Default estimate (100 GB)
-            
-            // Try to get size from attributes
-            if (resource.attributes?.size_gb) {
-              sizeGB = parseFloat(resource.attributes.size_gb) || 100;
-            } else if (resource.attributes?.disk_size_gb) {
-              sizeGB = parseFloat(resource.attributes.disk_size_gb) || 100;
-            }
-            
-            // For Log Analytics, estimate 50GB/month (typical usage, first 5GB free)
-            if (resource.resourceType === 'azurerm_log_analytics_workspace') {
-              sizeGB = 50; // 50GB/month typical
-              // First 5GB is free, so calculate for 45GB
-              if (unitPrice > 0) {
-                monthlyCost = unitPrice * (sizeGB - 5); // Subtract free tier
-                console.log(`   💰 Calculation: $${unitPrice}/GB × (${sizeGB}GB - 5GB free) = $${monthlyCost.toFixed(2)}/month`);
-              } else {
-                // Free tier
-                monthlyCost = 0;
-                console.log(`   💰 Calculation: First 5GB free, estimated usage ${sizeGB}GB = $0/month (within free tier)`);
+
+            console.log(`      📊 Selected: ${priceItem.meterName} | ${priceItem.unitOfMeasure} | $${priceItem.retailPrice}`);
+
+            // Merge usage-catalog values into attrs so calculateCost picks them up
+            const costAttrs = isUsageBased
+              ? applyUsageToAttrs(resource.resourceType, resolvedAttrs, appliedUsage)
+              : resolvedAttrs;
+
+            // Calculate monthly cost using the config's calculator (or smart fallback)
+            const monthlyCost = pricingConfig
+              ? calculateMonthlyCost(resource.resourceType, priceItem, costAttrs)
+              : calculateFallbackMonthlyCost(priceItem);
+
+            const yearlyCost = monthlyCost * 12;
+
+            console.log(`      ✅ Cost: $${monthlyCost.toFixed(2)}/month ($${yearlyCost.toFixed(2)}/year)`);
+
+            // Determine status and confidence
+            const assumptions: string[] = [];
+            let status: CostStatus = 'exact';
+            let confidenceScore = 1.0;
+
+            if (isUsageBased) {
+              status = Object.keys(resourceCustomUsage).length > 0 ? 'exact' : 'estimated';
+              if (status === 'estimated') {
+                assumptions.push(`Usage profile: ${requestProfile}`);
+                for (const [dimKey, dimVal] of Object.entries(appliedUsage)) {
+                  const dim = usageCatalog?.dimensions.find(d => d.key === dimKey);
+                  assumptions.push(`${dim?.label || dimKey}: ${dimVal} ${dim?.unit || ''}`);
+                }
+                confidenceScore = 0.6;
               }
-            } else if (unitOfMeasure.includes('GB/Month')) {
-              // GB/Month pricing (storage, container registry data)
-              monthlyCost = unitPrice * sizeGB;
-              console.log(`   💰 Calculation: $${unitPrice}/GB/Month × ${sizeGB}GB = $${monthlyCost.toFixed(2)}/month`);
-            } else {
-              // Per GB (one-time or per operation) - estimate monthly
-              monthlyCost = unitPrice * sizeGB;
-              console.log(`   💰 Calculation: $${unitPrice}/GB × ${sizeGB}GB = $${monthlyCost.toFixed(2)}/month`);
             }
-          } else if (unitOfMeasure.includes('Month') || unitOfMeasure === '1 Month') {
-            // Already monthly
-            monthlyCost = unitPrice;
-            console.log(`   💰 Calculation: $${unitPrice}/month (already monthly)`);
-          } else if (unitOfMeasure.includes('Request') || unitOfMeasure.includes('1 Request')) {
-            // Per-request pricing - this is problematic for App Service
-            // For App Service Plan, we should NOT use per-request pricing
-            if (resource.resourceType === 'azurerm_app_service_plan') {
-              throw new Error('App Service Plan pricing should be plan-based, not per-request. Please check API query filters.');
+
+            if (matchType === 'config_broad') {
+              assumptions.push('Used broader SKU filter (exact SKU not found)');
+              confidenceScore = Math.min(confidenceScore, 0.5);
+              status = 'estimated';
             }
-            // For other services, estimate based on typical usage
-            const estimatedRequests = resource.attributes?.estimated_requests || 1000000; // 1M requests
-            monthlyCost = unitPrice * estimatedRequests;
-            console.log(`   💰 Calculation: $${unitPrice}/request × ${estimatedRequests} requests = $${monthlyCost.toFixed(2)}/month`);
-          } else {
-            // Unknown unit - try to infer from price
-            // If price is very small (< $0.01), likely per-hour
-            // If price is larger, might be monthly
-            if (unitPrice < 0.01) {
-              monthlyCost = unitPrice * 24 * 30;
-              console.log(`   💰 Calculation: Assuming per-hour (small price), $${unitPrice} × 24 × 30 = $${monthlyCost.toFixed(2)}/month`);
-            } else if (unitPrice < 1000) {
-              monthlyCost = unitPrice;
-              console.log(`   💰 Calculation: Assuming monthly (reasonable price), $${monthlyCost.toFixed(2)}/month`);
-            } else {
-              throw new Error(`Cannot determine pricing unit. Unit: ${unitOfMeasure}, Price: ${unitPrice}`);
+            if (matchType === 'fallback') {
+              assumptions.push('Used generic fallback pricing (no specific config)');
+              confidenceScore = Math.min(confidenceScore, 0.3);
+              status = 'estimated';
             }
+            if (unresolvedVars.length > 0) {
+              assumptions.push(`Unresolved vars: ${unresolvedVars.join(', ')} - used defaults`);
+              confidenceScore = Math.min(confidenceScore, 0.4);
+              status = 'estimated';
+            }
+
+            const confidenceLabel: CostResource['confidenceLabel'] =
+              confidenceScore >= 0.8 ? 'high' : confidenceScore >= 0.5 ? 'medium' : 'low';
+
+            costEstimates.push({
+              resourceName: resource.resourceName,
+              resourceType: resource.resourceType,
+              serviceName,
+              monthlyCost: Math.round(monthlyCost * 100) / 100,
+              yearlyCost: Math.round(yearlyCost * 100) / 100,
+              currency: 'USD',
+              status,
+              pricingMatchType: matchType,
+              confidenceScore: Math.round(confidenceScore * 100) / 100,
+              confidenceLabel,
+              assumptionsUsed: assumptions,
+              requiredUsageFields: usageCatalog?.dimensions.map(d => d.key),
+              providedUsage: Object.keys(appliedUsage).length > 0 ? appliedUsage : undefined,
+              unresolvedVariables: unresolvedVars.length > 0 ? unresolvedVars : undefined,
+              details: resolvedAttrs,
+            });
+          } catch (error: any) {
+            console.error(`      ❌ Failed to get pricing for ${resource.resourceName}:`, error.message);
+            skippedResources.push({
+              resourceType: resource.resourceType,
+              resourceName: resource.resourceName,
+              reason: error.message,
+            });
           }
-          
-          // Final validation
-          if (monthlyCost < 0) {
-            throw new Error(`Invalid monthly cost calculated: ${monthlyCost}`);
-          }
-          
-          console.log(`   ✅ Final cost: $${monthlyCost.toFixed(2)}/month`);
-
-          const yearlyCost = monthlyCost * 12;
-
-          costEstimates.push({
-            resourceName: resource.resourceName,
-            resourceType: resource.resourceType,
-            serviceName: serviceName,
-            monthlyCost: Math.round(monthlyCost * 100) / 100, // Round to 2 decimals
-            yearlyCost: Math.round(yearlyCost * 100) / 100,
-            currency: 'USD',
-            details: resource.attributes
-          });
-
-          console.log(`   ✅ Estimated: $${monthlyCost.toFixed(2)}/month ($${yearlyCost.toFixed(2)}/year)`);
-          } // End of else block (when priceItem exists)
-        } catch (error: any) {
-          console.error(`   ❌ Failed to get pricing for ${resource.resourceName}:`, error.message);
-          console.warn(`   ⚠️  Skipping ${resource.resourceName} - Azure Retail Prices API unavailable`);
-          console.warn(`   💡 Only official Azure Retail Prices API is used - no AI-generated costs`);
-          // Continue to next resource without adding AI-estimated cost
-        }
         } // End of Azure pricing loop
       } // End of cloud provider check
 
-      // Calculate totals
-      const totalMonthly = costEstimates.reduce((sum, r) => sum + r.monthlyCost, 0);
-      const totalYearly = costEstimates.reduce((sum, r) => sum + r.yearlyCost, 0);
+      // Calculate totals with status breakdown
+      const exactResources = costEstimates.filter(r => r.status === 'exact');
+      const estimatedResources = costEstimates.filter(r => r.status === 'estimated');
+      const needsInputResources = costEstimates.filter(r => r.status === 'needs_input');
+      const freeResources = costEstimates.filter(r => r.pricingMatchType === 'free' || r.pricingMatchType === 'parent');
+
+      const monthlyTotalExact = exactResources.reduce((sum, r) => sum + r.monthlyCost, 0);
+      const monthlyTotalEstimated = estimatedResources.reduce((sum, r) => sum + r.monthlyCost, 0);
+      const monthlyGrandTotal = costEstimates.reduce((sum, r) => sum + r.monthlyCost, 0);
+      const yearlyGrandTotal = monthlyGrandTotal * 12;
 
       console.log(`\n✅ Cost analysis completed`);
       console.log(`   Resources processed: ${costEstimates.length}`);
-      console.log(`   Total Monthly: $${totalMonthly.toFixed(2)}`);
-      console.log(`   Total Yearly: $${totalYearly.toFixed(2)}`);
+      console.log(`   Exact: ${exactResources.length} ($${monthlyTotalExact.toFixed(2)}/mo)`);
+      console.log(`   Estimated: ${estimatedResources.length} ($${monthlyTotalEstimated.toFixed(2)}/mo)`);
+      console.log(`   Needs Input: ${needsInputResources.length}`);
+      console.log(`   Free: ${freeResources.length}`);
+      console.log(`   Skipped: ${skippedResources.length}`);
+      console.log(`   Grand Total: $${monthlyGrandTotal.toFixed(2)}/month`);
 
-      if (costEstimates.length === 0 && parsedResources.length > 0) {
-        console.warn(`   ⚠️  Warning: ${parsedResources.length} resource(s) found but no cost estimates generated`);
-        console.warn(`   This might indicate all pricing queries failed`);
-      }
-
-      res.json({
+      const result: CostAnalysisResult = {
         success: true,
         summary: {
-          totalMonthly: Math.round(totalMonthly * 100) / 100,
-          totalYearly: Math.round(totalYearly * 100) / 100,
+          monthlyTotalExact: Math.round(monthlyTotalExact * 100) / 100,
+          monthlyTotalEstimated: Math.round(monthlyTotalEstimated * 100) / 100,
+          monthlyGrandTotal: Math.round(monthlyGrandTotal * 100) / 100,
+          yearlyGrandTotal: Math.round(yearlyGrandTotal * 100) / 100,
           currency: 'USD',
-          resourceCount: costEstimates.length
+          exactCount: exactResources.length,
+          estimatedCount: estimatedResources.length,
+          needsInputCount: needsInputResources.length,
+          freeCount: freeResources.length,
+          resourceCount: costEstimates.length,
+          profile: requestProfile,
         },
-        resources: costEstimates
-      });
+        resources: costEstimates,
+        skippedResources: skippedResources.length > 0 ? skippedResources : undefined,
+      };
+
+      res.json(result);
 
     } catch (error: any) {
       console.error('❌ Error in cost analysis:', error);

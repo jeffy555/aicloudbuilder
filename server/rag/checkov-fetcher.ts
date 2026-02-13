@@ -2,18 +2,22 @@
  * Checkov Native Fetcher
  *
  * Phase 3: Fetches Checkov check definitions from GitHub, parses Python source
- * to extract check metadata, and infers Terraform fix snippets.
+ * to extract check metadata, and infers Terraform/Kubernetes fix snippets.
  *
  * All public methods degrade gracefully — failures return null, never throw.
  * Results are cached via checkov-cache.ts to minimize GitHub API calls.
+ *
+ * Extended in Phase 2 of K8s RAG to support Kubernetes checks.
  */
 
 import { checkovCache, type InferredRemediation } from './checkov-cache';
+import type { IaCFramework } from './fix-snippet-store';
 
 const GITHUB_SEARCH_URL = 'https://api.github.com/search/code';
 const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/bridgecrewio/checkov/master';
 const CHECKOV_REPO = 'bridgecrewio/checkov';
 const CHECKOV_TERRAFORM_PATH = 'checkov/terraform/checks';
+const CHECKOV_KUBERNETES_PATH = 'checkov/kubernetes/checks';
 
 // Rate limiting: 30 req/min with token, 10 without
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -34,8 +38,15 @@ class CheckovFetcher {
   /**
    * Main entry: get inferred remediation for a check + resource type.
    * Returns null on any failure — never throws.
+   * @param checkId - Checkov check ID (e.g., CKV_AZURE_59 or CKV_K8S_20)
+   * @param resourceType - Resource type (e.g., azurerm_storage_account or Deployment)
+   * @param framework - IaC framework: 'terraform' or 'kubernetes'
    */
-  async fetchRemediation(checkId: string, resourceType: string): Promise<InferredRemediation | null> {
+  async fetchRemediation(
+    checkId: string,
+    resourceType: string,
+    framework: IaCFramework = 'terraform'
+  ): Promise<InferredRemediation | null> {
     try {
       // 1. Parsed cache hit — return immediately
       const cached = await checkovCache.getParsed(checkId, resourceType);
@@ -43,8 +54,8 @@ class CheckovFetcher {
         return cached.inferredRemediation;
       }
 
-      // 2. Get source (from cache or GitHub)
-      const source = await this.getSource(checkId);
+      // 2. Get source (from cache or GitHub) - framework-aware
+      const source = await this.getSource(checkId, framework);
       if (!source) return null;
 
       // 3. Parse Python → extract check definition
@@ -62,8 +73,10 @@ class CheckovFetcher {
         return null;
       }
 
-      // 4. Infer remediation from parsed check
-      const inferred = this.inferRemediation(parsed, resourceType);
+      // 4. Infer remediation from parsed check (framework-aware)
+      const inferred = framework === 'kubernetes'
+        ? this.inferKubernetesRemediation(parsed, resourceType)
+        : this.inferRemediation(parsed, resourceType);
 
       // 5. Cache parsed result
       await checkovCache.setParsed(checkId, resourceType, {
@@ -85,13 +98,16 @@ class CheckovFetcher {
   /**
    * Retrieve source — from cache or fetched from GitHub
    */
-  private async getSource(checkId: string): Promise<{ content: string; filePath: string } | null> {
+  private async getSource(
+    checkId: string,
+    framework: IaCFramework = 'terraform'
+  ): Promise<{ content: string; filePath: string } | null> {
     const cachedSource = await checkovCache.getSource(checkId);
     if (cachedSource) {
       return { content: cachedSource.content, filePath: cachedSource.filePath };
     }
 
-    const filePath = await this.searchGitHub(checkId);
+    const filePath = await this.searchGitHub(checkId, framework);
     if (!filePath) return null;
 
     const content = await this.fetchRawFile(filePath);
@@ -103,12 +119,21 @@ class CheckovFetcher {
 
   /**
    * Search GitHub for the file containing a check ID
+   * Searches in the appropriate path based on framework (terraform or kubernetes)
    */
-  private async searchGitHub(checkId: string): Promise<string | null> {
+  private async searchGitHub(
+    checkId: string,
+    framework: IaCFramework = 'terraform'
+  ): Promise<string | null> {
     try {
       await this.waitForRateLimit();
 
-      const query = `${checkId}+repo:${CHECKOV_REPO}+path:${CHECKOV_TERRAFORM_PATH}`;
+      // Use appropriate path based on framework
+      const checkPath = framework === 'kubernetes'
+        ? CHECKOV_KUBERNETES_PATH
+        : CHECKOV_TERRAFORM_PATH;
+
+      const query = `${checkId}+repo:${CHECKOV_REPO}+path:${checkPath}`;
       const url = `${GITHUB_SEARCH_URL}?q=${encodeURIComponent(query)}`;
       const headers = this.buildHeaders();
 
@@ -116,7 +141,7 @@ class CheckovFetcher {
       this.recordRequest();
 
       if (!response.ok) {
-        console.warn(`⚠️  GitHub search returned ${response.status} for ${checkId}`);
+        console.warn(`⚠️  GitHub search returned ${response.status} for ${checkId} (${framework})`);
         return null;
       }
 
@@ -256,6 +281,182 @@ class CheckovFetcher {
       if (result) return result;
     }
 
+    return null;
+  }
+
+  /**
+   * Infer a Kubernetes YAML fix from parsed check metadata.
+   * Kubernetes checks typically look for specific paths in the manifest structure.
+   */
+  inferKubernetesRemediation(parsed: ParsedCheck, resourceKind: string): InferredRemediation | null {
+    const scanLogic = parsed.scanLogic;
+    const checkName = parsed.name.toLowerCase();
+
+    // Common Kubernetes security patterns and their YAML fixes
+    const k8sPatterns: Array<{
+      pattern: RegExp | string;
+      nameMatch?: RegExp | string;
+      yamlPath: string;
+      fix: string;
+      confidence: number;
+    }> = [
+      // Security Context - runAsNonRoot
+      {
+        pattern: /run_as_non_root|runAsNonRoot/i,
+        yamlPath: 'spec.containers[*].securityContext',
+        fix: `securityContext:
+  runAsNonRoot: true`,
+        confidence: 0.80,
+      },
+      // Security Context - allowPrivilegeEscalation
+      {
+        pattern: /allow_privilege_escalation|allowPrivilegeEscalation/i,
+        yamlPath: 'spec.containers[*].securityContext',
+        fix: `securityContext:
+  allowPrivilegeEscalation: false`,
+        confidence: 0.80,
+      },
+      // Security Context - readOnlyRootFilesystem
+      {
+        pattern: /read_only_root_filesystem|readOnlyRootFilesystem/i,
+        yamlPath: 'spec.containers[*].securityContext',
+        fix: `securityContext:
+  readOnlyRootFilesystem: true`,
+        confidence: 0.75,
+      },
+      // Security Context - drop capabilities
+      {
+        pattern: /capabilities|drop.*all/i,
+        nameMatch: /capabilities/i,
+        yamlPath: 'spec.containers[*].securityContext.capabilities',
+        fix: `securityContext:
+  capabilities:
+    drop:
+      - ALL`,
+        confidence: 0.75,
+      },
+      // Resource limits
+      {
+        pattern: /resources.*limits|limits.*cpu|limits.*memory/i,
+        nameMatch: /resource.*limit/i,
+        yamlPath: 'spec.containers[*].resources.limits',
+        fix: `resources:
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+  requests:
+    cpu: "100m"
+    memory: "128Mi"`,
+        confidence: 0.70,
+      },
+      // Resource requests
+      {
+        pattern: /resources.*requests|requests.*cpu|requests.*memory/i,
+        nameMatch: /resource.*request/i,
+        yamlPath: 'spec.containers[*].resources.requests',
+        fix: `resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"`,
+        confidence: 0.70,
+      },
+      // Liveness probe
+      {
+        pattern: /liveness_probe|livenessProbe/i,
+        yamlPath: 'spec.containers[*].livenessProbe',
+        fix: `livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10`,
+        confidence: 0.70,
+      },
+      // Readiness probe
+      {
+        pattern: /readiness_probe|readinessProbe/i,
+        yamlPath: 'spec.containers[*].readinessProbe',
+        fix: `readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5`,
+        confidence: 0.70,
+      },
+      // Image tag - not latest
+      {
+        pattern: /image.*latest|tag.*latest/i,
+        nameMatch: /latest.*tag|image.*tag/i,
+        yamlPath: 'spec.containers[*].image',
+        fix: `# Use specific image tag instead of :latest
+image: your-image:v1.0.0`,
+        confidence: 0.65,
+      },
+      // Host network
+      {
+        pattern: /host_network|hostNetwork/i,
+        yamlPath: 'spec.hostNetwork',
+        fix: `hostNetwork: false`,
+        confidence: 0.80,
+      },
+      // Host PID
+      {
+        pattern: /host_pid|hostPID/i,
+        yamlPath: 'spec.hostPID',
+        fix: `hostPID: false`,
+        confidence: 0.80,
+      },
+      // Host IPC
+      {
+        pattern: /host_ipc|hostIPC/i,
+        yamlPath: 'spec.hostIPC',
+        fix: `hostIPC: false`,
+        confidence: 0.80,
+      },
+      // Privileged container
+      {
+        pattern: /privileged/i,
+        nameMatch: /privileged.*container/i,
+        yamlPath: 'spec.containers[*].securityContext',
+        fix: `securityContext:
+  privileged: false`,
+        confidence: 0.85,
+      },
+      // Service account token
+      {
+        pattern: /automount.*service.*account|serviceAccountToken/i,
+        yamlPath: 'spec.automountServiceAccountToken',
+        fix: `automountServiceAccountToken: false`,
+        confidence: 0.75,
+      },
+    ];
+
+    // Try to match patterns
+    for (const patternDef of k8sPatterns) {
+      const patternMatches = typeof patternDef.pattern === 'string'
+        ? scanLogic.includes(patternDef.pattern)
+        : patternDef.pattern.test(scanLogic);
+
+      const nameMatches = patternDef.nameMatch
+        ? (typeof patternDef.nameMatch === 'string'
+            ? checkName.includes(patternDef.nameMatch)
+            : patternDef.nameMatch.test(checkName))
+        : true;
+
+      if (patternMatches || nameMatches) {
+        return {
+          attributeName: patternDef.yamlPath,
+          attributeType: 'block',
+          expectedValue: null,
+          fixSnippet: patternDef.fix,
+          confidence: patternDef.confidence,
+        };
+      }
+    }
+
+    // No pattern matched - return null
+    console.log(`⚠️  No K8s pattern matched for ${parsed.id}: ${parsed.name}`);
     return null;
   }
 

@@ -4,9 +4,11 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { FileTextIcon } from "@radix-ui/react-icons";
-import { FolderIcon } from "lucide-react";
+import { Check, Copy, FolderIcon } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
 
 interface CodeFile {
   name: string;
@@ -39,7 +41,9 @@ function groupFilesByFolder(files: CodeFile[]): Map<string, CodeFile[]> {
 }
 
 export default function CodeEditor({ files, onFileChange, existingFiles = [], activeFile, onFileSelect }: CodeEditorProps) {
+  const { toast } = useToast();
   const [selectedFile, setSelectedFile] = useState<string>(files[0]?.name || '');
+  const [justCopied, setJustCopied] = useState(false);
   useEffect(() => {
     setSelectedFile((prev) => {
       if (activeFile && files.some((file) => file.name === activeFile)) {
@@ -54,6 +58,33 @@ export default function CodeEditor({ files, onFileChange, existingFiles = [], ac
   const fileGroups = groupFilesByFolder(files);
   const currentFile = files.find(f => f.name === selectedFile);
   const isExistingFile = currentFile ? existingFiles.includes(currentFile.name) : false;
+
+  const handleCopyCurrentFile = async () => {
+    if (!currentFile?.content) {
+      toast({
+        title: "Nothing to copy",
+        description: "Select a file with content first.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(currentFile.content);
+      setJustCopied(true);
+      setTimeout(() => setJustCopied(false), 1200);
+      toast({
+        title: "Copied",
+        description: `${currentFile.name} copied to clipboard.`,
+      });
+    } catch (error) {
+      toast({
+        title: "Copy failed",
+        description: "Clipboard access was blocked by the browser.",
+        variant: "destructive",
+      });
+    }
+  };
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -115,11 +146,33 @@ export default function CodeEditor({ files, onFileChange, existingFiles = [], ac
 
       {/* Code View Panel */}
       <Card className="p-4 md:col-span-2">
-        <div className="mb-4">
-          <h3 className="text-lg font-semibold mb-1">Code Preview</h3>
-          {currentFile && (
-            <p className="text-sm text-muted-foreground font-mono">{currentFile.name}</p>
-          )}
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-semibold mb-1">Code Preview</h3>
+            {currentFile && (
+              <p className="text-sm text-muted-foreground font-mono">{currentFile.name}</p>
+            )}
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleCopyCurrentFile}
+            disabled={!currentFile}
+            data-testid="copy-code-preview"
+          >
+            {justCopied ? (
+              <>
+                <Check className="w-4 h-4 mr-2" />
+                Copied
+              </>
+            ) : (
+              <>
+                <Copy className="w-4 h-4 mr-2" />
+                Copy
+              </>
+            )}
+          </Button>
         </div>
         
         {currentFile ? (

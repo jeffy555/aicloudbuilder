@@ -38,7 +38,21 @@ export function generateReadme(generatedCode: GeneratedCode[]): string {
 
   if (hasTerraform) {
     prerequisites.add('Terraform >= 1.0');
-    prerequisites.add('Azure CLI (for Azure resources)');
+    // Detect which cloud providers are actually used by scanning generated Terraform content
+    const tfContent = generatedCode
+      .filter(c => c.codeType === 'terraform')
+      .map(c => c.content)
+      .join('\n')
+      .toLowerCase();
+    if (tfContent.includes('azurerm') || tfContent.includes('provider "azurerm"')) {
+      prerequisites.add('Azure CLI');
+    }
+    if (tfContent.includes('provider "aws"') || /\baws_/.test(tfContent)) {
+      prerequisites.add('AWS CLI');
+    }
+    if (tfContent.includes('provider "google"') || /\bgoogle_/.test(tfContent)) {
+      prerequisites.add('Google Cloud SDK (gcloud)');
+    }
   }
   if (hasKubernetes) {
     prerequisites.add('kubectl');

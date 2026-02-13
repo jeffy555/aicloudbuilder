@@ -56,49 +56,68 @@ export default function KubernetesWorkflow() {
   useEffect(() => {
     const initializeSession = async () => {
       const savedSessionId = localStorage.getItem('kubernetes_workflow_session_id');
-      
+
       if (savedSessionId) {
         try {
           const response = await apiRequest('GET', `/api/sessions/${savedSessionId}`);
           const session = await response.json() as Session;
           setSessionId(session.id);
-          
+
           // Restore workflow state from session
-          if (session.currentStep) {
-            const stepNum = parseInt(session.currentStep, 10) as Step;
-            if (stepNum > 1) {
-              setCurrentStep(stepNum);
-            }
-          }
-          
-          // Restore workflow type (stored in session metadata or we'll add it)
-          // For now, we'll start fresh if step is 1
-          if (currentStep === 1) {
-            // Reset to step 1
+          const stepNum = session.currentStep ? parseInt(session.currentStep, 10) as Step : 1;
+
+          // Also restore workflow metadata from localStorage (since session may not have it)
+          const savedWorkflowType = localStorage.getItem('kubernetes_workflow_type') as WorkflowType;
+          const savedProvider = localStorage.getItem('kubernetes_workflow_provider') as Provider;
+          const savedRepo = localStorage.getItem('kubernetes_workflow_repo');
+
+          if (stepNum > 1) {
+            setCurrentStep(stepNum);
+            // Restore workflow state if we're past step 1
+            if (savedWorkflowType) setWorkflowType(savedWorkflowType);
+            if (savedProvider) setProvider(savedProvider);
+            if (savedRepo) setSelectedRepo(savedRepo);
+          } else {
+            // Step 1 - reset everything
             setWorkflowType(null);
             setProvider(null);
             setSelectedRepo('');
           }
-          
+
           return;
         } catch (error) {
           localStorage.removeItem('kubernetes_workflow_session_id');
+          localStorage.removeItem('kubernetes_workflow_type');
+          localStorage.removeItem('kubernetes_workflow_provider');
+          localStorage.removeItem('kubernetes_workflow_repo');
         }
       }
-      
+
       const response = await apiRequest('POST', '/api/sessions');
       const session = await response.json() as Session;
       setSessionId(session.id);
       localStorage.setItem('kubernetes_workflow_session_id', session.id);
-      
+
       // Session will be updated as we progress through steps
-      
-      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
-        message: 'Welcome to Kubernetes Workflow! Choose a workflow type to get started: Manifest Generation or Helm Chart Validation.' 
+
+      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, {
+        message: 'Welcome to Kubernetes Workflow! Choose a workflow type to get started: Manifest Generation or Helm Chart Validation.'
       });
     };
     initializeSession();
   }, []);
+
+  // Persist current step to backend when it changes
+  useEffect(() => {
+    if (sessionId && currentStep > 1) {
+      // Update session's currentStep on backend
+      apiRequest('PATCH', `/api/sessions/${sessionId}`, {
+        currentStep: String(currentStep)
+      }).catch(err => {
+        console.warn('Failed to persist step to backend:', err);
+      });
+    }
+  }, [sessionId, currentStep]);
 
   // Fetch messages
   const { data: messages = [] } = useQuery<Message[]>({
@@ -198,13 +217,65 @@ export default function KubernetesWorkflow() {
     }
   });
 
+  // Create repository mutation
+  const createRepoMutation = useMutation({
+    mutationFn: async ({ name, description }: { name: string; description?: string }) => {
+      if (!provider) throw new Error('Provider not selected');
+      const res = await apiRequest('POST', `/api/repositories/${provider}`, { name, description });
+
+      // Check content type before parsing
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const text = await res.text();
+        if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+          throw new Error('Server returned HTML instead of JSON. Please check the server logs.');
+        }
+        throw new Error(`Unexpected content type: ${contentType}`);
+      }
+
+      return res.json();
+    },
+    onSuccess: async (data) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/repositories', provider] });
+      const repoId = data.id || data.name;
+      setSelectedRepo(repoId);
+      // Save to localStorage for session restoration
+      localStorage.setItem('kubernetes_workflow_repo', repoId);
+      toast({
+        title: "Repository Created",
+        description: `Repository "${data.name}" created successfully!`,
+      });
+      // Move to next step
+      setCurrentStep(3);
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+        message: `Repository "${data.name}" created and selected! ${workflowType === 'manifest'
+          ? 'Now describe your Kubernetes workload in natural language.'
+          : 'Now upload or select your Helm chart.'}`
+      });
+    },
+    onError: (error: any) => {
+      const errorMsg = error.message || "Failed to create repository";
+      const cleanMsg = errorMsg
+        .replace(/^\d+:\s*/, '')
+        .replace(/<!DOCTYPE[\s\S]*?>/gi, '')
+        .substring(0, 200);
+      toast({
+        title: "Creation Failed",
+        description: cleanMsg,
+        variant: "destructive"
+      });
+    }
+  });
+
   const handleWorkflowSelect = async (type: WorkflowType) => {
     setWorkflowType(type);
     setCurrentStep(2);
-    
+    // Save to localStorage for session restoration
+    localStorage.setItem('kubernetes_workflow_type', type || '');
+
     // Update session via backend (session state will be updated when we proceed)
     // For now, we'll update it when moving to next step
-    
+
     const workflowName = type === 'manifest' ? 'Manifest Generation' : 'Helm Chart Validation';
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
       message: `You selected ${workflowName}. Next, select your repository provider (GitHub or Azure DevOps).`
@@ -213,7 +284,9 @@ export default function KubernetesWorkflow() {
 
   const handleProviderSelect = async (selectedProvider: Provider) => {
     setProvider(selectedProvider);
-    
+    // Save to localStorage for session restoration
+    localStorage.setItem('kubernetes_workflow_provider', selectedProvider || '');
+
     const providerName = selectedProvider === 'github' ? 'GitHub' : 'Azure DevOps';
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
       message: `You selected ${providerName}. Please select or create a repository.`
@@ -224,13 +297,15 @@ export default function KubernetesWorkflow() {
     const repo = repositories.find(r => r.id === repoId);
     const repoName = repo?.name || repoId;
     setSelectedRepo(repoId);
-    
+    // Save to localStorage for session restoration
+    localStorage.setItem('kubernetes_workflow_repo', repoId);
+
     setCurrentStep(3);
-    
-    const nextStepMessage = workflowType === 'manifest' 
+
+    const nextStepMessage = workflowType === 'manifest'
       ? `Repository "${repoName}" selected! Now describe your Kubernetes workload in natural language.`
       : `Repository "${repoName}" selected! Now upload or select your Helm chart.`;
-    
+
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
       message: nextStepMessage
     });
@@ -244,6 +319,9 @@ export default function KubernetesWorkflow() {
   const handleRefresh = async () => {
     try {
       localStorage.removeItem('kubernetes_workflow_session_id');
+      localStorage.removeItem('kubernetes_workflow_type');
+      localStorage.removeItem('kubernetes_workflow_provider');
+      localStorage.removeItem('kubernetes_workflow_repo');
       setSessionId('');
       setCurrentStep(1);
       setWorkflowType(null);
@@ -440,15 +518,11 @@ export default function KubernetesWorkflow() {
                         showSearch={provider === 'github'}
                       />
                       {provider && (
-                        <CreateRepoForm 
-                          onSubmit={async (name: string, description?: string) => {
-                            // Handle create repo - will be implemented in Phase 5
-                            toast({
-                              title: "Create Repository",
-                              description: "Repository creation will be available in Phase 5.",
-                            });
+                        <CreateRepoForm
+                          onSubmit={(name: string, description?: string) => {
+                            createRepoMutation.mutate({ name, description });
                           }}
-                          loading={false}
+                          loading={createRepoMutation.isPending}
                         />
                       )}
                     </div>
@@ -568,27 +642,64 @@ export default function KubernetesWorkflow() {
                     Run security scans, validate best practices, and generate architecture diagrams
                   </p>
                 </div>
-                <ActivityPanel 
-                  sessionId={sessionId} 
+
+                {/* Code Editor - On top */}
+                <div className="rounded-lg border bg-card">
+                  <div className="px-4 py-3 border-b bg-muted/50">
+                    <h3 className="text-sm font-medium flex items-center gap-2">
+                      <FileCode className="w-4 h-4" />
+                      Generated Manifests
+                    </h3>
+                  </div>
+                  {generatedFiles.length > 0 ? (
+                    <CodeEditor
+                      files={generatedFiles.map(f => ({
+                        name: f.fileName,
+                        content: f.content
+                      }))}
+                      onFileChange={async (fileName, content) => {
+                        await apiRequest('POST', `/api/sessions/${sessionId}/files`, {
+                          fileName,
+                          content
+                        });
+                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                      }}
+                    />
+                  ) : (
+                    <div className="p-8 text-center text-muted-foreground">
+                      <FileCode className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                      <p>No manifests generated yet</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Activity Panel - Below code editor */}
+                <ActivityPanel
+                  sessionId={sessionId}
                   workflowType="kubernetes"
                   onScanComplete={() => {
                     setScanCompleted(true);
+                    // Refresh files after scan/fix
+                    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
                     toast({
                       title: "Activity Complete",
                       description: "Activity completed successfully.",
                     });
                   }}
+                  onFixesApproved={() => {
+                    // Refresh files after security fixes are approved
+                    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                    toast({
+                      title: "Fixes Applied",
+                      description: "Security fixes have been applied. Code editor updated.",
+                    });
+                  }}
                 />
+
                 <div className="flex gap-4 justify-center">
                   <Button
                     variant="outline"
-                    onClick={() => {
-                      if (workflowType === 'manifest') {
-                        setCurrentStep(5);
-                      } else {
-                        setCurrentStep(5);
-                      }
-                    }}
+                    onClick={() => setCurrentStep(5)}
                   >
                     ← Back
                   </Button>
@@ -601,7 +712,7 @@ export default function KubernetesWorkflow() {
                 </div>
                 {!scanCompleted && (
                   <p className="text-sm text-muted-foreground text-center">
-                    Please run at least one activity (Security Scan, Best Approach, etc.) before committing
+                    Please run at least one activity (Security Scan, Validate, etc.) before committing
                   </p>
                 )}
               </div>

@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(npx tsx:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(python -m json.tool:*)",
+      "Bash(taskkill:*)",
+      "Bash(node:*)",
+      "Bash(powershell:*)"
     ]
-  }
+  },
+  "model": "claude-opus-4.6"
 }

@@ -2,7 +2,7 @@ import { useState, forwardRef, useImperativeHandle } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
-import { AlertCircle, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, XCircle, Loader2, Wrench } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -51,6 +51,49 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
   const queryClient = useQueryClient();
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
   const [isValidating, setIsValidating] = useState(false);
+  const [isFixing, setIsFixing] = useState(false);
+
+  // Fix mutation - applies best practices to fix validation issues
+  const fixMutation = useMutation({
+    mutationFn: async (issues: Array<{ message: string; file?: string }>) => {
+      const response = await apiRequest('POST', `/api/sessions/${sessionId}/fix-kubernetes-validation`, {
+        issues
+      });
+      return response.json();
+    },
+    onSuccess: (result) => {
+      toast({
+        title: "Fixes Applied",
+        description: result.message || `Fixed ${result.totalFixed} file(s) with best practices`,
+        variant: "default",
+      });
+      // Invalidate file queries to refresh the code editor
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+      // Re-run validation to show updated results
+      setTimeout(() => triggerValidate(), 500);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Fix Failed",
+        description: error.message || "Failed to apply fixes",
+        variant: "destructive",
+      });
+    },
+    onSettled: () => {
+      setIsFixing(false);
+    }
+  });
+
+  const handleFix = () => {
+    if (!validationResult) return;
+    setIsFixing(true);
+    // Combine errors and warnings into issues to fix
+    const allIssues = [
+      ...validationResult.errors.map(e => ({ message: e.message, file: e.file })),
+      ...validationResult.warnings.map(w => ({ message: w.message, file: w.file }))
+    ];
+    fixMutation.mutate(allIssues);
+  };
 
   const validateMutation = useMutation({
     mutationFn: async () => {
@@ -106,6 +149,22 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
           <div className="flex items-center justify-center py-12">
             <Loader2 className="w-8 h-8 animate-spin text-primary mr-3" />
             <p className="text-muted-foreground">Validating Kubernetes YAML...</p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (isFixing) {
+    return (
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex flex-col items-center justify-center py-12">
+            <Loader2 className="w-8 h-8 animate-spin text-primary mb-3" />
+            <p className="text-muted-foreground font-medium">Applying Best Practices...</p>
+            <p className="text-sm text-muted-foreground mt-1">
+              AI is updating your Kubernetes manifests with security contexts, resource limits, and probes
+            </p>
           </div>
         </CardContent>
       </Card>
@@ -180,6 +239,30 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
                     <div className="text-red-600">{validationResult.summary.highPriorityIssues}</div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Fix Button - Show when there are issues */}
+            {(validationResult.errors.length > 0 || validationResult.warnings.length > 0) && (
+              <div className="pt-2">
+                <Button
+                  onClick={handleFix}
+                  disabled={isFixing}
+                  className="w-full"
+                  variant="default"
+                >
+                  {isFixing ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Applying Fixes...
+                    </>
+                  ) : (
+                    <>
+                      <Wrench className="w-4 h-4 mr-2" />
+                      Fix {validationResult.errors.length + validationResult.warnings.length} Issue(s)
+                    </>
+                  )}
+                </Button>
               </div>
             )}
           </div>

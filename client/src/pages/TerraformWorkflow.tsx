@@ -702,40 +702,22 @@ export default function TerraformWorkflow() {
 
   const handleProviderSelect = async (selectedProvider: Provider) => {
     setProvider(selectedProvider);
-    
+
     // Pre-warm MCP connection in background (don't wait)
-    apiRequest('POST', `/api/repositories/${selectedProvider}/prewarm`, {}).catch(() => {
-      // Ignore errors - pre-warming is optional
-    });
-    
+    apiRequest('POST', `/api/repositories/${selectedProvider}/prewarm`, {}).catch(() => {});
+
     const providerName = selectedProvider === 'github' ? 'GitHub' : 'Azure DevOps';
-    
-    // User confirmation
-    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: `Selected ${providerName}` 
+
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
+      provider: selectedProvider,
+      currentStep: '2'
     });
-    
-    // For aggregated-root: Skip repository selection, go directly to Cloud Provider (Step 2)
-    // For non-aggregated-root: Go to Repository selection (Step 2)
-    // We'll determine this after module selection, so for now, go to Step 2 (which will be Cloud Provider for aggregated, Repository for others)
-    // Actually, let's make it simpler: For aggregated-root, skip repo selection and go to Cloud Provider
-    // For others, go to Repository selection
-    
-    // For now, we'll go to Step 2 which will show Repository selection for non-aggregated-root
-    // But for aggregated-root flow, we need to skip to Cloud Provider
-    // Since we don't know moduleApproach yet, we'll handle repository selection in Step 2
-    // and then after module selection, we'll know if we need to go back or forward
-    
-    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
-      provider: selectedProvider, 
-      currentStep: '2' 
+
+    // Single consolidated message
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+      message: `Using ${providerName} - Select or create a repository.`
     });
-    
-    // System guidance for next step - for aggregated-root, this will be Cloud Provider, for others it will be Repository
-    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: 'Great! Now select an existing repository or create a new one.' 
-    });
-    
+
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
     queryClient.invalidateQueries({ queryKey: ['/api/repositories', selectedProvider] });
@@ -748,22 +730,18 @@ export default function TerraformWorkflow() {
       setSelectedRepo(repoId);
       const repo = repositories.find(r => r.id === repoId);
       
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: `Selected repository: ${repo?.name}` 
-      });
-
       // Scan repository to check for existing Terraform files
       // First, update session with repository info, then scan
       try {
         const repo = repositories.find(r => r.id === repoId);
-        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+        await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
           repositoryId: repoId,
           repositoryName: repo?.name || repoId,
         });
-        
+
         // Use the session-based scan endpoint
         const scanResponse = await apiRequest('POST', `/api/sessions/${sessionId}/scan-repository`, {});
-        
+
         // Check if response is JSON before parsing
         const contentType = scanResponse.headers.get('content-type');
         if (!contentType || !contentType.includes('application/json')) {
@@ -774,17 +752,17 @@ export default function TerraformWorkflow() {
           }
           throw new Error(`Unexpected response type: ${contentType}`);
         }
-        
+
         const scanResult = await scanResponse.json();
-        
+
         // The scan endpoint returns the result in the correct format already
         setRepositoryScanResult(scanResult);
 
         if (scanResult.terraformFiles && scanResult.terraformFiles.length > 0) {
           const moduleTypeText = scanResult.moduleType === 'child' ? 'child module' :
-                                scanResult.moduleType === 'root' ? 'root module' : 
+                                scanResult.moduleType === 'root' ? 'root module' :
                                 'configuration';
-          const providerText = scanResult.cloudProvider ? 
+          const providerText = scanResult.cloudProvider ?
             ` for ${scanResult.cloudProvider.toUpperCase()}` : '';
 
           // Store existing files for review
@@ -795,8 +773,9 @@ export default function TerraformWorkflow() {
           }
           setExistingFilesReviewed(false);
 
-          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-            message: `Found existing ${moduleTypeText}${providerText} with ${scanResult.terraformFiles.length} Terraform files.` 
+          // Single consolidated message for existing repo
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+            message: `Selected "${repo?.name}" - Found existing ${moduleTypeText}${providerText} with ${scanResult.terraformFiles.length} Terraform files.`
           });
 
           if (scanResult.cloudProvider && !cloudProvider) {
@@ -807,29 +786,25 @@ export default function TerraformWorkflow() {
           // Stay on Step 2 to show review - user will click "Continue" after reviewing
           queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
         } else {
-          // New/empty repo - proceed to Cloud Provider selection
-          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-            message: 'This appears to be a new repository. Let\'s configure it from scratch.' 
-          });
-
+          // New/empty repo - proceed to Cloud Provider selection with single consolidated message
           await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
           setCurrentStep(3);
           queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
 
-          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-            message: 'Perfect! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+            message: `Selected "${repo?.name}" - New repository. Choose your target cloud provider.`
           });
         }
       } catch (error: any) {
         console.error('Error scanning repository:', error);
-        
+
         // Show user-friendly error message
         toast({
           title: "Scan Failed",
           description: error.message || "Failed to scan repository. Proceeding with new repository setup.",
           variant: "destructive"
         });
-        
+
         // On error, proceed to Cloud Provider selection (treat as new repository)
         setRepositoryScanResult({
           isExisting: false,
@@ -843,13 +818,13 @@ export default function TerraformWorkflow() {
         } as RepositoryScanResult);
         setExistingFiles([]);
         setExistingFilesReviewed(true);
-        
+
         await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
         setCurrentStep(3);
         queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
 
-        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-          message: 'Unable to scan repository. Proceeding with new repository setup. Now choose your target cloud provider (Azure, AWS, or GCP).' 
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+          message: `Selected "${repo?.name}" - Unable to scan. Choose your target cloud provider.`
         });
       }
 
@@ -970,47 +945,35 @@ export default function TerraformWorkflow() {
     // Normal repository selection (for non-aggregated-root)
     setSelectedRepo(repoId);
     const repo = repositories.find(r => r.id === repoId);
-    
-    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
       repositoryId: repoId,
       repositoryName: repo?.name,
     });
 
-    // User confirmation
-    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: `Selected repository: ${repo?.name}` 
-    });
-
-    // Scan the repository for existing configuration
-    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: 'Scanning repository for existing Terraform configuration...' 
-    });
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
 
     const scanResult = await scanRepositoryMutation.mutateAsync();
 
-    // Azure DevOps now uses REST API for scanning, so it works the same as GitHub
-    // No special limitation handling needed
-
     if (scanResult.isExisting && scanResult.terraformFiles.length > 0) {
       // Existing repo with Terraform files - show review step first
       const moduleTypeText = scanResult.moduleType === 'child' ? 'child module' :
-                            scanResult.moduleType === 'root' ? 'root module' : 
+                            scanResult.moduleType === 'root' ? 'root module' :
                             'configuration';
-      const providerText = scanResult.cloudProvider ? 
+      const providerText = scanResult.cloudProvider ?
         ` for ${scanResult.cloudProvider.toUpperCase()}` : '';
 
       // Store existing files for review
       if (scanResult.terraformFilesWithContent && scanResult.terraformFilesWithContent.length > 0) {
         setExistingFiles(scanResult.terraformFilesWithContent);
       } else {
-        // Fallback: create file objects with just paths (content will be fetched if needed)
         setExistingFiles(scanResult.terraformFiles.map(path => ({ path, content: '' })));
       }
       setExistingFilesReviewed(false);
 
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: `Found existing ${moduleTypeText}${providerText} with ${scanResult.terraformFiles.length} Terraform files. Please review the existing configuration before proceeding with new resource creation.`
+      // Single consolidated message
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+        message: `Selected "${repo?.name}" - Found existing ${moduleTypeText}${providerText} with ${scanResult.terraformFiles.length} Terraform files.`
       });
 
       if (scanResult.cloudProvider && !cloudProvider) {
@@ -1018,21 +981,15 @@ export default function TerraformWorkflow() {
         setCloudProvider(scanResult.cloudProvider);
       }
 
-      // Stay on current step (2) to show review - don't advance yet
-      // User will click "Continue" after reviewing files
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
     } else {
-      // New/empty repo
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'This appears to be a new repository. Let\'s configure it from scratch.' 
-      });
-
-      setCurrentStep(3); // Update local state first
+      // New/empty repo - single consolidated message
+      setCurrentStep(3);
       await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
-      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] }); // Invalidate session
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
 
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'Perfect! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+        message: `Selected "${repo?.name}" - New repository. Choose your target cloud provider.`
       });
     }
 
@@ -1041,19 +998,15 @@ export default function TerraformWorkflow() {
 
   const handleCreateRepo = async (name: string, description: string) => {
     const newRepo = await createRepoMutation.mutateAsync({ name, description });
-    
+
     // For Step 2: Repository creation for non-aggregated-root modules
     if (currentStep === 2 && !moduleApproach) {
       const repoId = (newRepo as any)?.id || name;
       setSelectedRepo(repoId);
-      
-      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
         repositoryId: repoId,
         repositoryName: name,
-      });
-
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: `Created repository: ${name}` 
       });
 
       // New repository - no existing files, proceed to Cloud Provider
@@ -1075,27 +1028,23 @@ export default function TerraformWorkflow() {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
       queryClient.invalidateQueries({ queryKey: ['/api/repositories', provider] });
 
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'Perfect! Now choose your target cloud provider (Azure, AWS, or GCP).' 
+      // Single consolidated message
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+        message: `Created "${name}" - Choose your target cloud provider.`
       });
       return;
     }
-    
+
     // For aggregated-root modules in Step 5, this is root module repository creation
     if (moduleApproach === 'aggregated-root' && currentStep === 5) {
-      // Get the created repo ID from the response
       const repoId = (newRepo as any)?.id || name;
       setSelectedRepo(repoId);
-      
-      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
         repositoryId: repoId,
         repositoryName: name,
       });
 
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: `Created root module repository: ${name}` 
-      });
-      
       // New repository - no backend exists, so mark it
       setRepositoryScanResult({
         isExisting: false,
@@ -1107,9 +1056,10 @@ export default function TerraformWorkflow() {
         providerBlocks: [],
         backend: { hasBackend: false }
       } as RepositoryScanResult);
-      
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'This is a new repository. Backend configuration will be required before code generation.' 
+
+      // Single consolidated message
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+        message: `Created root module "${name}" - Backend configuration required.`
       });
       
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
@@ -1140,47 +1090,32 @@ export default function TerraformWorkflow() {
 
   const handleCloudProviderSelect = async (selectedCloudProvider: CloudProvider) => {
     setCloudProvider(selectedCloudProvider);
-    
-    const cloudName = selectedCloudProvider === 'azure' ? 'Microsoft Azure' : 
-                      selectedCloudProvider === 'aws' ? 'Amazon Web Services (AWS)' : 
-                      'Google Cloud Platform (GCP)';
-    
-    // User confirmation
-    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: `Selected ${cloudName}` 
-    });
-    
-    // Pre-warm Azure MCP connection if Azure is selected
+
+    const cloudName = selectedCloudProvider === 'azure' ? 'Azure' :
+                      selectedCloudProvider === 'aws' ? 'AWS' : 'GCP';
+
+    // Pre-warm Azure MCP connection if Azure is selected (silently)
+    let mcpStatus = '';
     if (selectedCloudProvider === 'azure') {
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'Initializing Azure MCP server connection...' 
-      });
       try {
-        // Pre-warm the Azure resources MCP connection
         await apiRequest('GET', '/api/debug/azure-mcp');
-        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-          message: 'Azure MCP server connection established successfully.' 
-        });
       } catch (mcpError: any) {
         console.warn('Azure MCP pre-warm failed:', mcpError);
-        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-          message: '⚠️ Azure MCP server connection test failed. Backend creation may fail. Please ensure Azure credentials are configured.' 
-        });
+        mcpStatus = ' (Azure connection pending)';
       }
     }
-    
-    // After cloud provider selection, go to Step 4 (Module Approach selection)
-    // For non-aggregated-root: Step 3 = Cloud Provider, Step 4 = Module
-    // For aggregated-root: Step 2 = Cloud Provider, Step 3 = Module (but we handle that separately)
-    await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+
+    // Update session and go to Module Approach selection
+    await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
       cloudProvider: selectedCloudProvider,
       currentStep: '4'
     });
-    
-    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: 'Great! Now choose your module approach: child module, standalone root module, or aggregated root module.' 
+
+    // Single consolidated message
+    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+      message: `Selected ${cloudName}${mcpStatus} - Choose your module approach.`
     });
-    
+
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
     setCurrentStep(4);
@@ -1189,81 +1124,73 @@ export default function TerraformWorkflow() {
   const handleModuleApproachSelect = async (selectedApproach: ModuleApproach) => {
     setModuleApproach(selectedApproach);
 
-    const approachName = selectedApproach === 'child-module' ? 'Child Module' : 
-                         selectedApproach === 'standalone-root' ? 'Standalone Root Module' : 
-                         'Aggregated Root Module';
-    
-    // User confirmation
-    await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-      message: `Selected ${approachName}` 
-    });
-    
-    // System guidance for next step
+    const approachName = selectedApproach === 'child-module' ? 'Child Module' :
+                         selectedApproach === 'standalone-root' ? 'Standalone Root' :
+                         'Aggregated Root';
+
     if (selectedApproach === 'child-module') {
       // Child modules don't need backend configuration
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'Child modules don\'t require backend configuration. Now describe the infrastructure components you want to create.' 
-      });
-      setBackendConfigured(true); // Mark as configured (skipped for child modules)
-      // Update session and move to step 6
-      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+      setBackendConfigured(true);
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
         moduleApproach: selectedApproach,
         currentStep: '6',
         backendDeclined: 'true',
         backendValidated: 'skipped'
       });
       setCurrentStep(6);
-    } else if (selectedApproach === 'aggregated-root') {
-      // For aggregated-root: Cloud provider should already be selected in Step 2
-      // Now go to Step 4 to select child module repository
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'For aggregated root modules, you need to select the repository containing the child module. The system will scan it to identify available resources.' 
+
+      // Single consolidated message
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+        message: `Selected ${approachName} - Describe the infrastructure components you want to create.`
       });
+    } else if (selectedApproach === 'aggregated-root') {
       // Reset repository selection state for child module selection
       setSelectedRepo('');
       setChildModuleRepoId('');
       setChildModuleResources([]);
       setChildModuleReviewed(false);
-      // Go to Step 4 to select child module repository
-      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
         moduleApproach: selectedApproach,
         currentStep: '4'
       });
       setCurrentStep(4);
+
+      // Single consolidated message
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+        message: `Selected ${approachName} - Select the child module repository.`
+      });
     } else {
-      // Standalone-root modules need backend configuration
-      // BUT: Check if backend already exists in the repository
+      // Standalone-root modules - check if backend already exists
       const sessionData = await apiRequest('GET', `/api/sessions/${sessionId}`).then(r => r.json());
-      
+
       if (sessionData.hasBackend === 'true' || sessionData.hasBackend === true) {
-        // Backend already exists - skip backend configuration step
-        console.log('✅ Backend already configured in repository, skipping backend configuration step');
+        // Backend already exists - skip configuration
         setBackendConfigured(true);
-        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+        await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
           moduleApproach: selectedApproach,
           currentStep: '6',
-          backendValidated: 'true' // Mark as validated since it already exists
+          backendValidated: 'true'
         });
         setCurrentStep(6);
-        
-          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-          message: 'Backend configuration already exists in the repository. You can now describe the infrastructure components you want to create.' 
+
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+          message: `Selected ${approachName} - Backend exists. Describe the infrastructure you want to create.`
         });
       } else {
         // Backend doesn't exist - show backend configuration form
-        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+        await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
           moduleApproach: selectedApproach,
           currentStep: '5'
         });
         setCurrentStep(5);
-        
-        // Show the form for new setups (standalone-root)
-          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-          message: 'Please configure the Terraform backend for state management. Enter the Azure resource group, storage account, and container names in the form below, then click "Create Backend" to create the resources and generate backend.tf, provider.tf, and terraform.tf files.' 
+
+        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+          message: `Selected ${approachName} - Configure the Terraform backend below.`
         });
       }
     }
-    
+
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
   };
@@ -1458,64 +1385,53 @@ export default function TerraformWorkflow() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-white">
-      <a href="#main-content" className="skip-link">
-        Skip to main content
-      </a>
+    <div className="min-h-screen bg-white">
       <Header />
-      
-      <main id="main-content" className="flex-1 overflow-hidden flex flex-col" role="main" aria-label="Terraform workflow">
-        <div className="py-6 px-4 sm:px-6 lg:px-8">
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-primary/10">
-                  <Cloud className="w-6 h-6 text-primary" />
-                </div>
-                <div>
-                  <h1 className="text-3xl font-bold">Terraform</h1>
-                  <p className="text-muted-foreground">
-                    Generate infrastructure as code for Azure, AWS, or GCP
-                  </p>
-                </div>
+
+      <main className="container mx-auto px-4 py-6 max-w-7xl">
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-primary/10">
+                <Cloud className="w-6 h-6 text-primary" />
               </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleRefresh}
-                  disabled={generateTerraformMutation.isPending}
-                >
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                  Refresh
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleGoHome}
-                >
-                  <Home className="w-4 h-4 mr-2" />
-                  Home
-                </Button>
+              <div>
+                <h1 className="text-3xl font-bold">Terraform Workflow</h1>
+                <p className="text-muted-foreground">
+                  Generate infrastructure as code for Azure, AWS, or GCP
+                </p>
               </div>
             </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRefresh}
+                disabled={generateTerraformMutation.isPending}
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Refresh
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleGoHome}
+              >
+                <Home className="w-4 h-4 mr-2" />
+                Home
+              </Button>
+            </div>
           </div>
-          <StepIndicator steps={steps} currentStep={currentStep} />
         </div>
 
-        <ScrollArea className="flex-1 px-4 sm:px-6 lg:px-8">
+        <StepIndicator steps={steps} currentStep={currentStep} />
+
+        <ScrollArea className="flex-1 px-4 sm:px-6 lg:px-8 mt-6">
           <div className="max-w-6xl mx-auto pb-8 space-y-6">
-            {/* Debug: Current Step */}
-            {process.env.NODE_ENV === 'development' && (
-              <div className="mb-2 text-xs text-muted-foreground">
-                Debug: Current Step = {currentStep}
-              </div>
-            )}
-            
             {/* Messages */}
             <div className="mb-8">
               {messages.map((msg) => (
-                msg.type === 'ai' ? (
+                msg.type === 'ai' || msg.type === 'system' ? (
                   <AIMessage key={msg.id} message={msg.content} />
                 ) : (
                   <UserMessage key={msg.id} message={msg.content} />
@@ -1525,50 +1441,70 @@ export default function TerraformWorkflow() {
 
             {/* Step 1: Provider Selection */}
             {currentStep === 1 && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto">
-                {config?.hasGithub && (
-                  <ProviderCard
-                    icon={<CodeIcon className="w-6 h-6" />}
-                    title="GitHub"
-                    description="Use GitHub repositories for your Terraform configurations"
-                    onClick={() => handleProviderSelect('github')}
-                    selected={provider === 'github'}
-                    provider="github"
-                    fillBackground={true}
-                    data-testid="card-provider-github"
-                  />
-                )}
-                {config?.hasAzureDevOps && (
-                  <ProviderCard
-                    icon={<Cloud className="w-6 h-6" />}
-                    title="Azure DevOps"
-                    description="Use Azure DevOps repositories for your infrastructure code"
-                    onClick={() => handleProviderSelect('azure')}
-                    selected={provider === 'azure'}
-                    provider="azure"
-                    fillBackground={true}
-                    data-testid="card-provider-azure"
-                  />
-                )}
-                {!config?.hasGithub && !config?.hasAzureDevOps && (
-                  <div className="col-span-2 text-center py-12">
-                    <p className="text-muted-foreground mb-4">No repository providers configured.</p>
-                    <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
-                  </div>
-                )}
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Select Repository Provider</h2>
+                  <p className="text-muted-foreground">
+                    Choose where to store your Terraform configurations
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto">
+                  {config?.hasGithub && (
+                    <ProviderCard
+                      icon={<CodeIcon className="w-6 h-6" />}
+                      title="GitHub"
+                      description="Use GitHub repositories for your Terraform configurations"
+                      onClick={() => handleProviderSelect('github')}
+                      selected={provider === 'github'}
+                      provider="github"
+                      fillBackground={true}
+                      data-testid="card-provider-github"
+                    />
+                  )}
+                  {config?.hasAzureDevOps && (
+                    <ProviderCard
+                      icon={<Cloud className="w-6 h-6" />}
+                      title="Azure DevOps"
+                      description="Use Azure DevOps repositories for your infrastructure code"
+                      onClick={() => handleProviderSelect('azure')}
+                      selected={provider === 'azure'}
+                      provider="azure"
+                      fillBackground={true}
+                      data-testid="card-provider-azure"
+                    />
+                  )}
+                  {!config?.hasGithub && !config?.hasAzureDevOps && (
+                    <div className="col-span-2 text-center py-12">
+                      <p className="text-muted-foreground mb-4">No repository providers configured.</p>
+                      <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
             {/* Step 2: Repository Selection (for all flows) */}
             {currentStep === 2 && provider && !moduleApproach && !selectedRepo && (
               <div className="space-y-6">
-                <div className="mb-4">
+                <div className="text-center">
                   <h2 className="text-2xl font-bold mb-2">Select Repository</h2>
                   <p className="text-muted-foreground">
-                    Select an existing repository or create a new one from {provider === 'github' ? 'GitHub' : 'Azure DevOps'}.
+                    Choose an existing repository or create a new one
                   </p>
                 </div>
-                
+
+                <div className="flex gap-4 mb-4">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setProvider(null);
+                      setCurrentStep(1);
+                    }}
+                  >
+                    ← Back
+                  </Button>
+                </div>
+
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <RepositoryList
                     showSearch={provider === 'github'}
@@ -1577,7 +1513,7 @@ export default function TerraformWorkflow() {
                     onSelect={handleRepoSelect}
                   />
                   {(provider === 'github' || provider === 'azure') && (
-                    <CreateRepoForm 
+                    <CreateRepoForm
                       onSubmit={handleCreateRepo}
                       loading={createRepoMutation.isPending}
                     />
@@ -1610,6 +1546,7 @@ export default function TerraformWorkflow() {
                         setRepositoryScanResult(null);
                         setExistingFiles([]);
                         setExistingFilesReviewed(false);
+                        setCloudProvider(null);
                       }}
                       className="text-green-700 dark:text-green-300"
                     >
@@ -1618,19 +1555,60 @@ export default function TerraformWorkflow() {
                   </div>
                 </div>
 
-                {/* Continue button to go to Cloud Provider */}
+                {/* Show detected cloud provider if found */}
+                {cloudProvider && (
+                  <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Cloud className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                        <div>
+                          <p className="text-sm font-medium text-blue-900 dark:text-blue-100">
+                            Cloud Provider Detected
+                          </p>
+                          <p className="text-xs text-blue-700 dark:text-blue-300">
+                            {cloudProvider === 'azure' ? 'Microsoft Azure' : cloudProvider === 'aws' ? 'Amazon Web Services' : 'Google Cloud Platform'}
+                          </p>
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setCloudProvider(null);
+                          apiRequest('PATCH', `/api/sessions/${sessionId}`, { cloudProvider: null });
+                        }}
+                        className="text-blue-700 dark:text-blue-300"
+                      >
+                        Change
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Continue button - skip to Module selection if cloud provider already detected */}
                 <div className="flex justify-end">
                   <Button
                     onClick={async () => {
-                      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
-                      setCurrentStep(3);
-                      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
-                      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-                        message: 'Now choose your target cloud provider (Azure, AWS, or GCP).' 
-                      });
+                      if (cloudProvider) {
+                        // Cloud provider already detected from scan - skip to Module selection
+                        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '4' });
+                        setCurrentStep(4);
+                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+                        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+                          message: `Using detected cloud provider: ${cloudProvider.toUpperCase()}. Now select your module approach.`
+                        });
+                      } else {
+                        // No cloud provider detected - go to Cloud Provider selection
+                        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' });
+                        setCurrentStep(3);
+                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+                        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+                          message: 'Now choose your target cloud provider (Azure, AWS, or GCP).'
+                        });
+                      }
                     }}
                   >
-                    Continue to Cloud Provider →
+                    {cloudProvider ? 'Continue to Module Selection →' : 'Continue to Cloud Provider →'}
                   </Button>
                 </div>
               </div>
@@ -1638,138 +1616,161 @@ export default function TerraformWorkflow() {
 
             {/* Step 2: Cloud Provider Selection (for aggregated-root flow) */}
             {currentStep === 2 && provider && moduleApproach === 'aggregated-root' && !cloudProvider && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
-                {config?.hasAzureCloud && (
-                  <ProviderCard
-                    icon={<Cloud className="w-6 h-6" />}
-                    title="Microsoft Azure"
-                    description="Generate Terraform for Azure cloud resources"
-                    onClick={() => handleCloudProviderSelect('azure')}
-                    selected={cloudProvider === 'azure'}
-                    cloudProvider="azure"
-                    fillBackground={true}
-                    data-testid="card-cloud-azure"
-                  />
-                )}
-                {config?.hasAws && (
-                  <ProviderCard
-                    icon={<CloudCog className="w-6 h-6" />}
-                    title="Amazon Web Services"
-                    description="Generate Terraform for AWS cloud resources"
-                    onClick={() => handleCloudProviderSelect('aws')}
-                    selected={cloudProvider === 'aws'}
-                    cloudProvider="aws"
-                    fillBackground={true}
-                    data-testid="card-cloud-aws"
-                  />
-                )}
-                {config?.hasGcp && (
-                  <ProviderCard
-                    icon={<Package className="w-6 h-6" />}
-                    title="Google Cloud Platform"
-                    description="Generate Terraform for GCP cloud resources"
-                    onClick={() => handleCloudProviderSelect('gcp')}
-                    selected={cloudProvider === 'gcp'}
-                    cloudProvider="gcp"
-                    fillBackground={true}
-                    data-testid="card-cloud-gcp"
-                  />
-                )}
-                {!config?.hasAzureCloud && !config?.hasAws && !config?.hasGcp && (
-                  <div className="col-span-3 text-center py-12">
-                    <p className="text-muted-foreground mb-4">No cloud providers configured.</p>
-                    <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
-                  </div>
-                )}
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Select Cloud Provider</h2>
+                  <p className="text-muted-foreground">
+                    Choose your target cloud platform for infrastructure deployment
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                  {config?.hasAzureCloud && (
+                    <ProviderCard
+                      icon={<Cloud className="w-6 h-6" />}
+                      title="Microsoft Azure"
+                      description="Generate Terraform for Azure cloud resources"
+                      onClick={() => handleCloudProviderSelect('azure')}
+                      selected={cloudProvider === 'azure'}
+                      cloudProvider="azure"
+                      fillBackground={true}
+                      data-testid="card-cloud-azure"
+                    />
+                  )}
+                  {config?.hasAws && (
+                    <ProviderCard
+                      icon={<CloudCog className="w-6 h-6" />}
+                      title="Amazon Web Services"
+                      description="Generate Terraform for AWS cloud resources"
+                      onClick={() => handleCloudProviderSelect('aws')}
+                      selected={cloudProvider === 'aws'}
+                      cloudProvider="aws"
+                      fillBackground={true}
+                      data-testid="card-cloud-aws"
+                    />
+                  )}
+                  {config?.hasGcp && (
+                    <ProviderCard
+                      icon={<Package className="w-6 h-6" />}
+                      title="Google Cloud Platform"
+                      description="Generate Terraform for GCP cloud resources"
+                      onClick={() => handleCloudProviderSelect('gcp')}
+                      selected={cloudProvider === 'gcp'}
+                      cloudProvider="gcp"
+                      fillBackground={true}
+                      data-testid="card-cloud-gcp"
+                    />
+                  )}
+                  {!config?.hasAzureCloud && !config?.hasAws && !config?.hasGcp && (
+                    <div className="col-span-3 text-center py-12">
+                      <p className="text-muted-foreground mb-4">No cloud providers configured.</p>
+                      <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
             {/* Step 3: Cloud Provider Selection (after Repository selection for non-aggregated-root) */}
             {currentStep === 3 && provider && selectedRepo && !cloudProvider && !moduleApproach && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
-                {config?.hasAzureCloud && (
-                  <ProviderCard
-                    icon={<Cloud className="w-6 h-6" />}
-                    title="Microsoft Azure"
-                    description="Generate Terraform for Azure cloud resources"
-                    onClick={() => handleCloudProviderSelect('azure')}
-                    selected={cloudProvider === 'azure'}
-                    cloudProvider="azure"
-                    fillBackground={true}
-                    data-testid="card-cloud-azure"
-                  />
-                )}
-                {config?.hasAws && (
-                  <ProviderCard
-                    icon={<CloudCog className="w-6 h-6" />}
-                    title="Amazon Web Services"
-                    description="Generate Terraform for AWS cloud resources"
-                    onClick={() => handleCloudProviderSelect('aws')}
-                    selected={cloudProvider === 'aws'}
-                    cloudProvider="aws"
-                    fillBackground={true}
-                    data-testid="card-cloud-aws"
-                  />
-                )}
-                {config?.hasGcp && (
-                  <ProviderCard
-                    icon={<Package className="w-6 h-6" />}
-                    title="Google Cloud Platform"
-                    description="Generate Terraform for GCP cloud resources"
-                    onClick={() => handleCloudProviderSelect('gcp')}
-                    selected={cloudProvider === 'gcp'}
-                    cloudProvider="gcp"
-                    fillBackground={true}
-                    data-testid="card-cloud-gcp"
-                  />
-                )}
-                {!config?.hasAzureCloud && !config?.hasAws && !config?.hasGcp && (
-                  <div className="col-span-3 text-center py-12">
-                    <p className="text-muted-foreground mb-4">No cloud providers configured.</p>
-                    <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
-                  </div>
-                )}
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Select Cloud Provider</h2>
+                  <p className="text-muted-foreground">
+                    Choose your target cloud platform for infrastructure deployment
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                  {config?.hasAzureCloud && (
+                    <ProviderCard
+                      icon={<Cloud className="w-6 h-6" />}
+                      title="Microsoft Azure"
+                      description="Generate Terraform for Azure cloud resources"
+                      onClick={() => handleCloudProviderSelect('azure')}
+                      selected={cloudProvider === 'azure'}
+                      cloudProvider="azure"
+                      fillBackground={true}
+                      data-testid="card-cloud-azure"
+                    />
+                  )}
+                  {config?.hasAws && (
+                    <ProviderCard
+                      icon={<CloudCog className="w-6 h-6" />}
+                      title="Amazon Web Services"
+                      description="Generate Terraform for AWS cloud resources"
+                      onClick={() => handleCloudProviderSelect('aws')}
+                      selected={cloudProvider === 'aws'}
+                      cloudProvider="aws"
+                      fillBackground={true}
+                      data-testid="card-cloud-aws"
+                    />
+                  )}
+                  {config?.hasGcp && (
+                    <ProviderCard
+                      icon={<Package className="w-6 h-6" />}
+                      title="Google Cloud Platform"
+                      description="Generate Terraform for GCP cloud resources"
+                      onClick={() => handleCloudProviderSelect('gcp')}
+                      selected={cloudProvider === 'gcp'}
+                      cloudProvider="gcp"
+                      fillBackground={true}
+                      data-testid="card-cloud-gcp"
+                    />
+                  )}
+                  {!config?.hasAzureCloud && !config?.hasAws && !config?.hasGcp && (
+                    <div className="col-span-3 text-center py-12">
+                      <p className="text-muted-foreground mb-4">No cloud providers configured.</p>
+                      <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
             {/* Step 4: Module Approach Selection (after Cloud Provider selection) */}
             {currentStep === 4 && cloudProvider && !moduleApproach && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
-                <ProviderCard
-                  icon={<Box className="w-6 h-6" />}
-                  title="Child Module"
-                  description="Create a reusable child module"
-                  onClick={() => handleModuleApproachSelect('child-module')}
-                  selected={moduleApproach === 'child-module'}
-                  data-testid="card-module-child"
-                />
-                <ProviderCard
-                  icon={<Layers className="w-6 h-6" />}
-                  title="Standalone Root"
-                  description="Create a standalone root module configuration"
-                  onClick={() => handleModuleApproachSelect('standalone-root')}
-                  selected={moduleApproach === 'standalone-root'}
-                  data-testid="card-module-standalone"
-                />
-                <ProviderCard
-                  icon={<Network className="w-6 h-6" />}
-                  title="Aggregated Root"
-                  description="Create a root module that composes multiple child modules"
-                  onClick={() => handleModuleApproachSelect('aggregated-root')}
-                  selected={moduleApproach === 'aggregated-root'}
-                  data-testid="card-module-aggregated"
-                />
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Select Module Approach</h2>
+                  <p className="text-muted-foreground">
+                    Choose how you want to structure your Terraform configuration
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                  <ProviderCard
+                    icon={<Box className="w-6 h-6" />}
+                    title="Child Module"
+                    description="Create a reusable child module"
+                    onClick={() => handleModuleApproachSelect('child-module')}
+                    selected={moduleApproach === 'child-module'}
+                    data-testid="card-module-child"
+                  />
+                  <ProviderCard
+                    icon={<Layers className="w-6 h-6" />}
+                    title="Standalone Root"
+                    description="Create a standalone root module configuration"
+                    onClick={() => handleModuleApproachSelect('standalone-root')}
+                    selected={moduleApproach === 'standalone-root'}
+                    data-testid="card-module-standalone"
+                  />
+                  <ProviderCard
+                    icon={<Network className="w-6 h-6" />}
+                    title="Aggregated Root"
+                    description="Create a root module that composes multiple child modules"
+                    onClick={() => handleModuleApproachSelect('aggregated-root')}
+                    selected={moduleApproach === 'aggregated-root'}
+                    data-testid="card-module-aggregated"
+                  />
+                </div>
               </div>
             )}
-            
 
             {/* Step 4: Child Module Repository Selection (for aggregated-root) */}
             {currentStep === 4 && moduleApproach === 'aggregated-root' && (
               <div className="space-y-6">
-                <div className="mb-4">
-                  <h2 className="text-2xl font-bold mb-2">Child Module Repository</h2>
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Select Child Module Repository</h2>
                   <p className="text-muted-foreground">
-                    Select the repository containing the child module. We'll review available resources before creating the root module.
+                    Choose the repository containing the child module resources
                   </p>
                 </div>
                 
@@ -1873,10 +1874,10 @@ export default function TerraformWorkflow() {
             {/* Step 5: Root Module Repository Selection (for aggregated-root) */}
             {currentStep === 5 && moduleApproach === 'aggregated-root' && (
               <div className="space-y-6">
-                <div className="mb-4">
-                  <h2 className="text-2xl font-bold mb-2">Root Module Repository</h2>
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Select Root Module Repository</h2>
                   <p className="text-muted-foreground">
-                    Select or create the repository where the root module will be created. The root module will use the child module resources you reviewed.
+                    Choose or create the repository for your root module configuration
                   </p>
                 </div>
                 
@@ -1974,15 +1975,18 @@ export default function TerraformWorkflow() {
 
             {/* Step 5: Backend Configuration (for non-aggregated-root) or Step 6 (for aggregated-root) */}
             {((currentStep === 5 && moduleApproach !== 'aggregated-root') || (currentStep === 6 && moduleApproach === 'aggregated-root')) && (
-              <div className="w-full my-8">
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Configure Terraform Backend</h2>
+                  <p className="text-muted-foreground">
+                    {cloudProvider === 'aws'
+                      ? 'Enter the AWS backend configuration details. The app will generate backend.tf with S3 and DynamoDB configuration.'
+                      : 'Enter the Azure backend configuration details. The app will create these resources and generate backend.tf.'}
+                  </p>
+                </div>
+
                 <div className="max-w-2xl mx-auto">
-                  <div className="bg-white dark:bg-gray-800 rounded-lg border-2 border-gray-300 dark:border-gray-600 p-8 shadow-xl">
-                    <h3 className="text-2xl font-bold mb-4 text-gray-900 dark:text-gray-100">Configure Terraform Backend</h3>
-                    <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
-                      {cloudProvider === 'aws' 
-                        ? 'Enter the AWS backend configuration details. The app will generate backend.tf with S3 and DynamoDB configuration.'
-                        : 'Enter the Azure backend configuration details. The app will create these resources and generate backend.tf.'}
-                    </p>
+                  <div className="bg-card rounded-lg border p-8">
                     
                     <div className="space-y-6">
                       {/* AWS Backend Fields */}
@@ -2230,13 +2234,43 @@ export default function TerraformWorkflow() {
               </div>
             )}
 
+            {/* Step 6: Describe Infrastructure (for non-aggregated-root only) */}
+            {currentStep === 6 && moduleApproach !== 'aggregated-root' && backendConfigured && (
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Describe Your Infrastructure</h2>
+                  <p className="text-muted-foreground">
+                    Describe the Terraform resources you want to create
+                  </p>
+                </div>
+
+                {generateTerraformMutation.isPending && (
+                  <div className="text-center py-12">
+                    <Loader2 className="w-12 h-12 animate-spin mx-auto mb-4 text-primary" />
+                    <p className="text-muted-foreground">
+                      Generating Terraform configuration...
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex gap-4 justify-center">
+                  <Button
+                    variant="outline"
+                    onClick={() => setCurrentStep(5)}
+                  >
+                    ← Back
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* Step 7: Resource Input and Validation (for aggregated-root only) */}
             {currentStep === 7 && moduleApproach === 'aggregated-root' && (
               <div className="space-y-6">
-                <div className="mb-4">
+                <div className="text-center">
                   <h2 className="text-2xl font-bold mb-2">Describe Root Module Resources</h2>
                   <p className="text-muted-foreground">
-                    Describe the resources you want to create in the root module. The system will validate them against the available child module resources. If resources don't match, an error will be shown.
+                    Describe the resources you want to create in the root module. The system will validate them against the available child module resources.
                   </p>
                 </div>
 
@@ -2442,12 +2476,19 @@ export default function TerraformWorkflow() {
 
             {/* Step 7: Review & Edit (for non-aggregated-root) or Step 8: Review & Edit (for aggregated-root) */}
             {((currentStep === 7 && moduleApproach !== 'aggregated-root') || (currentStep === 8 && moduleApproach === 'aggregated-root')) && (
-              <>
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">Review & Edit</h2>
+                  <p className="text-muted-foreground">
+                    Review and edit your generated Terraform configuration files
+                  </p>
+                </div>
+
                 {generatedFiles && Array.isArray(generatedFiles) && generatedFiles.length > 0 ? (
                   <div className="space-y-6">
-                    <CodeEditor 
-                      files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
-                      onFileChange={handleFileChange} 
+                    <CodeEditor
+                      files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))}
+                      onFileChange={handleFileChange}
                     />
                     <div className="flex gap-4 justify-center">
                       <Button
@@ -2499,9 +2540,9 @@ export default function TerraformWorkflow() {
                     )}
                   </div>
                 )}
-              </>
+              </div>
             )}
-            
+
             {/* Step 8: Activities (non-aggregated-root) or Step 9: Activities (aggregated-root) */}
             {((currentStep === 8 && moduleApproach !== 'aggregated-root') || (currentStep === 9 && moduleApproach === 'aggregated-root')) && (
               <div className="space-y-6">
@@ -2511,18 +2552,52 @@ export default function TerraformWorkflow() {
                     Run security scans, validate best practices, analyze costs, and generate architecture diagrams
                   </p>
                 </div>
-                <ActivityPanel 
+
+                {/* Code Editor - On top (like Kubernetes) */}
+                <div className="rounded-lg border bg-card">
+                  <div className="px-4 py-3 border-b bg-muted/50">
+                    <h3 className="text-sm font-medium flex items-center gap-2">
+                      <FileCode className="w-4 h-4" />
+                      Generated Code
+                    </h3>
+                  </div>
+                  {generatedFiles && Array.isArray(generatedFiles) && generatedFiles.length > 0 ? (
+                    <CodeEditor
+                      files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))}
+                      onFileChange={handleFileChange}
+                    />
+                  ) : (
+                    <div className="p-8 text-center text-muted-foreground">
+                      <FileCode className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                      <p>No files generated yet</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Activity Panel - Below code editor */}
+                <ActivityPanel
                   sessionId={sessionId}
                   workflowType="terraform"
                   moduleApproach={moduleApproach}
                   onScanComplete={() => {
                     setScanCompleted(true);
+                    // Refresh files after scan/fix to show updated code
+                    refetchFiles();
                     toast({
                       title: "Activity Complete",
                       description: "Activity completed successfully.",
                     });
                   }}
+                  onFixesApproved={() => {
+                    // Refresh files after security fixes are approved
+                    refetchFiles();
+                    toast({
+                      title: "Fixes Applied",
+                      description: "Security fixes have been applied. Code editor updated.",
+                    });
+                  }}
                 />
+
                 <div className="flex gap-4 justify-center">
                   <Button
                     variant="outline"
@@ -2534,7 +2609,7 @@ export default function TerraformWorkflow() {
                     onClick={async () => {
                       const nextStep = moduleApproach === 'aggregated-root' ? 10 : 9;
                       setCurrentStep(nextStep);
-                      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+                      await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
                         currentStep: nextStep.toString()
                       });
                     }}

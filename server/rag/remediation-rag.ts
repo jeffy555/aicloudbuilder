@@ -1,7 +1,7 @@
 import { loadTemplatesFromDirectory, type RemediationTemplate } from './template-loader';
 import { generateEmbedding, queryVectorStore, addToVectorStore, initializeVectorStore } from './vector-store';
 import { calculateConfidence } from './confidence-scorer';
-import { fixSnippetStore, type FixSnippet, type FixSnippetResult } from './fix-snippet-store';
+import { fixSnippetStore, type FixSnippet, type FixSnippetResult, type IaCFramework } from './fix-snippet-store';
 import { performanceLogger } from '../utils/performance-logger';
 import { featureFlags } from '../middleware/feature-flags';
 import { checkovFetcher } from './checkov-fetcher';
@@ -192,17 +192,24 @@ export class RemediationRAGService {
   /**
    * Find remediation fix snippet for a check
    * Now uses fix snippets instead of templates
+   * @param checkId - Checkov check ID
+   * @param checkName - Human-readable check name
+   * @param guideline - Checkov guideline URL or description
+   * @param resourceType - Resource type (Terraform resource or K8s kind)
+   * @param framework - IaC framework: 'terraform' or 'kubernetes'
    */
   async findRemediation(
     checkId: string,
     checkName: string,
     guideline: string,
-    resourceType: string
+    resourceType: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<RemediationResult | null> {
     // Track performance
     const perfId = performanceLogger.start('findRemediation', {
       checkId,
       resourceType,
+      framework,
     });
 
     try {
@@ -211,9 +218,9 @@ export class RemediationRAGService {
         await this.initialize();
       }
 
-      // Tier 1: Exact match in fix snippet store (fast lookup)
+      // Tier 1: Exact match in fix snippet store (fast lookup, framework-aware)
       const exactMatchPerfId = performanceLogger.start('findRemediation.exactMatch');
-      const exactMatch = await fixSnippetStore.getByKey(checkId, resourceType);
+      const exactMatch = await fixSnippetStore.getByKey(checkId, resourceType, framework);
       performanceLogger.end(exactMatchPerfId, !!exactMatch);
 
       if (exactMatch && !exactMatch.deprecated && exactMatch.confidence >= 0.7) {
@@ -242,7 +249,14 @@ export class RemediationRAGService {
             const snippet = r.metadata.snippet as FixSnippet | undefined;
             const template = r.metadata.template as RemediationTemplate | undefined;
 
+            // Filter by framework - only return snippets matching the requested framework
             if (snippet && !snippet.deprecated && snippet.confidence >= 0.6) {
+              // Skip snippets from different frameworks
+              const snippetFramework = snippet.framework || 'terraform';
+              if (snippetFramework !== framework) {
+                return null;
+              }
+
               const baseConfidence = snippet.confidence;
               const similarityBoost = r.score * 0.2;
               const successBoost = Math.min(0.1, snippet.successCount * 0.01);
@@ -254,7 +268,8 @@ export class RemediationRAGService {
                 score: r.score,
                 type: 'snippet' as const,
               };
-            } else if (template) {
+            } else if (template && framework === 'terraform') {
+              // Templates are only for Terraform (backward compatibility)
               const confidence = calculateConfidence(checkId, template, r.score);
               return {
                 template,
@@ -315,16 +330,20 @@ export class RemediationRAGService {
         };
       }
 
-      // Tier 4: Checkov native fetch (feature-flag guarded)
+      // Tier 4: Checkov native fetch (feature-flag guarded, framework-aware)
       if (featureFlags.checkovNativeFetch) {
-        const checkovPerfId = performanceLogger.start('findRemediation.checkovFetch', { checkId, resourceType });
+        const checkovPerfId = performanceLogger.start('findRemediation.checkovFetch', { checkId, resourceType, framework });
         try {
-          const inferred = await checkovFetcher.fetchRemediation(checkId, resourceType);
+          // Pass framework to Checkov fetcher for appropriate path selection
+          const inferred = await checkovFetcher.fetchRemediation(checkId, resourceType, framework);
           if (inferred) {
+            // Determine cloud provider based on framework
+            const cloudProvider = framework === 'kubernetes' ? 'kubernetes' : 'azure';
             const storedSnippet = await fixSnippetStore.store({
               checkId,
               resourceType,
-              cloudProvider: 'azure',
+              cloudProvider,
+              framework,
               fixSnippet: inferred.fixSnippet,
               context: `Inferred from Checkov: ${inferred.attributeName} = ${JSON.stringify(inferred.expectedValue)}`,
               guideline,
@@ -339,12 +358,12 @@ export class RemediationRAGService {
               updatedAt: new Date(),
             });
             performanceLogger.end(checkovPerfId, true);
-            console.log(`✅ Checkov native fetch succeeded for ${checkId}`);
+            console.log(`✅ Checkov native fetch succeeded for ${checkId} (${framework})`);
             performanceLogger.end(perfId, true);
             return {
               snippet: storedSnippet,
               confidence: inferred.confidence,
-              matchReason: 'Checkov native remediation (inferred from source)',
+              matchReason: `Checkov native remediation (inferred from ${framework} source)`,
               source: 'retrieved',
             };
           }
@@ -508,6 +527,7 @@ export class RemediationRAGService {
       Check ID: ${snippet.checkId}
       Resource Type: ${snippet.resourceType}
       Cloud Provider: ${snippet.cloudProvider}
+      Framework: ${snippet.framework || 'terraform'}
       Guideline: ${snippet.guideline}
       Fix Snippet: ${snippet.fixSnippet}
       Context: ${snippet.context}
@@ -516,6 +536,7 @@ export class RemediationRAGService {
 
   /**
    * Store a generated fix snippet in the database
+   * @param framework - IaC framework: 'terraform' or 'kubernetes'
    */
   async storeGeneratedFix(
     checkId: string,
@@ -523,16 +544,17 @@ export class RemediationRAGService {
     cloudProvider: string,
     fixSnippet: string,
     context: string,
-    guideline: string
+    guideline: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<FixSnippet> {
     if (!this.initialized) {
       await this.initialize();
     }
 
-    // Check if already exists
-    const existing = await fixSnippetStore.getByKey(checkId, resourceType);
+    // Check if already exists (framework-aware)
+    const existing = await fixSnippetStore.getByKey(checkId, resourceType, framework);
     if (existing) {
-      console.log(`⚠️  Fix snippet already exists for ${checkId}:${resourceType}, skipping store`);
+      console.log(`⚠️  Fix snippet already exists for ${checkId}:${resourceType}:${framework}, skipping store`);
       return existing;
     }
 
@@ -541,6 +563,7 @@ export class RemediationRAGService {
       checkId,
       resourceType,
       cloudProvider,
+      framework,
       fixSnippet,
       context,
       guideline,
@@ -558,7 +581,7 @@ export class RemediationRAGService {
     // Index in vector DB
     await this.indexFixSnippet(snippet);
 
-    console.log(`💾 Stored generated fix snippet: ${checkId} → ${resourceType} (confidence: 0.6)`);
+    console.log(`💾 Stored generated fix snippet: ${checkId} → ${resourceType} (${framework}, confidence: 0.6)`);
 
     return snippet;
   }
@@ -579,6 +602,7 @@ export class RemediationRAGService {
           checkId: snippet.checkId,
           resourceType: snippet.resourceType,
           cloudProvider: snippet.cloudProvider,
+          framework: snippet.framework || 'terraform',
           confidence: snippet.confidence,
           successCount: snippet.successCount,
           source: snippet.source,

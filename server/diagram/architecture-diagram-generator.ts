@@ -164,7 +164,8 @@ function generateBaseMermaidSyntax(analysis: ArchitectureAnalysis): string {
     const nameLower = c.name.toLowerCase();
     const typeLower = c.type.toLowerCase();
     return nameLower.includes('aks') || nameLower.includes('eks') || nameLower.includes('gke') ||
-           typeLower.includes('kubernetes') || typeLower.includes('aks') || 
+           nameLower.includes('kubernetes') ||
+           typeLower.includes('kubernetes') || typeLower.includes('aks') ||
            typeLower.includes('eks') || typeLower.includes('gke') ||
            c.metadata?.serviceType === 'Kubernetes';
   });
@@ -178,39 +179,34 @@ function generateBaseMermaidSyntax(analysis: ArchitectureAnalysis): string {
   });
 
   // Detect services that run inside clusters (based on relationships or metadata)
+  const clusterNames = new Set(kubernetesClusters.map(c => c.name));
   const servicesInCluster = new Set<string>();
   analysis.relationships.forEach(rel => {
     // If a service is connected to/deployed on a cluster, it's inside
     kubernetesClusters.forEach(cluster => {
       if (rel.to === cluster.name || rel.from === cluster.name) {
-        if (rel.type.includes('deploy') || rel.type.includes('run') || 
+        if (rel.type.includes('deploy') || rel.type.includes('run') ||
             rel.type.includes('inside') || rel.type.includes('within')) {
-          if (rel.to === cluster.name) {
-            servicesInCluster.add(rel.from);
-          } else {
-            servicesInCluster.add(rel.to);
+          // Add the non-cluster end of the relationship, but never add a cluster itself
+          const candidate = rel.to === cluster.name ? rel.from : rel.to;
+          if (!clusterNames.has(candidate)) {
+            servicesInCluster.add(candidate);
           }
         }
       }
     });
   });
 
-  // Also check for common in-cluster services
-  analysis.components.forEach(c => {
-    const nameLower = c.name.toLowerCase();
-    if (nameLower.includes('prometheus') || nameLower.includes('grafana') || 
-        nameLower.includes('fluentbit') || nameLower.includes('fluentd')) {
-      // Check if it's related to a cluster
-      const relatedToCluster = analysis.relationships.some(rel => {
-        const clusterNames = kubernetesClusters.map(cl => cl.name);
-        return (rel.from === c.name && clusterNames.includes(rel.to)) ||
-               (rel.to === c.name && clusterNames.includes(rel.from));
-      });
-      if (relatedToCluster || kubernetesClusters.length > 0) {
+  // Place components inside clusters based on the AI-provided deploymentContext.
+  // The analyzer classifies each component as in-cluster, external, or managed-service
+  // from the user's requirements — no hardcoded tool lists needed here.
+  if (kubernetesClusters.length > 0) {
+    analysis.components.forEach(c => {
+      if (c.metadata?.deploymentContext === 'in-cluster') {
         servicesInCluster.add(c.name);
       }
-    }
-  });
+    });
+  }
 
   // Group components by cloud provider
   const componentsByProvider: Record<string, ArchitectureComponent[]> = {
@@ -296,8 +292,9 @@ function generateBaseMermaidSyntax(analysis: ArchitectureAnalysis): string {
         ) || clusterNodes.length <= kubernetesClusters.length; // If few nodes, assume they belong
       });
       
+      const nodesSubgraphId = `${clusterId}_Nodes`;
       if (nodesInThisCluster.length > 0) {
-        syntax += `        subgraph Nodes["Nodes"]\n`;
+        syntax += `        subgraph ${nodesSubgraphId}["Nodes"]\n`;
         nodesInThisCluster.forEach(node => {
           const nodeId = nodeIds.get(node.name) || getNodeId(node.name);
           const nodeLabel = getNodeLabel(node);
@@ -310,27 +307,29 @@ function generateBaseMermaidSyntax(analysis: ArchitectureAnalysis): string {
         const nodeMatch = clusterDesc.match(/(\d+)\s*node/i);
         if (nodeMatch) {
           const nodeCount = parseInt(nodeMatch[1]);
-          syntax += `        subgraph Nodes["Nodes (${nodeCount})"]\n`;
+          syntax += `        subgraph ${nodesSubgraphId}["Nodes (${nodeCount})"]\n`;
           for (let i = 1; i <= Math.min(nodeCount, 3); i++) {
-            syntax += `            Node${i}["Node ${i}"]\n`;
+            syntax += `            ${clusterId}_Node${i}["Node ${i}"]\n`;
           }
           if (nodeCount > 3) {
-            syntax += `            NodeMore["... ${nodeCount - 3} more"]\n`;
+            syntax += `            ${clusterId}_NodeMore["... ${nodeCount - 3} more"]\n`;
           }
           syntax += `        end\n`;
         }
       }
       
-      // Add services inside cluster
+      // Add services inside cluster (exclude the cluster component itself to prevent cycles)
       const servicesInThisCluster = inClusterServices.filter(service => {
-        return analysis.relationships.some(rel => 
+        if (service.name === cluster.name) return false;
+        return analysis.relationships.some(rel =>
           (rel.from === service.name && rel.to === cluster.name) ||
           (rel.to === service.name && rel.from === cluster.name)
         ) || servicesInCluster.has(service.name);
       });
-      
+
       if (servicesInThisCluster.length > 0) {
-        syntax += `        subgraph Services["Services"]\n`;
+        const servicesSubgraphId = `${clusterId}_Services`;
+        syntax += `        subgraph ${servicesSubgraphId}["Services"]\n`;
         servicesInThisCluster.forEach(service => {
           const serviceId = nodeIds.get(service.name) || getNodeId(service.name);
           const serviceLabel = getNodeLabel(service);

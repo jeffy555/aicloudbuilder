@@ -42,28 +42,29 @@ export function extractComponents(analysis: ArchitectureAnalysis): ExtractedComp
   // Extract each component
   analysis.components.forEach(component => {
     const dependencies = dependencyMap.get(component.name) || [];
-    
-    // Determine code type based on component type and provider
-    let codeType: ExtractedComponent['codeType'] = 'terraform';
-    
-    if (component.type.toLowerCase().includes('kubernetes') || 
-        component.name.toLowerCase().includes('aks') ||
-        component.name.toLowerCase().includes('eks') ||
-        component.name.toLowerCase().includes('gke')) {
-      codeType = 'kubernetes';
-    } else if (component.name.toLowerCase().includes('helm') ||
-               component.name.toLowerCase().includes('chart')) {
-      codeType = 'helm';
-    } else if (component.cloudProvider === 'azure' && 
-               (component.type.toLowerCase().includes('arm') || 
-                component.category.toLowerCase().includes('template'))) {
-      codeType = 'arm';
-    } else if (component.isThirdParty && 
-               (component.name.toLowerCase().includes('prometheus') ||
-                component.name.toLowerCase().includes('grafana') ||
-                component.name.toLowerCase().includes('istio') ||
-                component.name.toLowerCase().includes('argocd'))) {
-      codeType = 'yaml';
+
+    // Primary: use the codeType the AI determined from the requirements.
+    // Fallback: minimal structural inference only when the AI omits the field.
+    let codeType: ExtractedComponent['codeType'];
+
+    if (component.metadata?.codeType) {
+      codeType = component.metadata.codeType;
+    } else {
+      // Fallback inference — no hardcoded tool lists, only structural signals
+      const nameLower = component.name.toLowerCase();
+      const typeLower = component.type.toLowerCase();
+
+      if (typeLower.includes('kubernetes') ||
+          nameLower.includes('aks') || nameLower.includes('eks') || nameLower.includes('gke') ||
+          nameLower.includes('kubernetes')) {
+        codeType = 'kubernetes';
+      } else if (nameLower.includes('helm') || nameLower.includes('chart')) {
+        codeType = 'helm';
+      } else if (component.metadata?.deploymentContext === 'in-cluster') {
+        codeType = 'yaml';
+      } else {
+        codeType = 'terraform';
+      }
     }
     
     const extractedComponent: ExtractedComponent = {

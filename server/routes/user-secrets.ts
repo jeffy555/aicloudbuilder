@@ -1,45 +1,88 @@
 import type { Express } from "express";
-import { requireAuth, type AuthenticatedRequest } from "../middleware/auth";
-import { bitwardenService } from "../services/bitwarden-service";
+import { requireAuth, optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { bitwardenService, isBitwardenConfigured } from "../services/bitwarden-service";
+
+/**
+ * Check if provider credentials are available via environment variables
+ */
+function getEnvFallbackConfig() {
+  const hasGithubEnv = !!(process.env.GITHUB_TOKEN && process.env.GITHUB_OWNER);
+  const hasAzureDevOpsEnv = !!(process.env.AZURE_DEVOPS_ORG && process.env.AZURE_DEVOPS_PAT && process.env.AZURE_DEVOPS_PROJECT);
+  const hasAzureCloudEnv = !!(process.env.AZURE_CLIENT_ID && process.env.AZURE_TENANT_ID && process.env.AZURE_SUBSCRIPTION_ID);
+
+  return {
+    hasGithub: hasGithubEnv,
+    hasAzureDevOps: hasAzureDevOpsEnv,
+    hasAzureCloud: hasAzureCloudEnv,
+    hasAws: false,
+    hasGcp: false,
+    azureDevOps: hasAzureDevOpsEnv ? {
+      org: process.env.AZURE_DEVOPS_ORG!,
+      project: process.env.AZURE_DEVOPS_PROJECT!,
+      userId: process.env.AZURE_DEVOPS_USER_ID || '',
+    } : null,
+    azureCloud: hasAzureCloudEnv ? {
+      clientId: process.env.AZURE_CLIENT_ID!,
+      tenantId: process.env.AZURE_TENANT_ID!,
+      subscriptionId: process.env.AZURE_SUBSCRIPTION_ID!,
+    } : null,
+    github: hasGithubEnv ? {
+      owner: process.env.GITHUB_OWNER!,
+    } : null,
+    aws: null,
+    gcp: null,
+  };
+}
 
 export function registerUserSecretsRoutes(app: Express) {
   /**
    * GET /api/user/secrets
    * Retrieve user's configured secrets (metadata only)
+   * Uses optionalAuth so env var fallback works without login
    */
-  app.get("/api/user/secrets", requireAuth, async (req: AuthenticatedRequest, res) => {
+  app.get("/api/user/secrets", optionalAuth, async (req: AuthenticatedRequest, res) => {
     try {
-      const userId = req.userId!;
-      const secrets = await bitwardenService.getAllUserSecrets(userId);
-      
+      const userId = req.userId;
+      const envConfig = getEnvFallbackConfig();
+
+      // If user is authenticated and Bitwarden is configured, try Bitwarden first
+      let secrets: any = null;
+      if (userId && isBitwardenConfigured()) {
+        try {
+          secrets = await bitwardenService.getAllUserSecrets(userId);
+        } catch (error: any) {
+          console.warn("⚠️  Bitwarden lookup failed, falling back to env vars:", error?.message);
+        }
+      }
+
+      // Merge: Bitwarden secrets take priority, env vars as fallback
       res.json({
-        hasAzureDevOps: !!secrets.azureDevOps,
-        hasAzureCloud: !!secrets.azureCloud,
-        hasGithub: !!secrets.github,
-        hasAws: !!secrets.aws,
-        hasGcp: !!secrets.gcp,
-        // Don't return sensitive values, maybe return partial info if needed
-        azureDevOps: secrets.azureDevOps ? {
+        hasAzureDevOps: !!(secrets?.azureDevOps) || envConfig.hasAzureDevOps,
+        hasAzureCloud: !!(secrets?.azureCloud) || envConfig.hasAzureCloud,
+        hasGithub: !!(secrets?.github) || envConfig.hasGithub,
+        hasAws: !!(secrets?.aws) || envConfig.hasAws,
+        hasGcp: !!(secrets?.gcp) || envConfig.hasGcp,
+        azureDevOps: secrets?.azureDevOps ? {
           org: secrets.azureDevOps.org,
           project: secrets.azureDevOps.project,
           userId: secrets.azureDevOps.userId,
-        } : null,
-        azureCloud: secrets.azureCloud ? {
+        } : envConfig.azureDevOps,
+        azureCloud: secrets?.azureCloud ? {
           clientId: secrets.azureCloud.clientId,
           tenantId: secrets.azureCloud.tenantId,
           subscriptionId: secrets.azureCloud.subscriptionId,
-        } : null,
-        github: secrets.github ? {
+        } : envConfig.azureCloud,
+        github: secrets?.github ? {
           owner: secrets.github.owner,
-        } : null,
-        aws: secrets.aws ? {
+        } : envConfig.github,
+        aws: secrets?.aws ? {
           accessKeyId: secrets.aws.accessKeyId,
           region: secrets.aws.region,
-        } : null,
-        gcp: secrets.gcp ? {
+        } : envConfig.aws,
+        gcp: secrets?.gcp ? {
           projectId: secrets.gcp.projectId,
           region: secrets.gcp.region,
-        } : null,
+        } : envConfig.gcp,
       });
     } catch (error: any) {
       console.error("Error getting user secrets:", error);

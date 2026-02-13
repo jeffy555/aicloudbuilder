@@ -9,12 +9,15 @@ import { createHash } from 'crypto';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 
+export type IaCFramework = 'terraform' | 'kubernetes';
+
 export interface FixSnippet {
-  id: string;                    // Unique ID (hash of checkId + resourceType)
-  checkId: string;               // CKV_AZURE_59
-  resourceType: string;          // azurerm_storage_account
-  cloudProvider: string;         // azure | aws | gcp
-  fixSnippet: string;            // "allow_nested_items_to_be_public = false"
+  id: string;                    // Unique ID (hash of checkId + resourceType + framework)
+  checkId: string;               // CKV_AZURE_59, CKV_K8S_20
+  resourceType: string;          // azurerm_storage_account, Deployment
+  cloudProvider: string;         // azure | aws | gcp | kubernetes
+  framework: IaCFramework;       // terraform | kubernetes - IaC framework type
+  fixSnippet: string;            // HCL or YAML snippet
   context: string;               // Full resource block example
   guideline: string;             // Checkov guideline
   source: 'retrieved' | 'generated' | 'human';
@@ -47,10 +50,10 @@ class FixSnippetStore {
   }
 
   /**
-   * Generate unique ID from checkId and resourceType
+   * Generate unique ID from checkId, resourceType, and framework
    */
-  private generateId(checkId: string, resourceType: string): string {
-    const key = `${checkId}:${resourceType}`;
+  private generateId(checkId: string, resourceType: string, framework: IaCFramework = 'terraform'): string {
+    const key = `${checkId}:${resourceType}:${framework}`;
     return createHash('sha256').update(key).digest('hex').substring(0, 16);
   }
 
@@ -71,11 +74,15 @@ class FixSnippetStore {
       const data = await fs.readFile(this.persistenceFile, 'utf-8');
       const snippets: FixSnippet[] = JSON.parse(data);
 
-      // Convert date strings back to Date objects
+      // Convert date strings back to Date objects and ensure framework field exists
       for (const snippet of snippets) {
         snippet.lastUsed = new Date(snippet.lastUsed);
         snippet.createdAt = new Date(snippet.createdAt);
         snippet.updatedAt = new Date(snippet.updatedAt);
+        // Backward compatibility: default framework to 'terraform' for existing snippets
+        if (!snippet.framework) {
+          snippet.framework = 'terraform';
+        }
         this.snippets.set(snippet.id, snippet);
       }
 
@@ -128,10 +135,10 @@ class FixSnippetStore {
   }
 
   /**
-   * Get snippet by checkId + resourceType (exact match)
+   * Get snippet by checkId + resourceType + framework (exact match)
    */
-  async getByKey(checkId: string, resourceType: string): Promise<FixSnippet | null> {
-    const id = this.generateId(checkId, resourceType);
+  async getByKey(checkId: string, resourceType: string, framework: IaCFramework = 'terraform'): Promise<FixSnippet | null> {
+    const id = this.generateId(checkId, resourceType, framework);
     return this.get(id);
   }
 
@@ -143,13 +150,17 @@ class FixSnippetStore {
       await this.loadFromDisk();
     }
 
-    // Generate ID if not provided
-    const id = snippet.id || this.generateId(snippet.checkId, snippet.resourceType);
+    // Default framework to 'terraform' for backward compatibility
+    const framework = snippet.framework || 'terraform';
+
+    // Generate ID if not provided (includes framework)
+    const id = snippet.id || this.generateId(snippet.checkId, snippet.resourceType, framework);
 
     // Create full snippet
     const fullSnippet: FixSnippet = {
       ...snippet,
       id,
+      framework,
       createdAt: snippet.createdAt || new Date(),
       updatedAt: new Date()
     };
@@ -224,6 +235,16 @@ class FixSnippetStore {
   }
 
   /**
+   * Get snippets by framework (terraform or kubernetes)
+   */
+  async getByFramework(framework: IaCFramework): Promise<FixSnippet[]> {
+    if (!this.isLoaded) {
+      await this.loadFromDisk();
+    }
+    return Array.from(this.snippets.values()).filter(s => s.framework === framework && !s.deprecated);
+  }
+
+  /**
    * Delete snippet
    */
   async delete(id: string): Promise<void> {
@@ -256,9 +277,10 @@ class FixSnippetStore {
     deprecated: number;
     bySource: { [key: string]: number };
     byCloudProvider: { [key: string]: number };
+    byFramework: { [key: string]: number };
   } {
     const snippets = Array.from(this.snippets.values());
-    
+
     return {
       total: snippets.length,
       active: snippets.filter(s => !s.deprecated).length,
@@ -270,13 +292,18 @@ class FixSnippetStore {
       byCloudProvider: snippets.reduce((acc, s) => {
         acc[s.cloudProvider] = (acc[s.cloudProvider] || 0) + 1;
         return acc;
+      }, {} as { [key: string]: number }),
+      byFramework: snippets.reduce((acc, s) => {
+        const framework = s.framework || 'terraform';
+        acc[framework] = (acc[framework] || 0) + 1;
+        return acc;
       }, {} as { [key: string]: number })
     };
   }
 }
 
 export const fixSnippetStore = new FixSnippetStore();
-export { FixSnippetStore };
+export { FixSnippetStore, IaCFramework };
 
 
 

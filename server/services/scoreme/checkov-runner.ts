@@ -17,7 +17,7 @@ export interface CheckovRunResult {
 }
 
 export async function runCheckovOnFiles(
-  type: "terraform" | "kubernetes" | "dockerfile",
+  type: "terraform" | "kubernetes" | "dockerfile" | "automation",
   files: Array<{ path: string; content: string }>
 ): Promise<CheckovRunResult> {
   const checks: CheckovCheck[] = [];
@@ -65,24 +65,155 @@ export async function runCheckovOnFiles(
         });
       }
     } else if (type === "dockerfile") {
-      if (/FROM\s+(\S+):latest/i.test(file.content)) {
+      // Check for :latest tag usage
+      if (/FROM\s+\S+:latest/i.test(file.content)) {
         checks.push({
           checkId: "CKV_DOCKER_1",
-          checkName: "Using latest tag",
+          checkName: "Using :latest tag",
           severity: "medium",
           file: file.path,
-          message: "Dockerfile uses :latest, which is not deterministic.",
-          guideline: "Pin to a specific version for reproducible builds.",
+          message: "Dockerfile uses :latest tag which is not reproducible.",
+          guideline: "Pin to a specific version tag for reproducible builds.",
         });
       }
-      if (!/USER\s+\w+/i.test(file.content)) {
+      // Check for running as root
+      if (!/USER\s+\S+/i.test(file.content) || /USER\s+root/i.test(file.content)) {
         checks.push({
           checkId: "CKV_DOCKER_2",
-          checkName: "Runs as root",
+          checkName: "Container runs as root",
+          severity: "high",
+          file: file.path,
+          message: "Dockerfile does not specify a non-root user.",
+          guideline: "Add USER directive with a non-root user for security.",
+        });
+      }
+      // Check for HEALTHCHECK
+      if (!/HEALTHCHECK/i.test(file.content)) {
+        checks.push({
+          checkId: "CKV_DOCKER_3",
+          checkName: "Missing HEALTHCHECK",
           severity: "low",
           file: file.path,
-          message: "Dockerfile lacks USER instruction and may run as root.",
+          message: "Dockerfile does not define a HEALTHCHECK instruction.",
+          guideline: "Add HEALTHCHECK to enable container health monitoring.",
         });
+      }
+    } else if (type === "automation") {
+      // Check for hardcoded credentials (all script types)
+      if (/(?:password|api_key|secret|token|apikey|auth_token)\s*[=:]\s*["'][^"']{8,}["']/i.test(file.content)) {
+        checks.push({
+          checkId: "CKV_SCRIPT_1",
+          checkName: "Hardcoded credentials",
+          severity: "critical",
+          file: file.path,
+          message: "Script contains potential hardcoded credentials.",
+          guideline: "Use environment variables or secret management for credentials.",
+        });
+      }
+
+      // Shell-specific checks
+      if (file.path.endsWith(".sh")) {
+        // Check for dangerous commands
+        if (/\beval\s+["'\$]|\bexec\s+\$/.test(file.content)) {
+          checks.push({
+            checkId: "CKV_SCRIPT_2",
+            checkName: "Dangerous command usage",
+            severity: "high",
+            file: file.path,
+            message: "Script uses eval or exec with variables which can be dangerous.",
+            guideline: "Avoid eval/exec with untrusted input; validate inputs if required.",
+          });
+        }
+
+        // Check for missing error handling
+        if (!/set\s+-[euo]|set\s+-o\s+(errexit|pipefail|nounset)/.test(file.content)) {
+          checks.push({
+            checkId: "CKV_SCRIPT_3",
+            checkName: "Missing error handling",
+            severity: "medium",
+            file: file.path,
+            message: "Shell script does not enable error handling (set -e).",
+            guideline: "Add 'set -e' or 'set -euo pipefail' to fail on errors.",
+          });
+        }
+
+        // Check for curl/wget without SSL verification
+        if (/curl\s+[^|;]*-k|curl\s+[^|;]*--insecure|wget\s+[^|;]*--no-check-certificate/.test(file.content)) {
+          checks.push({
+            checkId: "CKV_SCRIPT_4",
+            checkName: "Insecure HTTP request",
+            severity: "high",
+            file: file.path,
+            message: "Script disables SSL certificate verification.",
+            guideline: "Remove -k/--insecure flags to enable SSL verification.",
+          });
+        }
+      }
+
+      // PowerShell-specific checks
+      if (file.path.endsWith(".ps1")) {
+        // Check for insecure TLS settings
+        if (/\[System\.Net\.ServicePointManager\]::ServerCertificateValidationCallback/.test(file.content)) {
+          checks.push({
+            checkId: "CKV_SCRIPT_5",
+            checkName: "SSL validation disabled",
+            severity: "high",
+            file: file.path,
+            message: "PowerShell script disables SSL certificate validation.",
+            guideline: "Remove custom certificate validation callbacks.",
+          });
+        }
+
+        // Check for Invoke-Expression with variables
+        if (/Invoke-Expression\s+\$/.test(file.content)) {
+          checks.push({
+            checkId: "CKV_SCRIPT_6",
+            checkName: "Invoke-Expression with variable",
+            severity: "high",
+            file: file.path,
+            message: "Using Invoke-Expression with variables can lead to code injection.",
+            guideline: "Use direct command invocation instead of Invoke-Expression.",
+          });
+        }
+      }
+
+      // Python-specific checks
+      if (file.path.endsWith(".py")) {
+        // Check for subprocess with shell=True
+        if (/subprocess\.\w+\([^)]*shell\s*=\s*True/.test(file.content)) {
+          checks.push({
+            checkId: "CKV_SCRIPT_7",
+            checkName: "Subprocess shell injection risk",
+            severity: "high",
+            file: file.path,
+            message: "Using subprocess with shell=True can lead to shell injection.",
+            guideline: "Use subprocess with shell=False and pass arguments as list.",
+          });
+        }
+
+        // Check for pickle usage (insecure deserialization)
+        if (/import\s+pickle|from\s+pickle\s+import|\.load\(|\.loads\(/.test(file.content) && /pickle/.test(file.content)) {
+          checks.push({
+            checkId: "CKV_SCRIPT_8",
+            checkName: "Insecure deserialization",
+            severity: "high",
+            file: file.path,
+            message: "Using pickle for deserialization can lead to arbitrary code execution.",
+            guideline: "Use safe serialization formats like JSON instead of pickle.",
+          });
+        }
+
+        // Check for disabled SSL verification in requests
+        if (/verify\s*=\s*False/.test(file.content)) {
+          checks.push({
+            checkId: "CKV_SCRIPT_9",
+            checkName: "SSL verification disabled",
+            severity: "high",
+            file: file.path,
+            message: "HTTP request disables SSL certificate verification.",
+            guideline: "Remove verify=False to enable SSL verification.",
+          });
+        }
       }
     }
   }

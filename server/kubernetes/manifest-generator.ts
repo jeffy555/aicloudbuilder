@@ -124,8 +124,13 @@ ACCEPTABLE REQUESTS:
 - Ingress, NetworkPolicies
 - Jobs, CronJobs, StatefulSets, DaemonSets
 - ServiceAccounts, Roles, RoleBindings
+- API Gateways (Kong, Istio, Gateway API resources)
+- Event-driven autoscaling (KEDA ScaledObjects)
+- Message brokers (Kafka with Strimzi/Confluent CRDs)
+- Service mesh configurations (Istio VirtualServices, DestinationRules)
+- Custom Resource Definitions (CRDs) for operators
 - Helm charts (structure only, not full charts)
-- Kubernetes-native resources only
+- Multi-component architectures (frontend, backend, gateway, message queues)
 
 REJECT AND EXPLAIN IF REQUESTED:
 - Terraform code or HCL files
@@ -150,10 +155,12 @@ Requirements:
 7. Ensure proper label matching between Deployments and Services
 
 Output format:
-- Multiple resources separated by \`---\`
+- Generate ALL resources in a SINGLE YAML code block
+- Separate multiple resources with \`---\` on its own line
 - Each resource should be valid YAML
-- Include all necessary resources for the described workload
+- Include ALL necessary resources for EVERY component mentioned
 - Use consistent naming conventions
+- DO NOT split into multiple code blocks - use ONE code block with --- separators
 
 Example structure:
 \`\`\`yaml
@@ -213,12 +220,17 @@ Generate manifests for the user's description.`;
 
   const userPrompt = `Generate Kubernetes manifests for: ${description}
 
+IMPORTANT: Generate ALL components mentioned in the request. Do not skip any component.
+
 Requirements:
 ${options.includeProbes !== false ? '- Include liveness and readiness probes' : ''}
 ${options.includeResourceLimits !== false ? '- Include resource requests and limits' : ''}
 ${options.includeSecurityContext !== false ? '- Include security contexts' : ''}
+- Generate EVERY component explicitly mentioned (frontend, backend, gateway, kafka, KEDA, etc.)
+- For each component, generate all necessary resources (Deployment, Service, ConfigMap, CRDs, etc.)
+- Use appropriate CRDs for operators (Kong, KEDA, Kafka/Strimzi, etc.)
 
-Generate complete, production-ready manifests.`;
+Generate complete, production-ready manifests for ALL requested components.`;
 
   try {
     console.log('\n🤖 Calling OpenAI API...');
@@ -229,11 +241,17 @@ Generate complete, production-ready manifests.`;
         { role: 'user', content: userPrompt }
       ],
       temperature: 0.3,
-      max_tokens: 4000,
+      max_tokens: 12000, // Increased for complex multi-component requests (Kong, KEDA, Kafka, etc.)
     });
 
     const aiResponse = completion.choices[0]?.message?.content || '';
-    console.log(`✅ Received response (${aiResponse.length} characters)`);
+    const finishReason = completion.choices[0]?.finish_reason || 'unknown';
+    console.log(`✅ Received response (${aiResponse.length} characters, finish_reason: ${finishReason})`);
+
+    // Check if response was truncated
+    if (finishReason === 'length') {
+      console.warn('⚠️  Response was truncated due to max_tokens limit!');
+    }
 
     // Check if AI rejected the request or generated non-Kubernetes content
     const lowerResponse = aiResponse.toLowerCase();
@@ -245,16 +263,22 @@ Generate complete, production-ready manifests.`;
       throw new Error('The request appears to be for non-Kubernetes resources. Please use the appropriate workflow (Terraform for infrastructure, Automation for scripts).');
     }
 
-    // Extract YAML from markdown code blocks if present
+    // Extract YAML from ALL markdown code blocks (AI often generates multiple blocks)
     let yamlContent = aiResponse;
-    const yamlMatch = aiResponse.match(/```(?:yaml|yml)?\n([\s\S]*?)```/);
-    if (yamlMatch) {
-      yamlContent = yamlMatch[1];
+    const yamlBlockRegex = /```(?:yaml|yml)?\n([\s\S]*?)```/g;
+    const allMatches = [...aiResponse.matchAll(yamlBlockRegex)];
+
+    if (allMatches.length > 0) {
+      // Combine all YAML blocks with --- separator
+      yamlContent = allMatches.map(match => match[1].trim()).join('\n---\n');
+      console.log(`📄 Extracted ${allMatches.length} YAML code block(s) from response`);
     } else {
+      // No code blocks found - check if it's raw YAML or invalid content
       // Check if response contains Terraform code instead of YAML
       if (yamlContent.includes('resource "') || yamlContent.includes('provider "') || yamlContent.includes('terraform {')) {
         throw new Error('The AI generated Terraform code instead of Kubernetes manifests. Please ensure your request is for Kubernetes resources only.');
       }
+      console.log(`📄 No code blocks found, treating entire response as YAML`);
     }
 
     // Parse manifests
@@ -263,7 +287,9 @@ Generate complete, production-ready manifests.`;
     console.log(`✅ Parsed ${files.length} resource(s)`);
 
     // Validate that parsed resources are actually Kubernetes resources
+    // Include core K8s kinds + common CRDs (Kong, KEDA, Kafka, Istio, etc.)
     const validKubernetesKinds = [
+      // Core Kubernetes resources
       'Deployment', 'Service', 'Pod', 'ConfigMap', 'Secret', 'Namespace',
       'Ingress', 'DaemonSet', 'StatefulSet', 'Job', 'CronJob', 'ReplicaSet',
       'PersistentVolume', 'PersistentVolumeClaim', 'StorageClass',
@@ -271,11 +297,38 @@ Generate complete, production-ready manifests.`;
       'ServiceAccount', 'NetworkPolicy', 'HorizontalPodAutoscaler',
       'VerticalPodAutoscaler', 'PodDisruptionBudget', 'LimitRange',
       'ResourceQuota', 'Endpoint', 'EndpointSlice', 'IngressClass',
+      // Gateway API (Kong, Istio, etc.)
+      'Gateway', 'HTTPRoute', 'TCPRoute', 'UDPRoute', 'TLSRoute', 'GRPCRoute',
+      'GatewayClass', 'ReferenceGrant', 'BackendTLSPolicy',
+      // Kong Gateway CRDs
+      'KongPlugin', 'KongClusterPlugin', 'KongConsumer', 'KongIngress',
+      'TCPIngress', 'UDPIngress', 'KongConsumerGroup',
+      // KEDA (Kubernetes Event-driven Autoscaling)
+      'ScaledObject', 'ScaledJob', 'TriggerAuthentication', 'ClusterTriggerAuthentication',
+      // Kafka (Strimzi/Confluent)
+      'Kafka', 'KafkaTopic', 'KafkaUser', 'KafkaConnect', 'KafkaMirrorMaker',
+      'KafkaBridge', 'KafkaConnector', 'KafkaRebalance',
+      // Istio
+      'VirtualService', 'DestinationRule', 'ServiceEntry', 'Sidecar',
+      'AuthorizationPolicy', 'PeerAuthentication', 'RequestAuthentication',
+      // Cert-Manager
+      'Certificate', 'ClusterIssuer', 'Issuer', 'CertificateRequest',
+      // ArgoCD
+      'Application', 'AppProject', 'ApplicationSet',
+      // Prometheus/Monitoring
+      'ServiceMonitor', 'PodMonitor', 'PrometheusRule', 'Prometheus', 'Alertmanager',
+      // Custom/Generic
+      'CustomResourceDefinition', 'MutatingWebhookConfiguration', 'ValidatingWebhookConfiguration',
     ];
 
     const invalidResources = files.filter(f => {
       const kind = f.resourceType;
-      return !validKubernetesKinds.includes(kind) && !kind.toLowerCase().includes('kubernetes');
+      // Allow any kind that's in our list OR ends with common CRD patterns
+      const isValidKind = validKubernetesKinds.includes(kind) ||
+        kind.toLowerCase().includes('kubernetes') ||
+        kind.endsWith('List') ||  // List resources
+        /^[A-Z][a-zA-Z]*$/.test(kind); // Any PascalCase kind (likely a CRD)
+      return !isValidKind;
     });
 
     if (invalidResources.length > 0) {

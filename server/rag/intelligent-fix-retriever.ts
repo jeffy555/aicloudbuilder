@@ -10,13 +10,20 @@
  *
  * Each tier degrades gracefully — failures return null, never throw.
  * Feature flags control each tier independently for gradual rollout.
+ *
+ * Extended to support Kubernetes framework alongside Terraform.
  */
 
 import { remediationRAGService } from './remediation-rag';
 import { userFixPreferencesStore } from './user-fix-preferences-store';
 import { checkovFetcher } from './checkov-fetcher';
-import { fixSnippetStore } from './fix-snippet-store';
+import { fixSnippetStore, type IaCFramework } from './fix-snippet-store';
 import { featureFlags } from '../middleware/feature-flags';
+import OpenAI from 'openai';
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 export interface IntelligentFixResult {
   fix: string;
@@ -34,6 +41,7 @@ export class IntelligentFixRetriever {
   /**
    * Unified intelligent fix retrieval.
    * Tiers 1-2 are resolved here; Tiers 3-5 delegate to the existing RAG waterfall.
+   * @param framework - IaC framework: 'terraform' or 'kubernetes'
    */
   async getFixForCheck(
     checkId: string,
@@ -42,25 +50,32 @@ export class IntelligentFixRetriever {
     guideline: string,
     userId?: string,
     context?: string,
-    cloudProvider?: string
+    cloudProvider?: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<IntelligentFixResult | null> {
-    console.log(`🔍 Intelligent fix retrieval for ${checkId} (user: ${userId || 'anonymous'}, provider: ${cloudProvider || 'unknown'})`);
+    console.log(`🔍 Intelligent fix retrieval for ${checkId} (user: ${userId || 'anonymous'}, provider: ${cloudProvider || 'unknown'}, framework: ${framework})`);
 
     // TIER 1: User-specific preferences (authenticated users only)
     if (userId && featureFlags.userFixPreferences) {
-      const userFix = await this.getTier1UserPreference(userId, checkId, resourceType);
+      const userFix = await this.getTier1UserPreference(userId, checkId, resourceType, framework);
       if (userFix) return userFix;
     }
 
-    // TIER 2: Checkov native remediation
+    // TIER 2: Checkov native remediation (framework-aware)
     if (featureFlags.checkovNativeFetch) {
-      const checkovFix = await this.getTier2CheckovNative(checkId, resourceType, guideline, cloudProvider);
+      const checkovFix = await this.getTier2CheckovNative(checkId, resourceType, guideline, cloudProvider, framework);
       if (checkovFix) return checkovFix;
     }
 
     // TIER 3-5: Existing RAG system (global cache → semantic → template → Checkov fetch → AI)
-    const ragResult = await this.getTier3to5ExistingRAG(checkId, checkName, guideline, resourceType);
+    const ragResult = await this.getTier3to5ExistingRAG(checkId, checkName, guideline, resourceType, framework);
     if (ragResult) return ragResult;
+
+    // TIER 6: AI generation fallback (framework-aware)
+    if (featureFlags.kubernetesAIGeneration || framework === 'terraform') {
+      const aiResult = await this.generateFixWithAI(checkId, checkName, resourceType, guideline, context, framework);
+      if (aiResult) return aiResult;
+    }
 
     console.log(`❌ No fix found for ${checkId}`);
     return null;
@@ -74,13 +89,15 @@ export class IntelligentFixRetriever {
   private async getTier1UserPreference(
     userId: string,
     checkId: string,
-    resourceType: string
+    resourceType: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<IntelligentFixResult | null> {
     try {
+      // User preferences are keyed by checkId + resourceType (framework handled via resourceType uniqueness)
       const pref = await userFixPreferencesStore.getUserPreference(userId, checkId, resourceType);
 
       if (pref && pref.confidence >= 0.7) {
-        console.log(`✅ [TIER 1] User preference hit for ${checkId} (confidence: ${pref.confidence})`);
+        console.log(`✅ [TIER 1] User preference hit for ${checkId} (confidence: ${pref.confidence}, framework: ${framework})`);
 
         // Increment usage — also adjusts confidence (+0.05 on this success path)
         await userFixPreferencesStore.incrementUsage(pref.id, true);
@@ -114,16 +131,18 @@ export class IntelligentFixRetriever {
     checkId: string,
     resourceType: string,
     guideline: string,
-    cloudProvider?: string
+    cloudProvider?: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<IntelligentFixResult | null> {
     try {
-      const inferred = await checkovFetcher.fetchRemediation(checkId, resourceType);
+      // Pass framework to Checkov fetcher for appropriate path and inference logic
+      const inferred = await checkovFetcher.fetchRemediation(checkId, resourceType, framework);
 
       if (inferred && inferred.fixSnippet) {
-        console.log(`✅ [TIER 2] Checkov native remediation found (confidence: ${inferred.confidence})`);
+        console.log(`✅ [TIER 2] Checkov native remediation found (confidence: ${inferred.confidence}, framework: ${framework})`);
 
-        // Auto-store in global cache for future hits
-        await this.storeInGlobalCache(checkId, resourceType, inferred.fixSnippet, guideline, inferred.confidence, cloudProvider);
+        // Auto-store in global cache for future hits (framework-aware)
+        await this.storeInGlobalCache(checkId, resourceType, inferred.fixSnippet, guideline, inferred.confidence, cloudProvider, framework);
 
         return {
           fix: inferred.fixSnippet,
@@ -153,14 +172,17 @@ export class IntelligentFixRetriever {
     checkId: string,
     checkName: string,
     guideline: string,
-    resourceType: string
+    resourceType: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<IntelligentFixResult | null> {
     try {
+      // Pass framework to RAG service for framework-aware retrieval
       const ragResult = await remediationRAGService.findRemediation(
         checkId,
         checkName,
         guideline,
-        resourceType
+        resourceType,
+        framework
       );
 
       if (!ragResult) {
@@ -179,7 +201,7 @@ export class IntelligentFixRetriever {
       }
 
       const fix = ragResult.snippet?.fixSnippet || ragResult.template?.remediation_snippet || '';
-      console.log(`✅ [TIER 3-5] RAG result found (source: ${source}, confidence: ${ragResult.confidence})`);
+      console.log(`✅ [TIER 3-5] RAG result found (source: ${source}, confidence: ${ragResult.confidence}, framework: ${framework})`);
 
       return {
         fix,
@@ -204,21 +226,185 @@ export class IntelligentFixRetriever {
     fixSnippet: string,
     guideline: string,
     confidence: number,
-    cloudProvider?: string
+    cloudProvider?: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<void> {
     try {
+      // Determine cloud provider based on framework if not specified
+      const provider = cloudProvider || (framework === 'kubernetes' ? 'kubernetes' : 'azure');
       await remediationRAGService.storeGeneratedFix(
         checkId,
         resourceType,
-        cloudProvider || 'azure',
+        provider,
         fixSnippet,
         `Checkov inferred fix (confidence: ${confidence})`,
-        guideline
+        guideline,
+        framework
       );
-      console.log(`💾 Stored fix in global cache: ${checkId} → ${resourceType}`);
+      console.log(`💾 Stored fix in global cache: ${checkId} → ${resourceType} (${framework})`);
     } catch (error: any) {
       console.warn(`⚠️  Failed to store in global cache: ${error.message}`);
     }
+  }
+
+  /**
+   * TIER 6: AI generation fallback — generates fix using AI when no cached fix exists.
+   * Framework-aware: uses different prompts for Terraform (HCL) vs Kubernetes (YAML).
+   */
+  private async generateFixWithAI(
+    checkId: string,
+    checkName: string,
+    resourceType: string,
+    guideline: string,
+    context?: string,
+    framework: IaCFramework = 'terraform'
+  ): Promise<IntelligentFixResult | null> {
+    try {
+      console.log(`🤖 [TIER 6] Generating ${framework} fix with AI for ${checkId}`);
+
+      const systemPrompt = framework === 'kubernetes'
+        ? this.getKubernetesSystemPrompt()
+        : this.getTerraformSystemPrompt();
+
+      const userPrompt = framework === 'kubernetes'
+        ? this.getKubernetesUserPrompt(checkId, checkName, resourceType, guideline, context)
+        : this.getTerraformUserPrompt(checkId, checkName, resourceType, guideline, context);
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 1000,
+      });
+
+      const response = completion.choices[0]?.message?.content || '';
+
+      // Extract code block from response
+      const codeMatch = framework === 'kubernetes'
+        ? response.match(/```(?:yaml|yml)?\n([\s\S]*?)```/)
+        : response.match(/```(?:hcl|terraform)?\n([\s\S]*?)```/);
+
+      const fixSnippet = codeMatch ? codeMatch[1].trim() : response.trim();
+
+      if (!fixSnippet) {
+        console.log(`⏭️  [TIER 6] AI generation returned empty response`);
+        return null;
+      }
+
+      // Store the generated fix for future use
+      await this.storeInGlobalCache(
+        checkId,
+        resourceType,
+        fixSnippet,
+        guideline,
+        0.6, // Initial confidence for AI-generated fixes
+        framework === 'kubernetes' ? 'kubernetes' : 'azure',
+        framework
+      );
+
+      console.log(`✅ [TIER 6] AI generated fix for ${checkId} (${framework})`);
+
+      return {
+        fix: fixSnippet,
+        confidence: 0.6,
+        source: 'ai_generated',
+        requiresReview: true, // AI-generated fixes always need review
+        metadata: {
+          guidelineUrl: guideline || undefined,
+        },
+      };
+    } catch (error: any) {
+      console.warn(`⚠️  [TIER 6] AI generation failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * System prompt for Kubernetes YAML fix generation
+   */
+  private getKubernetesSystemPrompt(): string {
+    return `You are a Kubernetes security expert. Your task is to generate YAML snippets that fix security issues in Kubernetes manifests.
+
+Guidelines:
+1. Generate ONLY the YAML snippet needed to fix the issue
+2. Use proper YAML indentation (2 spaces)
+3. Include only the relevant fields, not the entire manifest
+4. Follow Kubernetes best practices
+5. Be concise - no explanations, just the fix
+
+Common security fixes include:
+- securityContext (runAsNonRoot, allowPrivilegeEscalation, readOnlyRootFilesystem)
+- resources (limits and requests for CPU/memory)
+- probes (livenessProbe, readinessProbe)
+- capabilities (drop ALL)
+- serviceAccountToken (automountServiceAccountToken: false)`;
+  }
+
+  /**
+   * System prompt for Terraform HCL fix generation
+   */
+  private getTerraformSystemPrompt(): string {
+    return `You are a Terraform security expert. Your task is to generate HCL code snippets that fix security issues in Terraform configurations.
+
+Guidelines:
+1. Generate ONLY the HCL code needed to fix the issue
+2. Use proper HCL syntax
+3. Include only the relevant attributes, not the entire resource
+4. Follow cloud provider best practices
+5. Be concise - no explanations, just the fix`;
+  }
+
+  /**
+   * User prompt for Kubernetes fix generation
+   */
+  private getKubernetesUserPrompt(
+    checkId: string,
+    checkName: string,
+    resourceKind: string,
+    guideline: string,
+    context?: string
+  ): string {
+    let prompt = `Fix this Kubernetes security issue:
+
+Check ID: ${checkId}
+Check Name: ${checkName}
+Resource Kind: ${resourceKind}
+Guideline: ${guideline}`;
+
+    if (context) {
+      prompt += `\n\nCurrent YAML context:\n\`\`\`yaml\n${context}\n\`\`\``;
+    }
+
+    prompt += `\n\nGenerate the YAML snippet that fixes this issue:`;
+    return prompt;
+  }
+
+  /**
+   * User prompt for Terraform fix generation
+   */
+  private getTerraformUserPrompt(
+    checkId: string,
+    checkName: string,
+    resourceType: string,
+    guideline: string,
+    context?: string
+  ): string {
+    let prompt = `Fix this Terraform security issue:
+
+Check ID: ${checkId}
+Check Name: ${checkName}
+Resource Type: ${resourceType}
+Guideline: ${guideline}`;
+
+    if (context) {
+      prompt += `\n\nCurrent Terraform context:\n\`\`\`hcl\n${context}\n\`\`\``;
+    }
+
+    prompt += `\n\nGenerate the HCL code that fixes this issue:`;
+    return prompt;
   }
 
   /**
@@ -232,16 +418,17 @@ export class IntelligentFixRetriever {
     fix: string,
     userId?: string,
     verified: boolean = true,
-    cloudProvider?: string
+    cloudProvider?: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<void> {
-    console.log(`💾 Storing verified fix for ${checkId} (verified: ${verified}, user: ${userId || 'anonymous'}, provider: ${cloudProvider || 'unknown'})`);
+    console.log(`💾 Storing verified fix for ${checkId} (verified: ${verified}, user: ${userId || 'anonymous'}, provider: ${cloudProvider || 'unknown'}, framework: ${framework})`);
 
-    // Global cache: bump confidence on existing snippet, or create new one
-    const existingSnippet = await fixSnippetStore.getByKey(checkId, resourceType);
+    // Global cache: bump confidence on existing snippet, or create new one (framework-aware)
+    const existingSnippet = await fixSnippetStore.getByKey(checkId, resourceType, framework);
     if (existingSnippet) {
       await remediationRAGService.updateFixFromVerification(existingSnippet.id, verified);
     } else {
-      await this.storeInGlobalCache(checkId, resourceType, fix, '', verified ? 0.95 : 0.7, cloudProvider);
+      await this.storeInGlobalCache(checkId, resourceType, fix, '', verified ? 0.95 : 0.7, cloudProvider, framework);
     }
 
     // User preference: store when authenticated and feature enabled
@@ -270,9 +457,10 @@ export class IntelligentFixRetriever {
   async reportFixFailure(
     checkId: string,
     resourceType: string,
-    userId?: string
+    userId?: string,
+    framework: IaCFramework = 'terraform'
   ): Promise<void> {
-    console.log(`⚠️  Reporting fix failure for ${checkId}`);
+    console.log(`⚠️  Reporting fix failure for ${checkId} (framework: ${framework})`);
 
     // Decrement user preference confidence
     if (userId && featureFlags.userFixPreferences) {
@@ -282,8 +470,8 @@ export class IntelligentFixRetriever {
       }
     }
 
-    // Decrement global cache confidence
-    const globalSnippet = await fixSnippetStore.getByKey(checkId, resourceType);
+    // Decrement global cache confidence (framework-aware)
+    const globalSnippet = await fixSnippetStore.getByKey(checkId, resourceType, framework);
     if (globalSnippet) {
       await remediationRAGService.updateFixFromVerification(globalSnippet.id, false);
     }

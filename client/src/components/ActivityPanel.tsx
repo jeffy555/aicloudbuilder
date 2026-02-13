@@ -11,13 +11,14 @@ import KubernetesBestPractices, { KubernetesBestPracticesRef } from "./Kubernete
 interface ActivityPanelProps {
   sessionId: string;
   onScanComplete?: (result?: any) => void; // Allow passing scan result
+  onFixesApproved?: () => void; // Called when security fixes are approved - parent should refresh files
   workflowType?: 'terraform' | 'kubernetes' | 'docker'; // Add workflow type prop
   moduleApproach?: 'child-module' | 'standalone-root' | 'aggregated-root' | null; // Module approach for Terraform
 }
 
 type RunningActivity = 'security' | 'cost' | 'refactor' | 'diagram' | 'validate' | null;
 
-export default function ActivityPanel({ sessionId, onScanComplete, workflowType = 'terraform', moduleApproach = null }: ActivityPanelProps) {
+export default function ActivityPanel({ sessionId, onScanComplete, onFixesApproved, workflowType = 'terraform', moduleApproach = null }: ActivityPanelProps) {
   const [runningActivity, setRunningActivity] = useState<RunningActivity>(null);
   const [activeView, setActiveView] = useState<RunningActivity>(null); // Track which view to show
   const [shouldTriggerScan, setShouldTriggerScan] = useState(false);
@@ -238,7 +239,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, workflowType 
       {/* Show only the active view - one at a time */}
       {/* Security Scan - Hidden for aggregated-root Terraform modules (child module scanned separately) */}
       {activeView === 'security' && !(workflowType === 'terraform' && moduleApproach === 'aggregated-root') && (
-        <CheckovScanner 
+        <CheckovScanner
           ref={checkovRef}
           sessionId={sessionId}
           framework={workflowType === 'kubernetes' ? 'kubernetes' : workflowType === 'docker' ? 'docker' : 'terraform'}
@@ -249,6 +250,10 @@ export default function ActivityPanel({ sessionId, onScanComplete, workflowType 
           onScanStart={() => {
             setRunningActivity('security');
             setActiveView('security');
+          }}
+          onFixesApproved={() => {
+            // Notify parent to refresh files when fixes are approved
+            onFixesApproved?.();
           }}
         />
       )}

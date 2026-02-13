@@ -50,30 +50,16 @@ export default function AutomationWorkflow() {
     { id: 'bash' as Language, name: 'Bash', icon: <Code2 className="w-6 h-6" />, extension: '.sh' },
   ];
 
-  // Create or restore session on mount
+  // Create a fresh session on mount (don't restore old sessions to avoid stale messages)
   useEffect(() => {
     const initializeSession = async () => {
-      const savedSessionId = localStorage.getItem('automation_workflow_session_id');
-      
-      if (savedSessionId) {
-        try {
-          const response = await apiRequest('GET', `/api/sessions/${savedSessionId}`);
-          const session = await response.json() as Session;
-          setSessionId(session.id);
-          return;
-        } catch (error) {
-          localStorage.removeItem('automation_workflow_session_id');
-        }
-      }
-      
+      // Always start fresh to avoid showing old/stale messages from previous workflows
+      localStorage.removeItem('automation_workflow_session_id');
+
       const response = await apiRequest('POST', '/api/sessions');
       const session = await response.json() as Session;
       setSessionId(session.id);
       localStorage.setItem('automation_workflow_session_id', session.id);
-      
-      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
-        message: 'Welcome! Select a scripting language to get started with automation.' 
-      });
     };
 
     initializeSession();
@@ -198,7 +184,7 @@ export default function AutomationWorkflow() {
   const handleLanguageSelect = (language: Language) => {
     setSelectedLanguage(language);
     setCurrentStep(2);
-    chatMutation.mutate(`Selected ${languageOptions.find(l => l.id === language)?.name} as the scripting language.`);
+    // Don't send chat message - UI already shows selection visually
   };
 
   const handleProviderSelect = async (selectedProvider: Provider) => {
@@ -207,7 +193,7 @@ export default function AutomationWorkflow() {
     if (sessionId) {
       await apiRequest('PATCH', `/api/sessions/${sessionId}`, { provider: selectedProvider });
     }
-    chatMutation.mutate(`Selected ${selectedProvider === 'github' ? 'GitHub' : 'Azure Repo'} as the repository provider.`);
+    // Don't send chat message - UI already shows selection visually
   };
 
   const handleRepoSelect = async (repoId: string) => {
@@ -217,28 +203,39 @@ export default function AutomationWorkflow() {
     if (sessionId && repo) {
       await apiRequest('PATCH', `/api/sessions/${sessionId}`, { repositoryName: repo.name });
       // Scan repository for existing files
+      let scannedFiles: Array<{ path: string; content: string }> = [];
       try {
-        await scanRepositoryMutation.mutateAsync();
+        const scanResult = await scanRepositoryMutation.mutateAsync();
+        if (scanResult.terraformFilesWithContent?.length > 0) {
+          scannedFiles = scanResult.terraformFilesWithContent;
+        } else if (scanResult.files?.length > 0) {
+          scannedFiles = scanResult.files;
+        }
       } catch (error) {
         console.error('Failed to scan repository:', error);
       }
+
+      // Send AI message based on repository content
+      const langName = languageOptions.find(l => l.id === selectedLanguage)?.name || selectedLanguage;
+      let aiMessage = '';
+      if (scannedFiles.length > 0) {
+        const fileTypes = scannedFiles.map(f => f.path.split('.').pop()).filter(Boolean);
+        const uniqueTypes = [...new Set(fileTypes)];
+        aiMessage = `I found **${scannedFiles.length} file(s)** in the repository "${repo.name}" (${uniqueTypes.slice(0, 5).join(', ')} files).\n\nWhat ${langName} automation would you like to create for this repository?`;
+      } else {
+        aiMessage = `The repository "${repo.name}" appears to be empty or new.\n\nWhat ${langName} automation script would you like me to create?`;
+      }
+
+      // Send contextual AI message
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { message: aiMessage });
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     }
     setCurrentStep(3);
-    chatMutation.mutate(`Selected repository. Now, what needs to be automated?`);
   };
 
   const handleAutomationSubmit = async (prompt: string) => {
     setAutomationPrompt(prompt);
-    // Send AI system message that we're working on it
-    try {
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-        message: `I'm working on creating the automation script for: "${prompt}". This may take a moment...`
-      });
-      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
-    } catch (error) {
-      console.error('Failed to send working message:', error);
-    }
-    // Then generate the script
+    // Generate the script directly - UI shows loading state
     generateScriptMutation.mutate(prompt);
   };
 
@@ -263,20 +260,17 @@ export default function AutomationWorkflow() {
       setExistingRepoFiles([]);
       setCommitMessage('');
       setIsPushed(false);
-      
+
       queryClient.invalidateQueries({ queryKey: ['/api/sessions'] });
-      
+
       const response = await apiRequest('POST', '/api/sessions');
       const session = await response.json() as Session;
       setSessionId(session.id);
       localStorage.setItem('automation_workflow_session_id', session.id);
-      
-      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
-        message: 'Welcome! Select a scripting language to get started with automation.' 
-      });
-      
+      // Don't send welcome message - UI already shows step instructions
+
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', session.id, 'messages'] });
-      
+
       toast({
         title: "Refreshed",
         description: "Started a new session. You can now begin a new automation workflow.",
@@ -499,13 +493,77 @@ export default function AutomationWorkflow() {
             {currentStep === 3 && (
               <div className="space-y-6">
                 <div className="text-center">
-                  <h2 className="text-2xl font-bold mb-2">What needs to be automated?</h2>
+                  <h2 className="text-2xl font-bold mb-2">Define Your Automation</h2>
                   <p className="text-muted-foreground">
-                    Describe the automation task you want to create
+                    Creating a <span className="font-medium text-primary">{languageOptions.find(l => l.id === selectedLanguage)?.name}</span> script for{' '}
+                    <span className="font-medium text-primary">{repositories.find(r => r.id === selectedRepo)?.name || 'selected repository'}</span>
                   </p>
                 </div>
 
-                <div className="mb-8">
+                {/* Repository Files Overview */}
+                {existingRepoFiles.length > 0 && (
+                  <Card className="border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-lg flex items-center gap-2">
+                        <FileCode className="w-5 h-5 text-blue-600" />
+                        Repository Contents
+                      </CardTitle>
+                      <CardDescription>
+                        {existingRepoFiles.length} file(s) found in the selected repository
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="max-h-40 overflow-y-auto">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                          {existingRepoFiles.slice(0, 12).map((file, idx) => (
+                            <div
+                              key={idx}
+                              className="text-sm px-2 py-1 bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 truncate"
+                              title={file.path}
+                            >
+                              {file.path}
+                            </div>
+                          ))}
+                          {existingRepoFiles.length > 12 && (
+                            <div className="text-sm px-2 py-1 text-muted-foreground italic">
+                              +{existingRepoFiles.length - 12} more files...
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Scanning Repository */}
+                {scanRepositoryMutation.isPending && (
+                  <Card className="border-gray-200 dark:border-gray-800">
+                    <CardContent className="py-6">
+                      <div className="flex items-center justify-center gap-2 text-muted-foreground">
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Scanning repository contents...
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Empty Repository Notice */}
+                {existingRepoFiles.length === 0 && !scanRepositoryMutation.isPending && (
+                  <Card className="border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/30">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-lg flex items-center gap-2">
+                        <FileCode className="w-5 h-5 text-amber-600" />
+                        New Repository
+                      </CardTitle>
+                      <CardDescription>
+                        This repository is empty or has no detectable files. Your automation script will be the first file.
+                      </CardDescription>
+                    </CardHeader>
+                  </Card>
+                )}
+
+                {/* AI Chat Messages */}
+                <div className="space-y-4">
                   {messages.map((msg) => (
                     msg.type === 'ai' ? (
                       <AIMessage key={msg.id} message={msg.content} />
@@ -515,15 +573,17 @@ export default function AutomationWorkflow() {
                   ))}
                 </div>
 
+                {/* Chat Input */}
                 <ChatInput
                   onSend={handleAutomationSubmit}
                   disabled={generateScriptMutation.isPending}
-                  placeholder="Describe what you want to automate..."
+                  placeholder="Describe what you want to automate (e.g., 'Deploy Docker containers to Azure', 'Run Terraform plan and apply')..."
                 />
 
                 {generateScriptMutation.isPending && (
-                  <div className="text-center text-muted-foreground">
-                    Generating automation script...
+                  <div className="flex items-center justify-center gap-2 text-muted-foreground py-4">
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Generating your {languageOptions.find(l => l.id === selectedLanguage)?.name} automation script...
                   </div>
                 )}
               </div>

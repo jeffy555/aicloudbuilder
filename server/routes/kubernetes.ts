@@ -4,6 +4,7 @@
  */
 
 import type { Express } from "express";
+import OpenAI from 'openai';
 import { storage } from "../storage";
 import { mcpClient, type MCPProvider } from "../mcp-client";
 import { openaiService } from "../openai-service";
@@ -13,6 +14,10 @@ import { generateKubernetesDiagram } from "../kubernetes/diagram-generator";
 import { runCheckovKubernetes } from "../kubernetes/checkov-validator";
 import { analyzeKubernetesBestPractices } from "../kubernetes/best-practices-analyzer";
 import { validateKubernetesYAML } from "../kubernetes/kubeval-validator";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 /**
  * Register Kubernetes-specific routes
@@ -465,6 +470,167 @@ export function registerKubernetesRoutes(app: Express) {
     }
   });
 
+  // Fix Kubernetes validation issues (best practices + schema)
+  app.post("/api/sessions/:id/fix-kubernetes-validation", async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+      const { issues } = req.body;
+
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      console.log(`\n🔧 ========== KUBERNETES VALIDATION FIX ==========`);
+      console.log(`Session ID: ${sessionId}`);
+      console.log(`Issues to fix: ${issues?.length || 'all'}`);
+
+      // Get Kubernetes YAML files from session storage
+      const files = await storage.getFilesBySession(sessionId);
+      const yamlFiles = files.filter(f =>
+        f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml')
+      );
+
+      if (yamlFiles.length === 0) {
+        return res.status(400).json({
+          error: 'No Kubernetes files found',
+          details: 'No YAML files found in session storage'
+        });
+      }
+
+      console.log(`📁 Found ${yamlFiles.length} Kubernetes file(s) to fix`);
+
+      // Combine all YAML files with their filenames for context
+      const yamlWithFiles = yamlFiles.map(f => `# File: ${f.fileName}\n${f.content}`).join('\n---\n');
+
+      // Use AI to fix the issues
+      const systemPrompt = `You are an expert Kubernetes engineer. Your task is to fix issues in Kubernetes YAML manifests based on validation findings.
+
+IMPORTANT RULES:
+1. Fix ALL the issues listed while preserving the original structure and functionality
+2. Apply Kubernetes best practices:
+   - Add resource limits and requests if missing
+   - Add liveness and readiness probes if missing
+   - Add security contexts (runAsNonRoot, readOnlyRootFilesystem, allowPrivilegeEscalation: false)
+   - Ensure proper labels and selectors
+   - Use appropriate container ports
+3. Keep the original resource names and configurations intact
+4. Output valid YAML only - no explanations
+5. Separate multiple resources with --- on its own line
+6. Keep the # File: comment before each resource to indicate which file it belongs to
+7. DO NOT add markdown code blocks - output raw YAML only`;
+
+      const issuesList = issues && issues.length > 0
+        ? issues.map((i: any) => `- ${i.message || i.issue}`).join('\n')
+        : 'Apply all Kubernetes best practices including: resource limits, probes, security contexts, and proper labels';
+
+      const userPrompt = `Fix the following issues in these Kubernetes manifests:
+
+ISSUES TO FIX:
+${issuesList}
+
+CURRENT YAML:
+${yamlWithFiles}
+
+Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. No explanations or code blocks.`;
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.2,
+        max_tokens: 8000
+      });
+
+      let fixedYaml = completion.choices[0]?.message?.content || '';
+
+      // Remove any markdown code blocks if AI added them
+      fixedYaml = fixedYaml.replace(/```yaml\n?/gi, '').replace(/```yml\n?/gi, '').replace(/```\n?/g, '').trim();
+
+      if (!fixedYaml) {
+        throw new Error('AI failed to generate fixed YAML');
+      }
+
+      console.log(`✅ AI generated fixed YAML (${fixedYaml.length} characters)`);
+
+      // Parse the fixed YAML into separate resources
+      const fixedResources = fixedYaml
+        .split(/^---\s*$/m)
+        .map(r => r.trim())
+        .filter(r => r.length > 0);
+
+      console.log(`📄 Parsed ${fixedResources.length} resource(s) from fixed YAML`);
+
+      // Import yaml parser
+      const yaml = await import('js-yaml');
+
+      // Update each file in storage
+      const updatedFiles: Array<{ fileName: string; content: string }> = [];
+
+      for (const resource of fixedResources) {
+        try {
+          // Extract file name from comment if present
+          const fileMatch = resource.match(/^#\s*File:\s*(.+)$/m);
+          let fileName: string | null = fileMatch ? fileMatch[1].trim() : null;
+
+          // Remove the file comment for the actual content
+          const cleanContent = resource.replace(/^#\s*File:\s*.+\n?/m, '').trim();
+
+          const parsed = yaml.load(cleanContent) as any;
+          if (!parsed || !parsed.kind || !parsed.metadata?.name) {
+            console.warn('⚠️  Skipping unparseable resource');
+            continue;
+          }
+
+          // Generate filename if not extracted
+          if (!fileName) {
+            const sanitizedName = parsed.metadata.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+            fileName = `${sanitizedName}-${parsed.kind.toLowerCase()}.yaml`;
+          }
+
+          // Find existing file
+          const existingFile = yamlFiles.find(f => f.fileName === fileName);
+
+          if (existingFile) {
+            await storage.updateFile(existingFile.id, cleanContent);
+            console.log(`   📝 Updated: ${fileName}`);
+          } else {
+            await storage.createFile({
+              sessionId,
+              fileName,
+              content: cleanContent
+            });
+            console.log(`   ✨ Created: ${fileName}`);
+          }
+
+          updatedFiles.push({ fileName, content: cleanContent });
+        } catch (parseError: any) {
+          console.warn(`⚠️  Failed to parse resource: ${parseError.message}`);
+        }
+      }
+
+      console.log(`✅ Fixed ${updatedFiles.length} file(s)`);
+      console.log('==========================================\n');
+
+      res.json({
+        success: true,
+        message: `Fixed ${updatedFiles.length} file(s) with best practices applied`,
+        updatedFiles: updatedFiles.map(f => f.fileName),
+        totalFixed: updatedFiles.length
+      });
+
+    } catch (error: any) {
+      console.error('❌ Error fixing Kubernetes validation issues:', error);
+      res.status(500).json({
+        error: 'Failed to fix Kubernetes validation issues',
+        details: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
+  });
+
   // Validate Helm chart
   app.post("/api/sessions/:id/validate-helm-chart", async (req, res) => {
     try {
@@ -594,8 +760,235 @@ export function registerKubernetesRoutes(app: Express) {
 
     } catch (error: any) {
       console.error('❌ Error generating Kubernetes diagram:', error);
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Failed to generate Kubernetes diagram',
+        details: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
+  });
+
+  // Get fix for Kubernetes security issue (RAG-based retrieval)
+  app.post("/api/sessions/:id/kubernetes-fix", async (req, res) => {
+    try {
+      const { checkId, checkName, resourceKind, guideline, currentYaml } = req.body;
+      const sessionId = req.params.id;
+
+      if (!checkId || !resourceKind) {
+        return res.status(400).json({
+          error: 'Missing required fields',
+          details: 'checkId and resourceKind are required'
+        });
+      }
+
+      // Verify session exists
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      console.log(`\n🔧 ========== KUBERNETES FIX RETRIEVAL ==========`);
+      console.log(`Session ID: ${sessionId}`);
+      console.log(`Check ID: ${checkId}`);
+      console.log(`Resource Kind: ${resourceKind}`);
+
+      // Import intelligent fix retriever
+      const { intelligentFixRetriever } = await import('../rag/intelligent-fix-retriever');
+
+      // Get fix using intelligent retriever (framework: kubernetes)
+      const fix = await intelligentFixRetriever.getFixForCheck(
+        checkId,
+        resourceKind,
+        checkName || checkId,
+        guideline || '',
+        session.userId || undefined,
+        currentYaml || undefined,
+        'kubernetes', // cloudProvider
+        'kubernetes'  // framework
+      );
+
+      if (fix) {
+        console.log(`✅ Fix retrieved for ${checkId}`);
+        console.log(`   Source: ${fix.source}`);
+        console.log(`   Confidence: ${(fix.confidence * 100).toFixed(1)}%`);
+        console.log(`   Requires Review: ${fix.requiresReview}`);
+        console.log('==========================================\n');
+
+        res.json({
+          success: true,
+          fix: fix.fix,
+          confidence: fix.confidence,
+          source: fix.source,
+          requiresReview: fix.requiresReview,
+          metadata: fix.metadata
+        });
+      } else {
+        console.log(`⚠️  No fix found for ${checkId}`);
+        console.log('==========================================\n');
+
+        res.status(404).json({
+          success: false,
+          error: 'No fix found',
+          details: `No remediation found for ${checkId}. Try enabling AI generation with ENABLE_K8S_AI_GEN=true.`
+        });
+      }
+
+    } catch (error: any) {
+      console.error('❌ Error retrieving Kubernetes fix:', error);
+      res.status(500).json({
+        error: 'Failed to retrieve Kubernetes fix',
+        details: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
+  });
+
+  // Verify Kubernetes fix worked (updates confidence)
+  app.post("/api/sessions/:id/kubernetes-fix/verify", async (req, res) => {
+    try {
+      const { checkId, resourceKind, fix, success } = req.body;
+      const sessionId = req.params.id;
+
+      if (!checkId || !resourceKind || typeof success !== 'boolean') {
+        return res.status(400).json({
+          error: 'Missing required fields',
+          details: 'checkId, resourceKind, and success (boolean) are required'
+        });
+      }
+
+      // Verify session exists
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      console.log(`\n🔄 ========== KUBERNETES FIX VERIFICATION ==========`);
+      console.log(`Session ID: ${sessionId}`);
+      console.log(`Check ID: ${checkId}`);
+      console.log(`Resource Kind: ${resourceKind}`);
+      console.log(`Success: ${success}`);
+
+      // Import intelligent fix retriever
+      const { intelligentFixRetriever } = await import('../rag/intelligent-fix-retriever');
+
+      if (success) {
+        // Store/update verified fix
+        await intelligentFixRetriever.storeVerifiedFix(
+          checkId,
+          resourceKind,
+          fix || '',
+          session.userId || undefined,
+          true, // verified
+          'kubernetes', // cloudProvider
+          'kubernetes'  // framework
+        );
+        console.log(`✅ Fix verified and confidence updated`);
+      } else {
+        // Report fix failure
+        await intelligentFixRetriever.reportFixFailure(
+          checkId,
+          resourceKind,
+          session.userId || undefined,
+          'kubernetes' // framework
+        );
+        console.log(`⚠️  Fix failure reported, confidence decreased`);
+      }
+
+      console.log('==========================================\n');
+
+      res.json({
+        success: true,
+        message: success
+          ? 'Fix verified successfully. Confidence increased.'
+          : 'Fix failure recorded. Confidence decreased.'
+      });
+
+    } catch (error: any) {
+      console.error('❌ Error verifying Kubernetes fix:', error);
+      res.status(500).json({
+        error: 'Failed to verify Kubernetes fix',
+        details: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
+  });
+
+  // Get all Kubernetes fixes for a scan result (batch retrieval)
+  app.post("/api/sessions/:id/kubernetes-fixes/batch", async (req, res) => {
+    try {
+      const { checks } = req.body;
+      const sessionId = req.params.id;
+
+      if (!Array.isArray(checks) || checks.length === 0) {
+        return res.status(400).json({
+          error: 'Missing required fields',
+          details: 'checks array is required and must not be empty'
+        });
+      }
+
+      // Verify session exists
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      console.log(`\n🔧 ========== KUBERNETES BATCH FIX RETRIEVAL ==========`);
+      console.log(`Session ID: ${sessionId}`);
+      console.log(`Checks to process: ${checks.length}`);
+
+      // Import intelligent fix retriever
+      const { intelligentFixRetriever } = await import('../rag/intelligent-fix-retriever');
+
+      // Process all checks in parallel
+      const results = await Promise.all(
+        checks.map(async (check: { checkId: string; checkName?: string; resourceKind: string; guideline?: string }) => {
+          try {
+            const fix = await intelligentFixRetriever.getFixForCheck(
+              check.checkId,
+              check.resourceKind,
+              check.checkName || check.checkId,
+              check.guideline || '',
+              session.userId || undefined,
+              undefined,
+              'kubernetes',
+              'kubernetes'
+            );
+
+            return {
+              checkId: check.checkId,
+              resourceKind: check.resourceKind,
+              found: !!fix,
+              fix: fix?.fix || null,
+              confidence: fix?.confidence || 0,
+              source: fix?.source || null,
+              requiresReview: fix?.requiresReview ?? true
+            };
+          } catch (error: any) {
+            return {
+              checkId: check.checkId,
+              resourceKind: check.resourceKind,
+              found: false,
+              error: error.message
+            };
+          }
+        })
+      );
+
+      const foundCount = results.filter(r => r.found).length;
+      console.log(`✅ Retrieved fixes for ${foundCount}/${checks.length} checks`);
+      console.log('==========================================\n');
+
+      res.json({
+        success: true,
+        totalChecks: checks.length,
+        fixesFound: foundCount,
+        results
+      });
+
+    } catch (error: any) {
+      console.error('❌ Error in batch Kubernetes fix retrieval:', error);
+      res.status(500).json({
+        error: 'Failed to retrieve Kubernetes fixes',
         details: error.message,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });

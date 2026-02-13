@@ -11,7 +11,7 @@ import RepositoryList, { Repository } from "@/components/RepositoryList";
 interface ScoreMeReportPayload {
   repository: string;
   provider: "github" | "azure";
-  inventory: Array<{ type: string; path: string; summary: string }>;
+  inventory: Array<{ type: string; path: string; summary: string; files?: string[] }>;
   findings: Array<{
     category: string;
     severity: string;

@@ -34,13 +34,12 @@ export function useSecretsConfig() {
     queryKey: ['user-secrets'],
     queryFn: async () => {
       const token = localStorage.getItem('token') || sessionStorage.getItem('token');
-      if (!token) return { hasAzureDevOps: false, hasAzureCloud: false, hasGithub: false, hasAws: false, hasGcp: false, azureDevOps: null, azureCloud: null, github: null, aws: null, gcp: null };
-      
-      const response = await fetch('/api/user/secrets', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch('/api/user/secrets', { headers });
       if (!response.ok) return { hasAzureDevOps: false, hasAzureCloud: false, hasGithub: false, hasAws: false, hasGcp: false, azureDevOps: null, azureCloud: null, github: null, aws: null, gcp: null };
       return response.json();
     },

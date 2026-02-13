@@ -26,6 +26,16 @@ export interface ArchitectureComponent {
   metadata?: {
     serviceType?: string; // e.g., "Kubernetes", "Container Registry", "Database"
     provider?: string; // For third-party tools: "CNCF", "Commercial", etc.
+    deploymentContext?: 'in-cluster' | 'external' | 'managed-service';
+    // in-cluster: runs as a workload inside a Kubernetes cluster (Istio, Kafka, Prometheus, etc.)
+    // external: a cloud/SaaS service that receives data FROM the cluster but does not run inside it (New Relic, Datadog)
+    // managed-service: a cloud-provider managed service provisioned via IaC (AKS itself, ACR, Key Vault, etc.)
+    codeType?: 'terraform' | 'yaml' | 'helm' | 'arm' | 'kubernetes';
+    // terraform: cloud resource provisioning (managed services, networking, IAM)
+    // yaml: Kubernetes manifest (Deployment, Service, ConfigMap for in-cluster workloads)
+    // helm: Helm chart packaging
+    // arm: Azure Resource Manager template (Azure-only)
+    // kubernetes: the cluster resource itself
   };
 }
 
@@ -90,8 +100,18 @@ IMPORTANT GUIDELINES:
 8. Categorize components intelligently (Compute, Storage, Security, Networking, Monitoring, Logging, CI/CD, etc.)
 9. IMPORTANT: For Kubernetes clusters (AKS, EKS, GKE):
    - Extract cluster nodes if mentioned (e.g., "three nodes", "3 nodes")
-   - Identify services that run INSIDE the cluster (Prometheus, Grafana, etc.) with relationship type "deployed on" or "runs inside"
-   - Identify external services (like New Relic) that receive data FROM the cluster with relationship type "logs to" or "sends data to"
+   - Identify services that run INSIDE the cluster with relationship type "deployed on" or "runs inside"
+   - Identify external services that receive data FROM the cluster with relationship type "logs to" or "sends data to"
+10. IMPORTANT: For EVERY component, classify metadata.deploymentContext:
+   - "in-cluster": the tool runs as a workload INSIDE a Kubernetes cluster. Examples: Istio (sidecar injection), Kafka/Confluent (when deployed inside a cluster), Prometheus, Grafana, KEDA, ArgoCD, Kong (as ingress controller), cert-manager, any operator or CRD-based tool.
+   - "external": a cloud or SaaS service that the cluster reports TO or integrates with, but does NOT run inside it. Examples: New Relic, Datadog, Splunk, Azure Monitor, AWS CloudWatch, any cloud-hosted monitoring/logging SaaS.
+   - "managed-service": a cloud-provider managed service that is provisioned via infrastructure-as-code. Examples: AKS, EKS, GKE, ACR, ECR, Key Vault, S3, VNet, DNS, API Management, Front Door, any cloud resource you terraform/provision.
+11. IMPORTANT: For EVERY component, classify metadata.codeType based on how it gets deployed:
+   - "terraform": provisioned as a cloud resource via Terraform (managed services, networking, IAM, registries)
+   - "yaml": deployed as a Kubernetes manifest (Deployment, Service, ConfigMap) — use this for ALL in-cluster workloads
+   - "helm": deployed via a Helm chart
+   - "arm": Azure Resource Manager template (ONLY for Azure resources explicitly using ARM)
+   - "kubernetes": the cluster resource itself (AKS, EKS, GKE) — use terraform for provisioning but mark codeType as kubernetes to signal it is the cluster
 
 Return ONLY valid JSON in this exact structure:
 {
@@ -106,7 +126,9 @@ Return ONLY valid JSON in this exact structure:
       "isThirdParty": true|false,
       "metadata": {
         "serviceType": "Optional service type classification",
-        "provider": "Optional provider info (CNCF, Commercial, etc.)"
+        "provider": "Optional provider info (CNCF, Commercial, etc.)",
+        "deploymentContext": "in-cluster|external|managed-service",
+        "codeType": "terraform|yaml|helm|arm|kubernetes"
       }
     }
   ],

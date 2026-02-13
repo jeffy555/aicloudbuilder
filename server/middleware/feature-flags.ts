@@ -24,6 +24,12 @@ export const featureFlags = {
 
   // Metrics dashboard
   metricsDashboard: process.env.ENABLE_METRICS_DASHBOARD !== 'false', // Default true
+
+  // Kubernetes RAG remediation support
+  kubernetesRAG: process.env.ENABLE_KUBERNETES_RAG === 'true',
+
+  // Kubernetes AI-generated fix fallback
+  kubernetesAIGeneration: process.env.ENABLE_K8S_AI_GEN === 'true',
 } as const;
 
 /**
@@ -79,6 +85,8 @@ export function reloadFeatureFlags() {
   (featureFlags as any).intelligentFixRetrieval = process.env.ENABLE_INTELLIGENT_FIX_RETRIEVAL === 'true';
   (featureFlags as any).performanceLogging = process.env.ENABLE_PERFORMANCE_LOGGING !== 'false';
   (featureFlags as any).metricsDashboard = process.env.ENABLE_METRICS_DASHBOARD !== 'false';
+  (featureFlags as any).kubernetesRAG = process.env.ENABLE_KUBERNETES_RAG === 'true';
+  (featureFlags as any).kubernetesAIGeneration = process.env.ENABLE_K8S_AI_GEN === 'true';
 
   console.log('🔄 Feature flags reloaded:', featureFlags);
 }
@@ -89,10 +97,12 @@ export function reloadFeatureFlags() {
 export function logFeatureFlagStatus() {
   console.log('\n🚩 Feature Flags Status:');
   console.log('=' .repeat(60));
-  console.log(`  User Fix Preferences:     ${featureFlags.userFixPreferences ? '✅ ENABLED' : '❌ DISABLED'}`);
-  console.log(`  Checkov Native Fetch:     ${featureFlags.checkovNativeFetch ? '✅ ENABLED' : '❌ DISABLED'}`);
+  console.log(`  User Fix Preferences:      ${featureFlags.userFixPreferences ? '✅ ENABLED' : '❌ DISABLED'}`);
+  console.log(`  Checkov Native Fetch:      ${featureFlags.checkovNativeFetch ? '✅ ENABLED' : '❌ DISABLED'}`);
   console.log(`  Intelligent Fix Retrieval: ${featureFlags.intelligentFixRetrieval ? '✅ ENABLED' : '❌ DISABLED'}`);
-  console.log(`  Performance Logging:      ${featureFlags.performanceLogging ? '✅ ENABLED' : '❌ DISABLED'}`);
-  console.log(`  Metrics Dashboard:        ${featureFlags.metricsDashboard ? '✅ ENABLED' : '❌ DISABLED'}`);
+  console.log(`  Performance Logging:       ${featureFlags.performanceLogging ? '✅ ENABLED' : '❌ DISABLED'}`);
+  console.log(`  Metrics Dashboard:         ${featureFlags.metricsDashboard ? '✅ ENABLED' : '❌ DISABLED'}`);
+  console.log(`  Kubernetes RAG:            ${featureFlags.kubernetesRAG ? '✅ ENABLED' : '❌ DISABLED'}`);
+  console.log(`  Kubernetes AI Generation:  ${featureFlags.kubernetesAIGeneration ? '✅ ENABLED' : '❌ DISABLED'}`);
   console.log('=' .repeat(60) + '\n');
 }
