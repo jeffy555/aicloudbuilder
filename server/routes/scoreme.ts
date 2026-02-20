@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { scoreMeService, type ScoreMeRequest } from "../services/scoreme-service";
 import { requireAuth } from "../middleware/auth";
+import { storage } from "../storage";
 
 export function registerScoreMeRoutes(app: Express) {
   app.post("/api/scoreme/run", requireAuth, async (req: Request, res: Response) => {
@@ -18,6 +19,23 @@ export function registerScoreMeRoutes(app: Express) {
       }
 
       const report = await scoreMeService.runScore(userId, payload);
+
+      // Log activity for user history
+      if (userId) {
+        try {
+          await storage.createUserActivity({
+            userId,
+            sessionId: null,
+            module: 'scoreme',
+            actionType: 'score_run',
+            actionLabel: `ScoreMe: ${payload.repositoryName} (${report.finalScore}/100)`,
+            metadata: { repository: payload.repositoryName, provider: payload.provider, finalScore: report.finalScore, confidence: report.confidence },
+          });
+        } catch (e) {
+          console.warn('[ScoreMe] Failed to log activity:', e);
+        }
+      }
+
       res.json(report);
     } catch (error: any) {
       console.error("[ScoreMe] failed to run:", error);

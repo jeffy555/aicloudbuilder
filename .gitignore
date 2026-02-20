@@ -7,3 +7,5 @@ vite.config.ts.*
 .cache
 .env
 .env.local
+*.doc
+*.md

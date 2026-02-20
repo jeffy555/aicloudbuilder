@@ -535,7 +535,7 @@ ${yamlWithFiles}
 Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. No explanations or code blocks.`;
 
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }

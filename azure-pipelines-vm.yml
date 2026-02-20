@@ -1,0 +1,52 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  vmAppPath: "/opt/spiritops"
+
+stages:
+  - stage: DeployToVM
+    displayName: Deploy to Low-Cost VM
+    jobs:
+      - job: Deploy
+        displayName: SSH Deploy
+        steps:
+          - checkout: self
+
+          - task: CopyFilesOverSSH@0
+            displayName: Copy repository to VM
+            inputs:
+              sshEndpoint: "spiritops-vm-ssh"
+              sourceFolder: "$(Build.SourcesDirectory)"
+              contents: |
+                **
+                !node_modules/**
+                !dist/**
+                !.git/**
+              targetFolder: "$(vmAppPath)"
+              cleanTargetFolder: false
+              readyTimeout: "20000"
+
+          - task: SSH@0
+            displayName: Run docker compose on VM
+            inputs:
+              sshEndpoint: "spiritops-vm-ssh"
+              runOptions: "commands"
+              commands: |
+                set -e
+                cd "$(vmAppPath)"
+                if [ ! -f ".env.vm" ]; then
+                  echo ".env.vm not found on VM. Create it from env.vm.example before deployment."
+                  exit 1
+                fi
+                docker compose down || true
+                docker compose up -d --build
+                docker image prune -f
+              readyTimeout: "20000"

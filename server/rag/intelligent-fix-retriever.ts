@@ -271,7 +271,7 @@ export class IntelligentFixRetriever {
         : this.getTerraformUserPrompt(checkId, checkName, resourceType, guideline, context);
 
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }

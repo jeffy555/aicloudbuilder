@@ -10,6 +10,7 @@
  */
 
 import OpenAI from 'openai';
+import { z } from 'zod';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -182,7 +183,7 @@ Return the analysis as valid JSON.`;
     console.log('🤖 Calling OpenAI for architecture analysis...');
     
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
@@ -203,39 +204,90 @@ Return the analysis as valid JSON.`;
       throw new Error('Failed to parse AI analysis response');
     }
 
-    // Validate and structure the response
-    const components: ArchitectureComponent[] = (analysis.components || []).map((c: any) => ({
-      name: c.name || c.originalName || 'Unknown',
-      type: c.type || c.name || 'Unknown',
-      cloudProvider: c.cloudProvider || 'unknown',
-      category: c.category || 'Other',
-      description: c.description || '',
-      originalName: c.originalName || c.name || 'Unknown',
-      isThirdParty: c.isThirdParty || c.cloudProvider === 'third-party' || false,
-      metadata: c.metadata || {}
+    // Zod schema for AI response validation
+    const aiComponentSchema = z.object({
+      name: z.string().min(1),
+      type: z.string().optional().default('Unknown'),
+      cloudProvider: z.enum(['azure', 'aws', 'gcp', 'third-party', 'multi', 'unknown']).optional().default('unknown'),
+      category: z.string().optional().default('Other'),
+      description: z.string().optional().default(''),
+      originalName: z.string().optional(),
+      isThirdParty: z.boolean().optional(),
+      metadata: z.object({
+        deploymentContext: z.enum(['in-cluster', 'external', 'managed-service']).optional(),
+        codeType: z.enum(['terraform', 'yaml', 'helm', 'arm', 'kubernetes']).optional(),
+        serviceType: z.string().optional(),
+        provider: z.string().optional(),
+      }).optional().default({}),
+    });
+
+    const aiAnalysisSchema = z.object({
+      components: z.array(aiComponentSchema).min(1, 'AI must extract at least 1 component'),
+      relationships: z.array(z.object({
+        from: z.string(), to: z.string(),
+        type: z.string().optional().default('connects'),
+        description: z.string().optional().default(''),
+      })).optional().default([]),
+      dataFlows: z.array(z.object({
+        source: z.string(), target: z.string(),
+        protocol: z.string().optional(),
+        description: z.string().optional().default(''),
+      })).optional().default([]),
+      securityBoundaries: z.array(z.object({
+        name: z.string().optional().default('Unknown'),
+        components: z.array(z.string()).optional().default([]),
+      })).optional().default([]),
+      cloudProvider: z.string().optional().default('multi'),
+      detectedProviders: z.array(z.string()).optional().default([]),
+      thirdPartyTools: z.array(z.object({
+        name: z.string(),
+        category: z.string().optional().default('Other'),
+        description: z.string().optional().default(''),
+      })).optional().default([]),
+    });
+
+    // Validate AI response with Zod
+    let validated: z.infer<typeof aiAnalysisSchema>;
+    try {
+      validated = aiAnalysisSchema.parse(analysis);
+    } catch (zodError: any) {
+      console.error('❌ AI response failed validation:', zodError.errors || zodError.message);
+      throw new Error(`AI analysis response is malformed: ${zodError.errors?.[0]?.message || zodError.message}`);
+    }
+
+    // Map validated data to typed interfaces
+    const components: ArchitectureComponent[] = validated.components.map((c) => ({
+      name: c.name,
+      type: c.type,
+      cloudProvider: c.cloudProvider as ArchitectureComponent['cloudProvider'],
+      category: c.category,
+      description: c.description,
+      originalName: c.originalName || c.name,
+      isThirdParty: c.isThirdParty ?? c.cloudProvider === 'third-party',
+      metadata: c.metadata,
     }));
 
-    const relationships: ArchitectureRelationship[] = (analysis.relationships || []).map((r: any) => ({
-      from: r.from || '',
-      to: r.to || '',
-      type: r.type || 'connects',
-      description: r.description || ''
+    const relationships: ArchitectureRelationship[] = validated.relationships.map((r) => ({
+      from: r.from,
+      to: r.to,
+      type: r.type,
+      description: r.description,
     }));
 
-    const dataFlows: DataFlow[] = (analysis.dataFlows || []).map((df: any) => ({
-      source: df.source || '',
-      target: df.target || '',
+    const dataFlows: DataFlow[] = validated.dataFlows.map((df) => ({
+      source: df.source,
+      target: df.target,
       protocol: df.protocol,
-      description: df.description || ''
+      description: df.description,
     }));
 
-    const securityBoundaries: SecurityBoundary[] = (analysis.securityBoundaries || []).map((sb: any) => ({
-      name: sb.name || 'Unknown',
-      components: sb.components || []
+    const securityBoundaries: SecurityBoundary[] = validated.securityBoundaries.map((sb) => ({
+      name: sb.name,
+      components: sb.components,
     }));
 
-    const detectedProviders = analysis.detectedProviders || [];
-    const thirdPartyTools = analysis.thirdPartyTools || [];
+    const detectedProviders = validated.detectedProviders;
+    const thirdPartyTools = validated.thirdPartyTools;
 
     // Extract categories
     const categories = new Set<string>();

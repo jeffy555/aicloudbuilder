@@ -97,7 +97,19 @@ export default function TerraformWorkflow() {
           const response = await apiRequest('GET', `/api/sessions/${savedSessionId}`);
           const session = await response.json() as Session;
           setSessionId(session.id);
-          console.log('Restored existing session:', session.id);
+
+          // Restore workflow state from session
+          if (session.provider) setProvider(session.provider as Provider);
+          if (session.cloudProvider) setCloudProvider(session.cloudProvider as CloudProvider);
+          if (session.moduleApproach) setModuleApproach(session.moduleApproach as ModuleApproach);
+          if (session.repositoryId) setSelectedRepo(session.repositoryId);
+          if (session.backendValidated === 'true' || session.backendDeclined === 'true') setBackendConfigured(true);
+          if (session.backendStorageAccount) setBackendStorageAccount(session.backendStorageAccount);
+          if (session.backendResourceGroup) setBackendResourceGroup(session.backendResourceGroup);
+          if (session.backendContainer) setBackendContainer(session.backendContainer);
+          if (session.isExistingRepo === 'true') setScanCompleted(true);
+
+          console.log('Restored existing session:', session.id, 'at step', session.currentStep);
           return; // Session exists, no need to create new one
         } catch (error) {
           // Session doesn't exist anymore, create new one
@@ -110,14 +122,17 @@ export default function TerraformWorkflow() {
       const response = await apiRequest('POST', '/api/sessions');
       const session = await response.json() as Session;
       setSessionId(session.id);
-      
+
       // Save session ID to localStorage for persistence
       localStorage.setItem('terraform_workflow_session_id', session.id);
       console.log('Created new session:', session.id);
-      
+
+      // Tag session with module type for history tracking
+      await apiRequest('PATCH', `/api/sessions/${session.id}`, { activeModule: 'terraform' });
+
       // Create initial welcome message without AI chat
-      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
-        message: 'Welcome! Let\'s start by selecting your repository provider. Choose GitHub or Azure DevOps.' 
+      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, {
+        message: 'Welcome! Let\'s start by selecting your repository provider. Choose GitHub or Azure DevOps.'
       });
     };
     initializeSession();
@@ -642,13 +657,15 @@ export default function TerraformWorkflow() {
       const session = await response.json() as Session;
       setSessionId(session.id);
       localStorage.setItem('terraform_workflow_session_id', session.id);
-      
-      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
-        message: 'Welcome! Let\'s start by selecting your repository provider. Choose GitHub or Azure DevOps.' 
+
+      await apiRequest('PATCH', `/api/sessions/${session.id}`, { activeModule: 'terraform' });
+
+      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, {
+        message: 'Welcome! Let\'s start by selecting your repository provider. Choose GitHub or Azure DevOps.'
       });
-      
+
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', session.id, 'messages'] });
-      
+
       toast({
         title: "Refreshed",
         description: "Started a new session. You can now begin a new Terraform workflow.",

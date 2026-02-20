@@ -17,6 +17,7 @@ import { registerDebugRoutes } from "./debug";
 import { registerScoreMeRoutes } from "./scoreme";
 import { registerMetricsRoutes } from "./metrics";
 import { registerUserFixPreferencesRoutes } from "./user-fix-preferences";
+import { registerHistoryRoutes } from "./history";
 // Import legacy routes for routes not yet migrated
 import { registerLegacyRoutes } from "../routes-legacy";
 
@@ -57,6 +58,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerScoreMeRoutes(app);
   registerMetricsRoutes(app); // Phase 0: Performance monitoring
   registerUserFixPreferencesRoutes(app); // Phase 2: User fix preferences
+  registerHistoryRoutes(app); // User history
 
   // Register legacy routes for large/complex endpoints (deferred migration)
   // These endpoints are fully functional and will be migrated incrementally in a future phase:

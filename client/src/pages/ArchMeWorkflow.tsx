@@ -8,6 +8,7 @@ import AIMessage from "@/components/AIMessage";
 import UserMessage from "@/components/UserMessage";
 import ChatInput from "@/components/ChatInput";
 import ArchitectureDiagram, { ArchitectureDiagramRef } from "@/components/ArchitectureDiagram";
+import ActivityPanel from "@/components/ActivityPanel";
 import RepositoryList from "@/components/RepositoryList";
 import CreateRepoForm from "@/components/CreateRepoForm";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -15,16 +16,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, Network, Home, RefreshCw, CheckCircle2, Code, GitBranch, Package, ChevronRight, ChevronDown, Shield, XCircle, CodeIcon, Cloud } from "lucide-react";
+import { Loader2, Network, Home, RefreshCw, CheckCircle2, Code, GitBranch, Package, ChevronRight, ChevronDown, XCircle, CodeIcon, Cloud, FileCode } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { Checkbox as UICheckbox } from "@/components/ui/checkbox";
-import CheckovScanner, { CheckovScannerRef } from "@/components/CheckovScanner";
 import CodeEditor from "@/components/CodeEditor";
-import FileDiffView from "@/components/FileDiffView";
 import type { Session, Message, GeneratedFile } from "@shared/schema";
 
 type WorkflowStep = 'diagram' | 'approval' | 'repository' | 'components' | 'code' | 'review';
@@ -408,15 +407,8 @@ export default function ArchMeWorkflow() {
   const [generatedCode, setGeneratedCode] = useState<GeneratedCode[]>([]);
   const [expandedComponents, setExpandedComponents] = useState<Set<string>>(new Set());
   const [commitMessage, setCommitMessage] = useState<string>('Add infrastructure code from ArchMe diagram');
-  const [scanResult, setScanResult] = useState<any>(null);
-  const [isScanning, setIsScanning] = useState<boolean>(false);
-  const [isFixing, setIsFixing] = useState<boolean>(false);
-  const [selectedChecks, setSelectedChecks] = useState<Set<string>>(new Set());
-  const [fixedChecks, setFixedChecks] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<'failed' | 'fixed'>('failed');
   const [readmeContent, setReadmeContent] = useState<string>('');
   const [showReadme, setShowReadme] = useState<boolean>(false);
-  const [scanAfterFixes, setScanAfterFixes] = useState<boolean>(false);
   const [validationResult, setValidationResult] = useState<ArchitectureValidationResult | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [pendingIntent, setPendingIntent] = useState<string>('');
@@ -424,63 +416,7 @@ export default function ArchMeWorkflow() {
   const [intentLayerSuggestions, setIntentLayerSuggestions] = useState<ArtifactLayerSuggestion[]>([]);
   const [selectedIntentLayers, setSelectedIntentLayers] = useState<Set<ArtifactLayerId>>(new Set());
   const [confirmedLayers, setConfirmedLayers] = useState<ArtifactLayerId[]>([]);
-  const handleCheckovFixesApplied = (diffs: Array<{ fileName: string; fixedContent: string }>) => {
-    if (!diffs.length) return;
-    const diffMap = new Map(diffs.map((diff) => [diff.fileName, diff.fixedContent]));
-    setGeneratedCode((prev) => {
-      let hasChanges = false;
-      const updated = prev.map((code) => {
-        const fixedContent = diffMap.get(code.fileName);
-        if (fixedContent && fixedContent !== code.content) {
-          hasChanges = true;
-          return { ...code, content: fixedContent };
-        }
-        return code;
-      });
-
-      diffs.forEach((diff) => {
-        if (!prev.find((code) => code.fileName === diff.fileName)) {
-          hasChanges = true;
-          updated.push({
-            componentName: diff.fileName,
-            codeType: inferCodeType(diff.fileName),
-            fileName: diff.fileName,
-            content: diff.fixedContent,
-            description: "",
-            dependencies: [],
-          });
-        }
-      });
-
-      return hasChanges ? updated : prev;
-    });
-  };
-  const handleFixesApproved = async (diffs: Array<{ fileName: string; fixedContent: string }>) => {
-    if (!diffs.length) return;
-
-    // Persist fixed files to session storage so the code view syncs reliably
-    try {
-      await apiRequest('POST', `/api/sessions/${sessionId}/files/bulk`, {
-        files: diffs.map(d => ({ fileName: d.fileName, content: d.fixedContent }))
-      });
-    } catch (e) {
-      console.error('Failed to persist fixed files:', e);
-    }
-
-    // Update local generatedCode state with fixed content
-    setGeneratedCode((prev) =>
-      prev.map((code) => {
-        const diff = diffs.find(d => d.fileName === code.fileName);
-        return diff ? { ...code, content: diff.fixedContent } : code;
-      })
-    );
-
-    // Force fresh data from backend so the sessionFiles → generatedCode useEffect stays in sync
-    await queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-    await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-  };
   const diagramRef = useRef<ArchitectureDiagramRef>(null);
-  const checkovRef = useRef<CheckovScannerRef>(null);
 
   // Create or restore session on mount
   useEffect(() => {
@@ -492,9 +428,27 @@ export default function ArchMeWorkflow() {
           const response = await apiRequest('GET', `/api/sessions/${savedSessionId}`);
           const session = await response.json() as Session;
           setSessionId(session.id);
+
+          // Restore workflow state from session
+          if (session.provider) setProvider(session.provider as Provider);
+          if (session.repositoryName) setSelectedRepoName(session.repositoryName);
+          if (session.repositoryId) setSelectedRepo(session.repositoryId);
+
+          // Infer workflow step from session data
+          const hasAnalysis = !!(session as any).archMeAnalysis;
+          if (hasAnalysis) {
+            setDiagramGenerated(true);
+            setDiagramApproved(true);
+          }
+
+          // Restore saved workflow step from localStorage
+          const savedStep = localStorage.getItem('archme_workflow_step') as WorkflowStep | null;
+          if (savedStep) setWorkflowStep(savedStep);
+
           return;
         } catch (error) {
           localStorage.removeItem('archme_workflow_session_id');
+          localStorage.removeItem('archme_workflow_step');
         }
       }
       
@@ -514,6 +468,13 @@ export default function ArchMeWorkflow() {
 
     initializeSession();
   }, []);
+
+  // Persist workflow step to localStorage for restore on refresh
+  useEffect(() => {
+    if (sessionId && workflowStep) {
+      localStorage.setItem('archme_workflow_step', workflowStep);
+    }
+  }, [workflowStep, sessionId]);
 
   // Fetch messages
   const { data: messages = [] } = useQuery<Message[]>({
@@ -1022,8 +983,15 @@ export default function ArchMeWorkflow() {
     setDiagramApproved(false);
     setDiagramGenerated(false);
 
-    chatMutation.mutate(trimmed);
-    analyzeMutation.mutate(trimmed);
+    chatMutation.mutate(trimmed, {
+      onSuccess: () => {
+        analyzeMutation.mutate(trimmed);
+      },
+      onError: () => {
+        // Still attempt analysis even if chat save fails
+        analyzeMutation.mutate(trimmed);
+      }
+    });
   };
 
   const handleLayerToggle = (layerId: ArtifactLayerId, checked?: boolean) => {
@@ -1066,6 +1034,7 @@ export default function ArchMeWorkflow() {
   const handleRefresh = async () => {
     try {
       localStorage.removeItem('archme_workflow_session_id');
+      localStorage.removeItem('archme_workflow_step');
       setRequirements('');
       setIsAnalyzing(false);
       setSessionId('');
@@ -1524,16 +1493,24 @@ export default function ArchMeWorkflow() {
           </Card>
         )}
 
-        {/* Generated Code */}
+        {/* Generated Code - Matches Terraform workflow layout */}
         {workflowStep === 'code' && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Generated Infrastructure Code</CardTitle>
-              <CardDescription>
-                Review and edit the generated code before committing to your repository
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
+          <div className="space-y-6">
+            <div className="text-center">
+              <h2 className="text-2xl font-bold mb-2">Review & Activities</h2>
+              <p className="text-muted-foreground">
+                Review generated code, run security scans, and analyze costs before committing
+              </p>
+            </div>
+
+            {/* Code Editor - matching Terraform card style */}
+            <div className="rounded-lg border bg-card">
+              <div className="px-4 py-3 border-b bg-muted/50">
+                <h3 className="text-sm font-medium flex items-center gap-2">
+                  <FileCode className="w-4 h-4" />
+                  Generated Code
+                </h3>
+              </div>
               {generatedCode.length > 0 ? (
                 <CodeEditor
                   files={generatedCode.map(f => ({
@@ -1541,16 +1518,13 @@ export default function ArchMeWorkflow() {
                     content: f.content
                   }))}
                   onFileChange={async (fileName, content) => {
-                    // Update the generatedCode state
-                    setGeneratedCode(prev => 
-                      prev.map(code => 
-                        code.fileName === fileName 
+                    setGeneratedCode(prev =>
+                      prev.map(code =>
+                        code.fileName === fileName
                           ? { ...code, content }
                           : code
                       )
                     );
-                    
-                    // Save to session storage
                     try {
                       await apiRequest('POST', `/api/sessions/${sessionId}/files`, {
                         fileName,
@@ -1568,203 +1542,90 @@ export default function ArchMeWorkflow() {
                   }}
                 />
               ) : (
-                <div className="text-center py-12">
-                  <p className="text-muted-foreground">No code generated yet.</p>
+                <div className="p-8 text-center text-muted-foreground">
+                  <FileCode className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p>No files generated yet</p>
                 </div>
               )}
+            </div>
 
-              {/* Security Scan Section */}
-              <div className="mt-6 space-y-4">
-                {/* Manual Scan Button */}
-                {generatedCode.length > 0 && (
-                  <Card className="p-4">
-                    <div className="flex items-center justify-between mb-4">
-                      <div>
-                        <h3 className="font-semibold mb-1">Security Scan</h3>
-                        <p className="text-sm text-muted-foreground">
-                          Run Checkov security scan on generated code
-                        </p>
-                      </div>
-                      <Button
-                        onClick={async () => {
-                          setIsScanning(true);
-                          try {
-                            // First, ensure all files are saved to session storage with latest content
-                            // Get current files from session to update them
-                            const sessionFiles = await apiRequest('GET', `/api/sessions/${sessionId}/files`);
-                            const existingFiles = await sessionFiles.json();
-                            
-                            // Update or create files from generatedCode
-                            for (const code of generatedCode) {
-                              const existingFile = existingFiles.find((f: any) => f.fileName === code.fileName);
-                              if (existingFile) {
-                                // Update existing file
-                                await apiRequest('PATCH', `/api/files/${existingFile.id}`, {
-                                  content: code.content
-                                });
-                              } else {
-                                // Create new file
-                                await apiRequest('POST', `/api/sessions/${sessionId}/files`, {
-                                  fileName: code.fileName,
-                                  content: code.content
-                                });
-                              }
-                            }
-                            
-                            // Invalidate queries to refresh
-                            queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-                            
-                            // Small delay to ensure files are saved
-                            await new Promise(resolve => setTimeout(resolve, 500));
-                            
-                            // Then trigger scan via CheckovScanner
-                            if (checkovRef.current) {
-                              checkovRef.current.triggerScan();
-                            }
-                          } catch (error: any) {
-                            setIsScanning(false);
-                            toast({
-                              title: "Failed to prepare scan",
-                              description: error.message || "Failed to save files for scanning",
-                              variant: "destructive"
-                            });
-                          }
-                        }}
-                        disabled={isScanning || generatedCode.length === 0}
-                        variant="default"
-                      >
-                        {isScanning ? (
-                          <>
-                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            Scanning...
-                          </>
-                        ) : (
-                          <>
-                            <Shield className="w-4 h-4 mr-2" />
-                            Run Security Scan
-                          </>
-                        )}
-                      </Button>
-                    </div>
+            {/* Activity Panel - Below code editor (same pattern as Terraform) */}
+            <ActivityPanel
+              sessionId={sessionId}
+              workflowType="archme"
+              checkovFramework={generatedCode.some(c => c.codeType === 'kubernetes' || c.codeType === 'yaml') ? 'kubernetes' : 'terraform'}
+              onScanComplete={() => {
+                queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                toast({
+                  title: "Scan Complete",
+                  description: "Security scan completed successfully.",
+                });
+              }}
+              onFixesApproved={() => {
+                queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                toast({
+                  title: "Fixes Applied",
+                  description: "Security fixes have been applied. Code editor updated.",
+                });
+              }}
+            />
 
-                    {/* Use CheckovScanner component for scan results and fix functionality */}
-                    {sessionId && (
-                      <CheckovScanner
-                        ref={checkovRef}
-                        sessionId={sessionId}
-                        framework={generatedCode.some((c: any) => c.codeType === 'kubernetes' || c.codeType === 'yaml') ? 'kubernetes' : 'terraform'}
-                        onFixesApplied={handleCheckovFixesApplied}
-                          onFixesApproved={handleFixesApproved}
-                        onScanComplete={(result) => {
-                          setScanResult({
-                            summary: result.summary,
-                            checks: result.failedChecks || []
-                          });
-                          setIsScanning(false);
-                          // Mark that scan was run (after fixes if fixes were applied)
-                          setScanAfterFixes(true);
-                        }}
-                        onScanStart={() => {
-                          setIsScanning(true);
-                        }}
-                      />
-                    )}
-                  </Card>
-                )}
-
-                {/* README Preview */}
-                {readmeContent && (
-                  <Card className="p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <h3 className="font-semibold">README.md</h3>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setShowReadme(!showReadme)}
-                      >
-                        {showReadme ? 'Hide' : 'Show'} README
-                      </Button>
-                    </div>
-                    {showReadme && (
-                      <div className="mt-3 bg-muted rounded-lg p-4 max-h-64 overflow-y-auto">
-                        <pre className="text-xs whitespace-pre-wrap">{readmeContent}</pre>
-                      </div>
-                    )}
-                    <p className="text-xs text-muted-foreground mt-2">
-                      README.md will be automatically included in the commit
-                    </p>
-                  </Card>
-                )}
-
-                <div>
-                  <label className="text-sm font-medium mb-2 block">Commit Message</label>
-                  <Textarea
-                    value={commitMessage}
-                    onChange={(e) => setCommitMessage(e.target.value)}
-                    placeholder="Enter commit message..."
-                    rows={3}
-                  />
+            {/* README Preview */}
+            {readmeContent && (
+              <Card className="p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-semibold">README.md</h3>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowReadme(!showReadme)}
+                  >
+                    {showReadme ? 'Hide' : 'Show'} README
+                  </Button>
                 </div>
-                <Button
-                  onClick={() => {
-                    // Check if fixes were applied and not approved
-                    if (checkovRef.current?.hasUnapprovedFixes()) {
-                      toast({
-                        title: "Fixes Require Approval",
-                        description: "Please review and approve the code changes before committing.",
-                        variant: "destructive"
-                      });
-                      return;
-                    }
-                    
-                    // Check if fixes were applied but scan not run after
-                    if (checkovRef.current?.hasUnapprovedFixes() === false && 
-                        checkovRef.current?.getFixesApproved() && 
-                        !scanAfterFixes) {
-                      toast({
-                        title: "Scan Required After Fixes",
-                        description: "Please run a security scan after approving fixes before committing.",
-                        variant: "destructive"
-                      });
-                      return;
-                    }
-                    
-                    commitMutation.mutate();
-                  }}
-                  className="w-full"
-                  size="lg"
-                  disabled={commitMutation.isPending || !commitMessage.trim() || isScanning}
-                >
-                  {commitMutation.isPending ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Committing...
-                    </>
-                  ) : (
-                    <>
-                      <GitBranch className="w-4 h-4 mr-2" />
-                      Commit & Push to Repository
-                    </>
-                  )}
-                </Button>
-                {checkovRef.current?.hasUnapprovedFixes() && (
-                  <p className="text-xs text-yellow-600 text-center mt-2">
-                    ⚠️ Code changes require approval. Please review and approve the fixes above.
-                  </p>
+                {showReadme && (
+                  <div className="mt-3 bg-muted rounded-lg p-4 max-h-64 overflow-y-auto">
+                    <pre className="text-xs whitespace-pre-wrap">{readmeContent}</pre>
+                  </div>
                 )}
-                {checkovRef.current?.getFixesApproved() && !scanAfterFixes && (
-                  <p className="text-xs text-yellow-600 text-center mt-2">
-                    ⚠️ Please run a security scan after approving fixes before committing.
-                  </p>
-                )}
-                {scanResult && scanResult.summary.failed > 0 && !checkovRef.current?.hasUnapprovedFixes() && (
-                  <p className="text-xs text-yellow-600 text-center mt-2">
-                    ⚠️ Warning: {scanResult.summary.failed} security check(s) failed. Review before committing.
-                  </p>
-                )}
+                <p className="text-xs text-muted-foreground mt-2">
+                  README.md will be automatically included in the commit
+                </p>
+              </Card>
+            )}
+
+            {/* Commit Section */}
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium mb-2 block">Commit Message</label>
+                <Textarea
+                  value={commitMessage}
+                  onChange={(e) => setCommitMessage(e.target.value)}
+                  placeholder="Enter commit message..."
+                  rows={3}
+                />
               </div>
-            </CardContent>
-          </Card>
+              <Button
+                onClick={() => commitMutation.mutate()}
+                className="w-full"
+                size="lg"
+                disabled={commitMutation.isPending || !commitMessage.trim()}
+              >
+                {commitMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Committing...
+                  </>
+                ) : (
+                  <>
+                    <GitBranch className="w-4 h-4 mr-2" />
+                    Commit & Push to Repository
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
         )}
       </main>
     </div>

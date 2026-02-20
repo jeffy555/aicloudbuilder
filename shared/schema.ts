@@ -84,6 +84,21 @@ export const userFixPreferences = pgTable("user_fix_preferences", {
   userTimesUsedIdx: index("idx_user_times_used").on(table.userId, table.timesUsed),
 }));
 
+// User activity tracking for history feature
+export const userActivities = pgTable("user_activities", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  sessionId: varchar("session_id").references(() => sessions.id),
+  module: text("module").notNull(), // 'terraform' | 'kubernetes' | 'automation' | 'archme' | 'docker' | 'scoreme'
+  actionType: text("action_type").notNull(), // 'score_run' | 'session_create' | etc.
+  actionLabel: text("action_label").notNull(), // Human-readable label
+  metadata: jsonb("metadata"), // Flexible JSON for action-specific data
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  userModuleIdx: index("idx_user_activities_user_module").on(table.userId, table.module),
+  userCreatedIdx: index("idx_user_activities_user_created").on(table.userId, table.createdAt),
+}));
+
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).pick({
   username: true,
@@ -136,6 +151,10 @@ export type GeneratedFile = typeof generatedFiles.$inferSelect;
 
 export type InsertUserFixPreference = z.infer<typeof insertUserFixPreferenceSchema>;
 export type UserFixPreference = typeof userFixPreferences.$inferSelect;
+
+export const insertUserActivitySchema = createInsertSchema(userActivities).omit({ id: true, createdAt: true });
+export type InsertUserActivity = z.infer<typeof insertUserActivitySchema>;
+export type UserActivity = typeof userActivities.$inferSelect;
 
 // Additional types for API
 export const repositorySchema = z.object({
@@ -231,6 +250,15 @@ export type CostStatus = z.infer<typeof costStatusSchema>;
 export const usageProfileSchema = z.enum(['low', 'medium', 'high', 'custom']);
 export type UsageProfile = z.infer<typeof usageProfileSchema>;
 
+export const usageDimensionSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  unit: z.string(),
+  defaultValue: z.number(),
+});
+
+export type UsageDimensionInfo = z.infer<typeof usageDimensionSchema>;
+
 export const costResourceSchema = z.object({
   resourceName: z.string(),
   resourceType: z.string(),
@@ -243,7 +271,7 @@ export const costResourceSchema = z.object({
   confidenceScore: z.number().min(0).max(1),
   confidenceLabel: z.enum(['high', 'medium', 'low']),
   assumptionsUsed: z.array(z.string()),
-  requiredUsageFields: z.array(z.string()).optional(),
+  usageDimensions: z.array(usageDimensionSchema).optional(),
   providedUsage: z.record(z.string(), z.number()).optional(),
   unresolvedVariables: z.array(z.string()).optional(),
   details: z.any().optional(),

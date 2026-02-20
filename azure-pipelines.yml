@@ -1,0 +1,160 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+variables:
+  # Azure service connection name in Azure DevOps
+  azureServiceConnection: "spiritops-azure-sc"
+
+  # Container registry settings
+  acrName: "spiritopsacr"
+  acrLoginServer: "spiritopsacr.azurecr.io"
+  imageRepository: "spiritops-app"
+
+  # Azure Container Apps settings
+  resourceGroup: "rg-spiritops-prod"
+  containerAppEnvironment: "aca-env-spiritops-prod"
+  containerAppName: "spiritops-app"
+  containerPort: "9005"
+
+  # Build settings
+  dockerfilePath: "Dockerfile"
+  imageTag: "$(Build.BuildId)"
+
+stages:
+  - stage: Build
+    displayName: Build and Push Image
+    jobs:
+      - job: BuildAndPush
+        displayName: Build and Push to ACR
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: Build and push Docker image
+            inputs:
+              azureSubscription: "$(azureServiceConnection)"
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                IMAGE="$(acrLoginServer)/$(imageRepository):$(imageTag)"
+                echo "Building image: ${IMAGE}"
+
+                az acr login --name "$(acrName)"
+                docker build -f "$(dockerfilePath)" -t "${IMAGE}" .
+                docker push "${IMAGE}"
+
+                echo "##vso[task.setvariable variable=fullImageName;isOutput=true]${IMAGE}"
+            name: buildStep
+
+  - stage: Deploy
+    displayName: Deploy to Azure Container Apps
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: DeployToACA
+        displayName: Deploy Container App
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          builtImage: $[ stageDependencies.Build.BuildAndPush.outputs['buildStep.fullImageName'] ]
+        steps:
+          - task: AzureCLI@2
+            displayName: Create/Update Azure Container App
+            inputs:
+              azureSubscription: "$(azureServiceConnection)"
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                # Mandatory production configuration checks
+                : "${AZURE_LOCATION:?AZURE_LOCATION is required}"
+                : "${DATABASE_URL:?DATABASE_URL is required (PostgreSQL connection string)}"
+                : "${JWT_SECRET:?JWT_SECRET is required}"
+                : "${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
+                : "${BITWARDEN_ACCESS_TOKEN:?BITWARDEN_ACCESS_TOKEN is required}"
+                : "${BITWARDEN_PROJECT_ID:?BITWARDEN_PROJECT_ID is required}"
+
+                IMAGE="$(builtImage)"
+                echo "Deploying image: ${IMAGE}"
+
+                az extension add --name containerapp --upgrade --only-show-errors
+
+                # Ensure resource group and environment exist (safe idempotent checks)
+                if ! az group show --name "$(resourceGroup)" >/dev/null 2>&1; then
+                  az group create --name "$(resourceGroup)" --location "$(AZURE_LOCATION)"
+                fi
+
+                if ! az containerapp env show --name "$(containerAppEnvironment)" --resource-group "$(resourceGroup)" >/dev/null 2>&1; then
+                  az containerapp env create \
+                    --name "$(containerAppEnvironment)" \
+                    --resource-group "$(resourceGroup)" \
+                    --location "$(AZURE_LOCATION)"
+                fi
+
+                ACR_USERNAME="$(az acr credential show -n "$(acrName)" --query username -o tsv)"
+                ACR_PASSWORD="$(az acr credential show -n "$(acrName)" --query "passwords[0].value" -o tsv)"
+
+                if az containerapp show --name "$(containerAppName)" --resource-group "$(resourceGroup)" >/dev/null 2>&1; then
+                  echo "Container App exists - updating."
+                  az containerapp update \
+                    --name "$(containerAppName)" \
+                    --resource-group "$(resourceGroup)" \
+                    --image "${IMAGE}" \
+                    --set-env-vars \
+                      NODE_ENV=production \
+                      PORT="$(containerPort)" \
+                      DATABASE_URL=secretref:database-url \
+                      JWT_SECRET=secretref:jwt-secret \
+                      OPENAI_API_KEY=secretref:openai-api-key \
+                      BITWARDEN_ACCESS_TOKEN=secretref:bitwarden-access-token \
+                      BITWARDEN_PROJECT_ID=secretref:bitwarden-project-id \
+                    --secrets \
+                      database-url="$(DATABASE_URL)" \
+                      jwt-secret="$(JWT_SECRET)" \
+                      openai-api-key="$(OPENAI_API_KEY)" \
+                      bitwarden-access-token="$(BITWARDEN_ACCESS_TOKEN)" \
+                      bitwarden-project-id="$(BITWARDEN_PROJECT_ID)" \
+                    --registry-server "$(acrLoginServer)" \
+                    --registry-username "${ACR_USERNAME}" \
+                    --registry-password "${ACR_PASSWORD}"
+                else
+                  echo "Container App does not exist - creating."
+                  az containerapp create \
+                    --name "$(containerAppName)" \
+                    --resource-group "$(resourceGroup)" \
+                    --environment "$(containerAppEnvironment)" \
+                    --ingress external \
+                    --target-port "$(containerPort)" \
+                    --min-replicas 1 \
+                    --max-replicas 3 \
+                    --image "${IMAGE}" \
+                    --registry-server "$(acrLoginServer)" \
+                    --registry-username "${ACR_USERNAME}" \
+                    --registry-password "${ACR_PASSWORD}" \
+                    --env-vars \
+                      NODE_ENV=production \
+                      PORT="$(containerPort)" \
+                      DATABASE_URL=secretref:database-url \
+                      JWT_SECRET=secretref:jwt-secret \
+                      OPENAI_API_KEY=secretref:openai-api-key \
+                      BITWARDEN_ACCESS_TOKEN=secretref:bitwarden-access-token \
+                      BITWARDEN_PROJECT_ID=secretref:bitwarden-project-id \
+                    --secrets \
+                      database-url="$(DATABASE_URL)" \
+                      jwt-secret="$(JWT_SECRET)" \
+                      openai-api-key="$(OPENAI_API_KEY)" \
+                      bitwarden-access-token="$(BITWARDEN_ACCESS_TOKEN)" \
+                      bitwarden-project-id="$(BITWARDEN_PROJECT_ID)"
+                fi
+
+                FQDN="$(az containerapp show --name "$(containerAppName)" --resource-group "$(resourceGroup)" --query properties.configuration.ingress.fqdn -o tsv)"
+                echo "Container App FQDN: ${FQDN}"

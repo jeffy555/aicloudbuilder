@@ -1,21 +1,24 @@
 import { db } from './db';
-import { 
-  users, 
-  sessions, 
-  messages, 
-  generatedFiles 
+import {
+  users,
+  sessions,
+  messages,
+  generatedFiles,
+  userActivities
 } from '@shared/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, desc, sql } from 'drizzle-orm';
 import type { IStorage } from './storage';
-import type { 
-  User, 
-  Session, 
-  Message, 
-  GeneratedFile, 
-  InsertUser, 
-  InsertSession, 
-  InsertMessage, 
-  InsertGeneratedFile 
+import type {
+  User,
+  Session,
+  Message,
+  GeneratedFile,
+  InsertUser,
+  InsertSession,
+  InsertMessage,
+  InsertGeneratedFile,
+  UserActivity,
+  InsertUserActivity
 } from '@shared/schema';
 import { randomUUID } from 'crypto';
 
@@ -286,6 +289,75 @@ export class PostgresStorage implements IStorage {
       await db.delete(generatedFiles).where(eq(generatedFiles.sessionId, sessionId));
     } catch (error) {
       console.error('Error deleting files by session:', error);
+      throw error;
+    }
+  }
+
+  // User history methods
+  async getSessionsByUser(userId: string, options?: { module?: string; limit?: number; offset?: number }): Promise<Session[]> {
+    try {
+      const conditions = [eq(sessions.userId, userId)];
+      if (options?.module) {
+        conditions.push(eq(sessions.activeModule, options.module));
+      }
+      const result = await db.select().from(sessions)
+        .where(and(...conditions))
+        .orderBy(desc(sessions.updatedAt))
+        .limit(options?.limit ?? 50)
+        .offset(options?.offset ?? 0);
+      return result;
+    } catch (error) {
+      console.error('Error getting sessions by user:', error);
+      throw error;
+    }
+  }
+
+  async getSessionCountByUser(userId: string): Promise<number> {
+    try {
+      const result = await db.select({ count: sql<number>`count(*)` })
+        .from(sessions)
+        .where(eq(sessions.userId, userId));
+      return Number(result[0]?.count ?? 0);
+    } catch (error) {
+      console.error('Error getting session count by user:', error);
+      throw error;
+    }
+  }
+
+  async createUserActivity(activity: InsertUserActivity): Promise<UserActivity> {
+    try {
+      const id = randomUUID();
+      const [record] = await db.insert(userActivities).values({
+        id,
+        userId: activity.userId,
+        sessionId: activity.sessionId ?? null,
+        module: activity.module,
+        actionType: activity.actionType,
+        actionLabel: activity.actionLabel,
+        metadata: activity.metadata ?? null,
+        createdAt: new Date(),
+      }).returning();
+      return record;
+    } catch (error) {
+      console.error('Error creating user activity:', error);
+      throw error;
+    }
+  }
+
+  async getUserActivities(userId: string, options?: { module?: string; limit?: number; offset?: number }): Promise<UserActivity[]> {
+    try {
+      const conditions = [eq(userActivities.userId, userId)];
+      if (options?.module) {
+        conditions.push(eq(userActivities.module, options.module));
+      }
+      const result = await db.select().from(userActivities)
+        .where(and(...conditions))
+        .orderBy(desc(userActivities.createdAt))
+        .limit(options?.limit ?? 50)
+        .offset(options?.offset ?? 0);
+      return result;
+    } catch (error) {
+      console.error('Error getting user activities:', error);
       throw error;
     }
   }

@@ -72,7 +72,7 @@ Identify all best practice issues and provide specific, actionable suggestions.`
 
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }

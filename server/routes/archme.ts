@@ -222,7 +222,6 @@ export function registerArchMeRoutes(app: Express) {
   app.post("/api/sessions/:id/generate-architecture-diagram", optionalAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
-      const useAI = req.body.useAI !== false; // Default to true
       const requestedDiagramType = req.body.diagramType as DiagramType | undefined;
       const allowedDiagramTypes: DiagramType[] = [
         'flowchart',
@@ -277,7 +276,7 @@ export function registerArchMeRoutes(app: Express) {
 
       console.log(`📡 Analysis parsed successfully. Calling generator...`);
       // Generate diagram from analysis
-      const result = await generateArchDiagramFromAnalysis(analysis, diagramType, useAI);
+      const result = await generateArchDiagramFromAnalysis(analysis, diagramType);
       console.log(`✅ Generator returned result. Mermaid syntax length: ${result.mermaidSyntax?.length || 0}`);
 
       console.log(`\n✅ Architecture diagram generated!`);
@@ -347,7 +346,7 @@ export function registerArchMeRoutes(app: Express) {
         });
       }
 
-      const result = await generateArchDiagramFromAnalysis(analysis, diagramType, true);
+      const result = await generateArchDiagramFromAnalysis(analysis, diagramType);
 
       if (!result?.mermaidSyntax || typeof result.mermaidSyntax !== "string") {
         return res.status(500).json({
@@ -375,7 +374,7 @@ export function registerArchMeRoutes(app: Express) {
   });
 
   // Extract components from approved diagram (for ArchMe workflow)
-  app.post("/api/sessions/:id/extract-components", async (req, res) => {
+  app.post("/api/sessions/:id/extract-components", optionalAuth, async (req, res) => {
     try {
       const sessionId = req.params.id;
       console.log(`\n🔍 Extracting components from diagram for session ${sessionId}`);
@@ -424,7 +423,7 @@ export function registerArchMeRoutes(app: Express) {
   });
 
   // Generate code for all components (for ArchMe workflow)
-  app.post("/api/sessions/:id/generate-component-code", async (req, res) => {
+  app.post("/api/sessions/:id/generate-component-code", optionalAuth, async (req, res) => {
     try {
       const sessionId = req.params.id;
       const { components, repositoryType = 'github' } = req.body;
@@ -447,6 +446,23 @@ export function registerArchMeRoutes(app: Express) {
 
       console.log(`\n✅ Generated code for ${generatedCode.length} components`);
 
+      // Store generated files in session storage so Security Scan and Cost Analysis can access them
+      const existingFiles = await storage.getFilesBySession(sessionId);
+      for (const item of generatedCode) {
+        const fileName = item.fileName || `${item.componentName}.tf`;
+        const existingFile = existingFiles.find(f => f.fileName === fileName);
+        if (existingFile) {
+          await storage.updateFile(existingFile.id, item.content || '');
+        } else {
+          await storage.createFile({
+            sessionId,
+            fileName,
+            content: item.content || ''
+          });
+        }
+      }
+      console.log(`   💾 Stored ${generatedCode.length} file(s) in session storage`);
+
       res.json({
         success: true,
         code: generatedCode
@@ -461,7 +477,7 @@ export function registerArchMeRoutes(app: Express) {
   });
 
   // Scan ArchMe generated code with Checkov (uses same logic as Terraform/Kubernetes scan)
-  app.post("/api/sessions/:id/scan-archme-code", async (req, res) => {
+  app.post("/api/sessions/:id/scan-archme-code", optionalAuth, async (req, res) => {
     try {
       const sessionId = req.params.id;
       const { code } = req.body;
@@ -615,7 +631,7 @@ export function registerArchMeRoutes(app: Express) {
   });
 
   // Generate README for ArchMe code
-  app.post("/api/sessions/:id/generate-archme-readme", async (req, res) => {
+  app.post("/api/sessions/:id/generate-archme-readme", optionalAuth, async (req, res) => {
     try {
       const sessionId = req.params.id;
       const { code } = req.body;
@@ -649,7 +665,7 @@ export function registerArchMeRoutes(app: Express) {
   });
 
   // Commit ArchMe generated code to repository
-  app.post("/api/sessions/:id/commit-archme-code", async (req, res) => {
+  app.post("/api/sessions/:id/commit-archme-code", optionalAuth, async (req, res) => {
     try {
       const sessionId = req.params.id;
       const { provider, repoId, code, message, branch = 'main' } = req.body;

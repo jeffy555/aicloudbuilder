@@ -98,7 +98,8 @@ export default function KubernetesWorkflow() {
       setSessionId(session.id);
       localStorage.setItem('kubernetes_workflow_session_id', session.id);
 
-      // Session will be updated as we progress through steps
+      // Tag session with module type for history tracking
+      await apiRequest('PATCH', `/api/sessions/${session.id}`, { activeModule: 'kubernetes' });
 
       await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, {
         message: 'Welcome to Kubernetes Workflow! Choose a workflow type to get started: Manifest Generation or Helm Chart Validation.'
@@ -342,11 +343,13 @@ export default function KubernetesWorkflow() {
       const session = await response.json() as Session;
       setSessionId(session.id);
       localStorage.setItem('kubernetes_workflow_session_id', session.id);
-      
-      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
-        message: 'Welcome to Kubernetes Workflow! Choose a workflow type to get started: Manifest Generation or Helm Chart Validation.' 
+
+      await apiRequest('PATCH', `/api/sessions/${session.id}`, { activeModule: 'kubernetes' });
+
+      await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, {
+        message: 'Welcome to Kubernetes Workflow! Choose a workflow type to get started: Manifest Generation or Helm Chart Validation.'
       });
-      
+
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', session.id, 'messages'] });
       
       toast({

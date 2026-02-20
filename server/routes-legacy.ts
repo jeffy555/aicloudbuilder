@@ -34,7 +34,6 @@ import {
   buildPricingApiFilter,
   selectBestPricingItem,
   calculateMonthlyCost,
-  calculateFallbackMonthlyCost,
 } from "./azure-pricing-config";
 import { hasUsageDimensions, getUsageDefaults, getUsageCatalog, applyUsageToAttrs } from "./azure-usage-catalog";
 import {
@@ -5977,7 +5976,6 @@ Please check the server console logs for detailed error information.`;
   app.post("/api/sessions/:id/generate-architecture-diagram", async (req, res) => {
     try {
       const sessionId = req.params.id;
-      const useAI = req.body.useAI !== false; // Default to true
       const requestedDiagramType = req.body.diagramType as DiagramType | undefined;
       const allowedDiagramTypes: DiagramType[] = [
         'flowchart',
@@ -6026,7 +6024,7 @@ Please check the server console logs for detailed error information.`;
       }
 
       // Generate diagram from analysis
-      const result = await generateArchDiagramFromAnalysis(analysis, diagramType, useAI);
+      const result = await generateArchDiagramFromAnalysis(analysis, diagramType);
 
       console.log(`\n✅ Architecture diagram generated!`);
       console.log(`   📊 Components: ${result.metadata.totalComponents}`);
@@ -9333,45 +9331,44 @@ ${JSON.stringify(filesContent, null, 2)}
 
 Remember: Return ONLY the JSON object, no other text.`;
 
-      const aiAnalysis = await openaiService.chat([
-        {
-          role: 'system',
-          content: `You are an expert at analyzing Terraform files and extracting ${isAWS ? 'AWS' : 'Azure'} resource information for cost estimation. Return only valid JSON.`
-        },
-        {
-          role: 'user',
-          content: analysisPrompt
-        }
-      ]);
-
-      // Parse AI response
       let aiParsedResources: any[] = [];
       try {
+        const aiAnalysis = await openaiService.chat([
+          {
+            role: 'system',
+            content: `You are an expert at analyzing Terraform files and extracting ${isAWS ? 'AWS' : 'Azure'} resource information for cost estimation. Return only valid JSON.`
+          },
+          {
+            role: 'user',
+            content: analysisPrompt
+          }
+        ]);
+
         console.log(`\n📝 AI Response (first 500 chars): ${aiAnalysis.substring(0, 500)}...`);
-        
+
         const cleanedResponse = aiAnalysis.trim();
         const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
         let parsedData: any;
-        
+
         if (jsonMatch) {
           parsedData = JSON.parse(jsonMatch[0]);
         } else {
           parsedData = JSON.parse(cleanedResponse);
         }
-        
+
         aiParsedResources = parsedData.resources || parsedData || [];
-        
+
         console.log(`\n✅ Parsed ${aiParsedResources.length} resource(s) from AI analysis`);
         if (aiParsedResources.length > 0) {
-          aiParsedResources.forEach((r, idx) => {
+          aiParsedResources.forEach((r: any, idx: number) => {
             console.log(`   ${idx + 1}. ${r.resourceType} - ${r.resourceName} (${r.location || 'no location'})`);
           });
         } else {
           console.warn(`   ⚠️  No resources found in AI response!`);
           console.warn(`   Full AI response: ${aiAnalysis}`);
         }
-      } catch (parseError: any) {
-        console.warn('⚠️  Failed to parse AI response:', parseError.message);
+      } catch (aiError: any) {
+        console.warn(`⚠️  AI analysis failed (non-fatal): ${aiError.message}`);
         console.warn('   Will use direct parsing results instead');
       }
       
@@ -9588,16 +9585,39 @@ Remember: Return ONLY the JSON object, no other text.`;
                 confidenceLabel: 'low',
                 assumptionsUsed: [],
                 unresolvedVariables: unresolvedVars,
-                requiredUsageFields: criticalAttrs,
+                usageDimensions: criticalAttrs.map(key => ({
+                  key,
+                  label: key,
+                  unit: '',
+                  defaultValue: 0,
+                })),
+              });
+              continue;
+            }
+
+            // If no pricing config exists, mark as unsupported (no heuristic fallback)
+            if (!pricingConfig) {
+              console.warn(`      ⚠️  No pricing config for ${resource.resourceType} - marking as unsupported`);
+              costEstimates.push({
+                resourceName: resource.resourceName,
+                resourceType: resource.resourceType,
+                serviceName,
+                monthlyCost: 0,
+                yearlyCost: 0,
+                currency: 'USD',
+                status: 'needs_input',
+                pricingMatchType: 'unsupported',
+                confidenceScore: 0,
+                confidenceLabel: 'low',
+                assumptionsUsed: ['No deterministic pricing config available for this resource type'],
+                unresolvedVariables: unresolvedVars.length > 0 ? unresolvedVars : undefined,
               });
               continue;
             }
 
             // Build the API filter
-            let matchType: CostResource['pricingMatchType'] = pricingConfig ? 'config_exact' : 'fallback';
-            const filter = pricingConfig
-              ? buildPricingApiFilter(resource.resourceType, resolvedAttrs, resource.location || 'eastus')
-              : `serviceName eq '${serviceName}' and armRegionName eq '${azureLocation}' and priceType eq 'Consumption'`;
+            let matchType: CostResource['pricingMatchType'] = 'config_exact';
+            const filter = buildPricingApiFilter(resource.resourceType, resolvedAttrs, resource.location || 'eastus');
 
             if (!filter) {
               console.warn(`      ⚠️  No pricing filter available for ${resource.resourceType}`);
@@ -9655,16 +9675,18 @@ Remember: Return ONLY the JSON object, no other text.`;
                 confidenceScore: 0,
                 confidenceLabel: 'low',
                 assumptionsUsed: ['No pricing data found in Azure Retail API'],
-                requiredUsageFields: usageCatalog?.dimensions.map(d => d.key),
+                usageDimensions: usageCatalog?.dimensions.map(d => ({
+                  key: d.key,
+                  label: d.label,
+                  unit: d.unit,
+                  defaultValue: d[requestProfile === 'custom' ? 'medium' : requestProfile],
+                })),
               });
               continue;
             }
 
             // Select the best pricing item using the config's selector
-            const priceItem = pricingConfig
-              ? selectBestPricingItem(resource.resourceType, items, resolvedAttrs)
-              : (items.find((i: any) => i.retailPrice > 0 && i.unitOfMeasure?.includes('Hour')) ||
-                 items.find((i: any) => i.retailPrice > 0) || items[0]);
+            const priceItem = selectBestPricingItem(resource.resourceType, items, resolvedAttrs);
 
             if (!priceItem) {
               console.log(`      ℹ️  No applicable pricing item (resource may have no direct cost)`);
@@ -9692,10 +9714,8 @@ Remember: Return ONLY the JSON object, no other text.`;
               ? applyUsageToAttrs(resource.resourceType, resolvedAttrs, appliedUsage)
               : resolvedAttrs;
 
-            // Calculate monthly cost using the config's calculator (or smart fallback)
-            const monthlyCost = pricingConfig
-              ? calculateMonthlyCost(resource.resourceType, priceItem, costAttrs)
-              : calculateFallbackMonthlyCost(priceItem);
+            // Calculate monthly cost using the config's deterministic calculator
+            const monthlyCost = calculateMonthlyCost(resource.resourceType, priceItem, costAttrs);
 
             const yearlyCost = monthlyCost * 12;
 
@@ -9723,11 +9743,6 @@ Remember: Return ONLY the JSON object, no other text.`;
               confidenceScore = Math.min(confidenceScore, 0.5);
               status = 'estimated';
             }
-            if (matchType === 'fallback') {
-              assumptions.push('Used generic fallback pricing (no specific config)');
-              confidenceScore = Math.min(confidenceScore, 0.3);
-              status = 'estimated';
-            }
             if (unresolvedVars.length > 0) {
               assumptions.push(`Unresolved vars: ${unresolvedVars.join(', ')} - used defaults`);
               confidenceScore = Math.min(confidenceScore, 0.4);
@@ -9749,7 +9764,12 @@ Remember: Return ONLY the JSON object, no other text.`;
               confidenceScore: Math.round(confidenceScore * 100) / 100,
               confidenceLabel,
               assumptionsUsed: assumptions,
-              requiredUsageFields: usageCatalog?.dimensions.map(d => d.key),
+              usageDimensions: usageCatalog?.dimensions.map(d => ({
+                key: d.key,
+                label: d.label,
+                unit: d.unit,
+                defaultValue: d[requestProfile === 'custom' ? 'medium' : requestProfile],
+              })),
               providedUsage: Object.keys(appliedUsage).length > 0 ? appliedUsage : undefined,
               unresolvedVariables: unresolvedVars.length > 0 ? unresolvedVars : undefined,
               details: resolvedAttrs,

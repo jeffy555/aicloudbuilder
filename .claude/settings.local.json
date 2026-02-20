@@ -6,7 +6,8 @@
       "Bash(python -m json.tool:*)",
       "Bash(taskkill:*)",
       "Bash(node:*)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "WebFetch(domain:github.com)"
     ]
   },
   "model": "claude-opus-4.6"

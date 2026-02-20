@@ -1532,8 +1532,29 @@ Check if the MCP server package is properly installed.`;
         throw error;
       }
     } else if (provider === 'azure') {
-      const files = await this.scanRepositoryFilesViaAzureDevOpsAPI(repoName, branch);
-      return files.map((file) => file.path);
+      // List ALL file paths (not just .tf) — used by Docker, ArchMe, etc.
+      const org = process.env.AZURE_DEVOPS_ORG;
+      const pat = process.env.AZURE_DEVOPS_PAT;
+      const project = process.env.AZURE_DEVOPS_PROJECT;
+      if (!org || !pat || !project) {
+        throw new Error('Azure DevOps credentials not configured.');
+      }
+      const repoId = await this.getAzureDevOpsRepositoryId(org, pat, project, repoName);
+      const itemsUrl = `https://dev.azure.com/${org}/${project}/_apis/git/repositories/${repoId}/items?recursionLevel=Full&versionDescriptor.version=${branch}&versionDescriptor.versionType=branch&api-version=7.1`;
+      const authHeader = Buffer.from(`:${pat}`).toString('base64');
+      const response = await fetch(itemsUrl, {
+        headers: { 'Authorization': `Basic ${authHeader}` },
+      });
+      if (!response.ok) {
+        if (response.status === 404) return [];
+        throw new Error(`Failed to fetch repository items: ${response.statusText}`);
+      }
+      const items = await response.json();
+      const allFiles = (items.value || []) as any[];
+      return allFiles
+        .filter((item: any) => item.isFolder === false || item.gitObjectType === 'blob')
+        .map((item: any) => item.path || '')
+        .filter(Boolean);
     }
     throw new Error(`Unsupported provider: ${provider}`);
   }

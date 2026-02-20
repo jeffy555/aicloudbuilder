@@ -257,8 +257,8 @@ async function run() {
     });
 
     results.push({
-      test: 'Resource has pricingMatchType',
-      pass: ['config_exact', 'config_broad', 'fallback', 'free', 'parent', 'unsupported'].includes(firstBillable.pricingMatchType),
+      test: 'Resource has pricingMatchType (no fallback)',
+      pass: ['config_exact', 'config_broad', 'free', 'parent', 'unsupported'].includes(firstBillable.pricingMatchType),
       detail: `${firstBillable.resourceName}: matchType=${firstBillable.pricingMatchType}`,
     });
 
@@ -268,6 +268,26 @@ async function run() {
       detail: `${firstBillable.resourceName}: assumptions=${JSON.stringify(firstBillable.assumptionsUsed)}`,
     });
   }
+
+  // Check no resources use fallback pricing
+  const fallbackResources = data1.resources.filter((r: any) => r.pricingMatchType === 'fallback');
+  results.push({
+    test: 'No resources use fallback heuristic pricing',
+    pass: fallbackResources.length === 0,
+    detail: `fallback count=${fallbackResources.length}`,
+  });
+
+  // Check estimated resources have usageDimensions
+  const estimatedRes = data1.resources.find((r: any) => r.status === 'estimated' && r.usageDimensions?.length > 0);
+  results.push({
+    test: 'Estimated resources have usageDimensions metadata',
+    pass: !!estimatedRes && estimatedRes.usageDimensions.every((d: any) =>
+      d.key && d.label && d.unit !== undefined && typeof d.defaultValue === 'number'
+    ),
+    detail: estimatedRes
+      ? `${estimatedRes.resourceName}: dims=${JSON.stringify(estimatedRes.usageDimensions.map((d: any) => d.key))}`
+      : 'no estimated resource with dimensions found',
+  });
 
   // Check free resources
   const freeRes = data1.resources.find((r: any) => r.pricingMatchType === 'free');
@@ -358,6 +378,44 @@ async function run() {
     test: 'No body defaults to medium profile',
     pass: data4.success === true && data4.summary.profile === 'medium',
     detail: `profile=${data4.summary.profile}`,
+  });
+
+  // ─── TEST 5: Custom usage overrides ────────────────────────────────────
+  console.log('\n=== TEST 5: Custom usage overrides ===');
+  const res5 = await fetch(`${BASE}/api/sessions/${sessionId}/analyze-cost`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      profile: 'medium',
+      customUsage: {
+        'azurerm_storage_account.main': { hot_gb: 1000, cool_gb: 500 },
+      },
+    }),
+  });
+  const data5 = await res5.json();
+
+  results.push({
+    test: 'Custom usage: returns success',
+    pass: data5.success === true,
+    detail: `success=${data5.success}`,
+  });
+
+  // Storage with custom 1500GB should cost more than medium profile (50GB)
+  const storMedium = data1.resources.find((r: any) => r.resourceType === 'azurerm_storage_account');
+  const storCustom = data5.resources.find((r: any) => r.resourceType === 'azurerm_storage_account');
+  results.push({
+    test: 'Custom usage: storage cost differs from profile default',
+    pass: !!storMedium && !!storCustom && storCustom.monthlyCost > storMedium.monthlyCost,
+    detail: storCustom
+      ? `custom=$${storCustom.monthlyCost} vs medium=$${storMedium?.monthlyCost}`
+      : 'storage not found',
+  });
+
+  // Custom usage resource should have status=exact (user provided values)
+  results.push({
+    test: 'Custom usage: resource becomes exact status',
+    pass: !!storCustom && storCustom.status === 'exact',
+    detail: storCustom ? `status=${storCustom.status}` : 'storage not found',
   });
 
   // ─── PRINT REPORT ─────────────────────────────────────────────────────

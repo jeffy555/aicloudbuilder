@@ -11,11 +11,18 @@ import Signup from "@/pages/Signup";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import ScoreMe from "@/pages/ScoreMe";
+import ScoreMeIntro from "@/pages/ScoreMeIntro";
 import TerraformWorkflow from "@/pages/TerraformWorkflow";
+import TerraformIntro from "@/pages/TerraformIntro";
 import AutomationWorkflow from "@/pages/AutomationWorkflow";
+import AutomationIntro from "@/pages/AutomationIntro";
 import ArchMeWorkflow from "@/pages/ArchMeWorkflow";
+import ArchMeIntro from "@/pages/ArchMeIntro";
 import KubernetesWorkflow from "@/pages/KubernetesWorkflow";
+import KubernetesIntro from "@/pages/KubernetesIntro";
 import DockerWorkflow from "@/pages/DockerWorkflow";
+import DockerIntro from "@/pages/DockerIntro";
+import History from "@/pages/History";
 import NotFound from "@/pages/not-found";
 
 /**
@@ -76,11 +83,25 @@ function Router() {
       <Route path="/terraform">
         <ProtectedRoute>
           <PageTransition>
+            <TerraformIntro />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/terraform/app">
+        <ProtectedRoute>
+          <PageTransition>
             <TerraformWorkflow />
           </PageTransition>
         </ProtectedRoute>
       </Route>
       <Route path="/automation">
+        <ProtectedRoute>
+          <PageTransition>
+            <AutomationIntro />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/automation/app">
         <ProtectedRoute>
           <PageTransition>
             <AutomationWorkflow />
@@ -90,11 +111,25 @@ function Router() {
       <Route path="/scoreme">
         <ProtectedRoute>
           <PageTransition>
+            <ScoreMeIntro />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/scoreme/app">
+        <ProtectedRoute>
+          <PageTransition>
             <ScoreMe />
           </PageTransition>
         </ProtectedRoute>
       </Route>
       <Route path="/archme">
+        <ProtectedRoute>
+          <PageTransition>
+            <ArchMeIntro />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/archme/app">
         <ProtectedRoute>
           <PageTransition>
             <ArchMeWorkflow />
@@ -104,6 +139,13 @@ function Router() {
       <Route path="/kubernetes">
         <ProtectedRoute>
           <PageTransition>
+            <KubernetesIntro />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/kubernetes/app">
+        <ProtectedRoute>
+          <PageTransition>
             <KubernetesWorkflow />
           </PageTransition>
         </ProtectedRoute>
@@ -111,7 +153,21 @@ function Router() {
       <Route path="/docker">
         <ProtectedRoute>
           <PageTransition>
+            <DockerIntro />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/docker/app">
+        <ProtectedRoute>
+          <PageTransition>
             <DockerWorkflow />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/history">
+        <ProtectedRoute>
+          <PageTransition>
+            <History />
           </PageTransition>
         </ProtectedRoute>
       </Route>

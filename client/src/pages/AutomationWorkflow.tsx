@@ -50,16 +50,42 @@ export default function AutomationWorkflow() {
     { id: 'bash' as Language, name: 'Bash', icon: <Code2 className="w-6 h-6" />, extension: '.sh' },
   ];
 
-  // Create a fresh session on mount (don't restore old sessions to avoid stale messages)
+  // Create or restore session on mount
   useEffect(() => {
     const initializeSession = async () => {
-      // Always start fresh to avoid showing old/stale messages from previous workflows
-      localStorage.removeItem('automation_workflow_session_id');
+      const savedSessionId = localStorage.getItem('automation_workflow_session_id');
+
+      if (savedSessionId) {
+        try {
+          const response = await apiRequest('GET', `/api/sessions/${savedSessionId}`);
+          const session = await response.json() as Session;
+          setSessionId(session.id);
+
+          // Restore workflow state from session + localStorage
+          if (session.provider) setProvider(session.provider as Provider);
+          if (session.repositoryId) setSelectedRepo(session.repositoryId);
+          const savedLang = localStorage.getItem('automation_workflow_language') as Language;
+          if (savedLang) setSelectedLanguage(savedLang);
+
+          if (session.currentStep) {
+            const stepNum = parseInt(session.currentStep, 10) as Step;
+            if (stepNum >= 1 && stepNum <= 4) setCurrentStep(stepNum);
+          }
+
+          return;
+        } catch (error) {
+          localStorage.removeItem('automation_workflow_session_id');
+          localStorage.removeItem('automation_workflow_language');
+        }
+      }
 
       const response = await apiRequest('POST', '/api/sessions');
       const session = await response.json() as Session;
       setSessionId(session.id);
       localStorage.setItem('automation_workflow_session_id', session.id);
+
+      // Tag session with module type for history tracking
+      await apiRequest('PATCH', `/api/sessions/${session.id}`, { activeModule: 'automation' });
     };
 
     initializeSession();
@@ -137,6 +163,9 @@ export default function AutomationWorkflow() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
       setCurrentStep(4);
+      if (sessionId) {
+        apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '4' }).catch(() => {});
+      }
       // Set default commit message
       if (!commitMessage) {
         setCommitMessage(`Add automation script: ${automationPrompt}`);
@@ -184,7 +213,10 @@ export default function AutomationWorkflow() {
   const handleLanguageSelect = (language: Language) => {
     setSelectedLanguage(language);
     setCurrentStep(2);
-    // Don't send chat message - UI already shows selection visually
+    localStorage.setItem('automation_workflow_language', language || '');
+    if (sessionId) {
+      apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '2' }).catch(() => {});
+    }
   };
 
   const handleProviderSelect = async (selectedProvider: Provider) => {
@@ -231,6 +263,9 @@ export default function AutomationWorkflow() {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
     }
     setCurrentStep(3);
+    if (sessionId) {
+      apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '3' }).catch(() => {});
+    }
   };
 
   const handleAutomationSubmit = async (prompt: string) => {
@@ -251,6 +286,7 @@ export default function AutomationWorkflow() {
   const handleRefresh = async () => {
     try {
       localStorage.removeItem('automation_workflow_session_id');
+      localStorage.removeItem('automation_workflow_language');
       setSessionId('');
       setCurrentStep(1);
       setSelectedLanguage(null);
@@ -267,7 +303,8 @@ export default function AutomationWorkflow() {
       const session = await response.json() as Session;
       setSessionId(session.id);
       localStorage.setItem('automation_workflow_session_id', session.id);
-      // Don't send welcome message - UI already shows step instructions
+
+      await apiRequest('PATCH', `/api/sessions/${session.id}`, { activeModule: 'automation' });
 
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', session.id, 'messages'] });
 

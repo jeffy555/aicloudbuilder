@@ -47,7 +47,6 @@ export interface DiagramGenerationResult {
 export async function generateArchitectureDiagram(
   analysis: ArchitectureAnalysis,
   diagramType: DiagramType = 'flowchart',
-  useAI: boolean = true
 ): Promise<DiagramGenerationResult> {
   console.log('\n🎨 ========== ARCHITECTURE DIAGRAM GENERATION ==========');
   console.log(`📊 Components: ${analysis.components?.length || 0}`);
@@ -92,13 +91,6 @@ export async function generateArchitectureDiagram(
     } else {
       console.log(`   ✅ ${diagramType} syntax generated (${diagramType === 'pie' ? 'pie chart' : diagramType})`);
     }
-  }
-
-  // Step 3: Enhance with AI if enabled (only for flowcharts)
-  if (useAI && diagramType === 'flowchart') {
-    console.log('\n🤖 Step 3: AI enhancement is temporarily disabled due to formatting glitches');
-  } else if (useAI && diagramType !== 'flowchart') {
-    console.log(`\n⏭️  Skipping AI enhancement for ${diagramType} diagram type`);
   }
 
   // Build result
@@ -595,7 +587,7 @@ Return ONLY the improved Mermaid syntax, nothing else.`;
 
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { 
           role: 'system', 

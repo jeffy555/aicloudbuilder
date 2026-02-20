@@ -260,7 +260,7 @@ Keep responses conversational and helpful. Always confirm actions before they're
 
     try {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { role: 'system', content: systemPrompt },
           ...messages
@@ -289,7 +289,7 @@ Keep responses conversational and helpful. Always confirm actions before they're
 
   async chatWithContext(contextPrompt: string, messages: ChatMessage[]): Promise<string> {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { role: 'system', content: contextPrompt },
         ...messages
@@ -479,7 +479,7 @@ Return ONLY valid JSON, no markdown, no explanations.`;
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           {
             role: 'system',
@@ -531,7 +531,7 @@ Return ONLY a JSON array, no explanations. Example: ["name", "location", "accoun
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           {
             role: 'system',
@@ -645,7 +645,7 @@ Return ONLY valid JSON, no markdown, no explanations.`;
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           {
             role: 'system',
@@ -746,7 +746,7 @@ Be precise and base your analysis on the actual file content, not assumptions.`;
 
     try {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { 
             role: 'system', 
@@ -848,7 +848,7 @@ Be specific about resource types (e.g., "azurerm_resource_group", "azurerm_stora
     
     try {
       const analysisCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { 
             role: 'system', 
@@ -987,7 +987,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { role: 'system', content: 'You are a Terraform expert specializing in reusable child modules. Generate well-structured child modules using ONLY resource blocks, organized by resource type into separate folders. Never use module blocks in child modules.' },
           { role: 'user', content: prompt }
@@ -1238,7 +1238,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
             { 
               role: 'system', 
@@ -1596,7 +1596,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { role: 'system', content: 'You are a Terraform expert. Generate concise aggregated root modules with opinionated defaults. Avoid asking users for every detail.' },
           { role: 'user', content: prompt }
@@ -1737,7 +1737,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { role: 'system', content: 'You are a Terraform expert. Generate well-structured, production-ready Terraform code.' },
           { role: 'user', content: prompt }
@@ -1933,7 +1933,7 @@ Examples:
 Generate only the commit message, nothing else.`;
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { role: 'user', content: prompt }
       ],
@@ -1978,7 +1978,7 @@ variable "variable_name" {
 Return ONLY the Terraform code, no markdown, no explanations.`;
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { role: 'system', content: 'You are a Terraform expert. Generate clean, production-ready variable declarations.' },
         { role: 'user', content: prompt }
@@ -2023,7 +2023,7 @@ variable_name = { key = "value" }
 Return ONLY the Terraform code, no markdown, no explanations.`;
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { role: 'system', content: 'You are a Terraform expert. Generate sensible default values for .tfvars files based on context.' },
         { role: 'user', content: prompt }
@@ -2061,7 +2061,7 @@ Return ONLY valid JSON, no markdown, no explanations.`;
 
     try {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { role: 'system', content: 'You are a Terraform expert. Extract resource types and return them as JSON.' },
           { role: 'user', content: prompt }
@@ -2153,7 +2153,7 @@ Generate the complete script code.`;
 
     try {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4.1',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }

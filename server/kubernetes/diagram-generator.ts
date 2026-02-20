@@ -496,7 +496,7 @@ Make it clearer and more visually appealing while keeping all resources and rela
 
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }

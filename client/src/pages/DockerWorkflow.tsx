@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Package, Home, RefreshCw, Loader2, Shield, FileText } from "lucide-react";
+import { Package, Home, RefreshCw, Loader2, Shield, FileText, CheckCircle2, GitBranch, Search, FileCode, FolderTree } from "lucide-react";
 import type { Session, Message, Repository, GeneratedFile } from "@shared/schema";
 
 interface ExistingDockerfile {
@@ -73,6 +73,7 @@ export default function DockerWorkflow() {
   const [scanHasResults, setScanHasResults] = useState<boolean>(false); // Track if scan has actual results (not 0 total)
   const [repoScanData, setRepoScanData] = useState<DockerRepoScan | null>(null);
   const [isRepoScanning, setIsRepoScanning] = useState<boolean>(false);
+  const [scanPhase, setScanPhase] = useState<string>('');
   const [scanError, setScanError] = useState<string | null>(null);
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
   const [existingDockerfile, setExistingDockerfile] = useState<ExistingDockerfile | null>(null);
@@ -100,21 +101,27 @@ export default function DockerWorkflow() {
           const session = await response.json() as Session;
           setSessionId(session.id);
           
+          // Restore state from session
+          if (session.provider) setProvider(session.provider as Provider);
+          if (session.repositoryName) setSelectedRepo(session.repositoryName);
+          if (session.repositoryId) setSelectedRepoId(session.repositoryId);
+          if (session.repositoryBranch) {
+            setSelectedBranch(session.repositoryBranch);
+            setDefaultBranchName(session.repositoryBranch);
+          }
+
           if (session.currentStep) {
             const stepNum = parseInt(session.currentStep, 10) as Step;
-            if (stepNum > 1 && stepNum <= 6) {
+            // Step 2 requires scan data which is in-memory only — fall back to step 1
+            // so the user can re-trigger the scan
+            if (stepNum === 2) {
+              setCurrentStep(1);
+            } else if (stepNum > 2 && stepNum <= 6) {
               setCurrentStep(stepNum);
+              setScanCompleted(true);
             }
           }
-          
-          // Restore state from session
-          if (session.provider) {
-            setProvider(session.provider as Provider);
-          }
-          if (session.repositoryName) {
-            setSelectedRepo(session.repositoryName);
-          }
-          
+
           return;
         } catch (error) {
           localStorage.removeItem('docker_workflow_session_id');
@@ -127,7 +134,7 @@ export default function DockerWorkflow() {
       localStorage.setItem('docker_workflow_session_id', session.id);
       
       await apiRequest('PATCH', `/api/sessions/${session.id}`, {
-        workflowType: 'docker'
+        activeModule: 'docker'
       });
       
       await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, { 
@@ -136,6 +143,13 @@ export default function DockerWorkflow() {
     };
     initializeSession();
   }, []);
+
+  // Persist currentStep to session on change
+  useEffect(() => {
+    if (sessionId && currentStep > 1) {
+      apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: String(currentStep) }).catch(() => {});
+    }
+  }, [currentStep, sessionId]);
 
   // Fetch messages
   const { data: messages = [] } = useQuery<Message[]>({
@@ -300,15 +314,42 @@ export default function DockerWorkflow() {
     setExistingDockerfile(null);
     setIsRepoScanning(true);
     setScanError(null);
+    setScanPhase('connecting');
     try {
       const branchToUse = branchOverride || selectedBranch || "main";
       setSelectedBranch(branchToUse);
 
-      const response = await apiRequest("POST", `/api/sessions/${sessionId}/docker-scan`, {
-        provider,
-        repository: targetRepo,
-        branch: branchToUse,
+      // Simulate phased progress for the user while API processes
+      const phaseTimer1 = setTimeout(() => setScanPhase('listing'), 1500);
+      const phaseTimer2 = setTimeout(() => setScanPhase('inspecting'), 4000);
+      const phaseTimer3 = setTimeout(() => setScanPhase('dependencies'), 7000);
+
+      // Timeout after 60 seconds to prevent indefinite hang
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      const response = await fetch(`/api/sessions/${sessionId}/docker-scan`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(localStorage.getItem('token') ? { Authorization: `Bearer ${localStorage.getItem('token')}` } : {}),
+        },
+        body: JSON.stringify({ provider, repository: targetRepo, branch: branchToUse }),
+        signal: controller.signal,
+        credentials: 'include',
       });
+
+      clearTimeout(timeoutId);
+      clearTimeout(phaseTimer1);
+      clearTimeout(phaseTimer2);
+      clearTimeout(phaseTimer3);
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.details || errData.error || `Scan failed (${response.status})`);
+      }
+      setScanPhase('finalizing');
+
       const data = await response.json();
       setRepoScanData(data);
       setExistingDockerfile(data.existingDockerfile || null);
@@ -336,20 +377,23 @@ export default function DockerWorkflow() {
       }
       setScanCompleted(true);
     } catch (error: any) {
-      const message =
-        error?.message ||
-        error?.details ||
-        error?.response?.data?.message ||
-        "Failed to scan repository";
+      const isTimeout = error?.name === 'AbortError';
+      const message = isTimeout
+        ? "Analysis timed out. The repository may be too large or contain vendored files (node_modules). Try a smaller repo or ensure node_modules is in .gitignore."
+        : error?.message ||
+          error?.details ||
+          error?.response?.data?.message ||
+          "Failed to scan repository";
       setAnalysisFeedback(message.includes("Issue with the repo scanned") ? message : null);
       setScanError(message);
       toast({
-        title: "Scan failed",
+        title: isTimeout ? "Analysis timed out" : "Scan failed",
         description: message,
         variant: "destructive",
       });
     } finally {
       setIsRepoScanning(false);
+      setScanPhase('');
     }
   };
 
@@ -374,7 +418,6 @@ export default function DockerWorkflow() {
       const patchPayload: Record<string, string | null> = {
         repositoryName: repo.name,
         repositoryId: repo.id,
-        currentStep: '2',
       };
       if (repo.branch) {
         patchPayload.repositoryBranch = repo.branch;
@@ -807,7 +850,7 @@ export default function DockerWorkflow() {
                           </p>
                         </Card>
                       )}
-                      {selectedRepo && (
+                      {selectedRepo && !isRepoScanning && (
                         <Card className="space-y-3">
                           <div className="p-4 space-y-2">
                             <div className="flex items-center justify-between">
@@ -855,17 +898,99 @@ export default function DockerWorkflow() {
                               onClick={() => fetchRepoScan(selectedRepo, selectedBranch || defaultBranchName || undefined)}
                               disabled={!selectedBranch && !defaultBranchName}
                             >
-                              {isRepoScanning ? "Analyzing..." : "Run Analysis"}
+                              Run Analysis
                             </Button>
+                          </div>
+                        </Card>
+                      )}
+                      {selectedRepo && isRepoScanning && (
+                        <Card className="rounded-2xl border border-primary/20 bg-gradient-to-br from-primary/5 to-blue-50 p-6 shadow-lg">
+                          <div className="space-y-5">
+                            <div className="flex items-center gap-3">
+                              <div className="relative">
+                                <Loader2 className="w-8 h-8 animate-spin text-primary" />
+                              </div>
+                              <div>
+                                <p className="text-lg font-semibold text-slate-900">Analyzing Repository</p>
+                                <p className="text-sm text-muted-foreground">
+                                  {selectedRepo} &middot; {selectedBranch || defaultBranchName || 'main'}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Progress bar */}
+                            <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+                              <div
+                                className="h-full bg-primary rounded-full transition-all duration-1000 ease-out"
+                                style={{
+                                  width: scanPhase === 'connecting' ? '15%'
+                                    : scanPhase === 'listing' ? '35%'
+                                    : scanPhase === 'inspecting' ? '60%'
+                                    : scanPhase === 'dependencies' ? '80%'
+                                    : scanPhase === 'finalizing' ? '95%'
+                                    : '5%'
+                                }}
+                              />
+                            </div>
+
+                            {/* Phase steps */}
+                            <div className="space-y-2.5">
+                              {[
+                                { id: 'connecting', icon: GitBranch, label: 'Connecting to repository' },
+                                { id: 'listing', icon: FolderTree, label: 'Listing repository file tree' },
+                                { id: 'inspecting', icon: Search, label: 'Detecting languages & frameworks' },
+                                { id: 'dependencies', icon: FileCode, label: 'Reading dependency files' },
+                                { id: 'finalizing', icon: CheckCircle2, label: 'Finalizing analysis' },
+                              ].map((phase) => {
+                                const phases = ['connecting', 'listing', 'inspecting', 'dependencies', 'finalizing'];
+                                const currentIdx = phases.indexOf(scanPhase);
+                                const phaseIdx = phases.indexOf(phase.id);
+                                const isActive = phase.id === scanPhase;
+                                const isDone = phaseIdx < currentIdx;
+                                return (
+                                  <div key={phase.id} className={`flex items-center gap-3 text-sm transition-all duration-300 ${isActive ? 'text-primary font-medium' : isDone ? 'text-emerald-600' : 'text-muted-foreground/50'}`}>
+                                    {isDone ? (
+                                      <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                                    ) : isActive ? (
+                                      <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                                    ) : (
+                                      <phase.icon className="w-4 h-4 shrink-0" />
+                                    )}
+                                    <span>{phase.label}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
                           </div>
                         </Card>
                       )}
                     </div>
                     {!selectedRepo && (provider === 'github' || provider === 'azure') && (
-                      <CreateRepoForm 
+                      <CreateRepoForm
                         onSubmit={handleCreateRepo}
                         loading={createRepoMutation.isPending}
                       />
+                    )}
+                    {/* Scan error with retry */}
+                    {scanError && !isRepoScanning && selectedRepo && (
+                      <Card className="rounded-2xl border border-rose-200 bg-rose-50 p-5">
+                        <div className="flex items-start gap-3">
+                          <Shield className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                          <div className="flex-1 space-y-2">
+                            <p className="font-semibold text-rose-900">Analysis failed</p>
+                            <p className="text-sm text-rose-700">{scanError}</p>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="mt-2"
+                              onClick={() => fetchRepoScan(selectedRepo, selectedBranch || defaultBranchName || undefined)}
+                            >
+                              <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                              Retry Analysis
+                            </Button>
+                          </div>
+                        </div>
+                      </Card>
                     )}
                   </div>
 

@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import OpenAI from "openai";
 import { storage } from "../storage";
 import { mcpClient, type MCPProvider } from "../mcp-client";
 
@@ -39,7 +40,20 @@ export function registerDockerRoutes(app: Express): void {
         (req.body && typeof req.body.branch === "string" && req.body.branch.trim())
           ? req.body.branch.trim()
           : session.repositoryBranch || "main";
-      const paths = await mcpClient.listRepositoryPaths(provider, repoName, branch);
+      const rawPaths = await mcpClient.listRepositoryPaths(provider, repoName, branch);
+
+      // Filter out vendored/generated directories that bloat the scan
+      const ignoredPrefixes = [
+        'node_modules/', '.git/', 'vendor/', 'dist/', 'build/',
+        '.next/', '__pycache__/', '.tox/', '.venv/', 'venv/',
+        '.terraform/', '.angular/', 'bower_components/',
+      ];
+      const paths = rawPaths.filter((p) => {
+        const lower = p.toLowerCase();
+        return !ignoredPrefixes.some((prefix) => lower.includes(`/${prefix}`) || lower.startsWith(prefix));
+      });
+
+      console.log(`   Total files: ${rawPaths.length}, after filtering vendored dirs: ${paths.length}`);
 
       const languages = new Set<string>();
       const frameworks = new Set<string>();
@@ -115,7 +129,12 @@ export function registerDockerRoutes(app: Express): void {
         return paths.filter((p) => p.toLowerCase().endsWith(suffix));
       };
 
-      const packagePaths = findMatchingPaths("package.json");
+      // Prefer root-level dependency files; limit to avoid API rate limits on large repos
+      const MAX_DEP_FILES = 3;
+
+      const packagePaths = findMatchingPaths("package.json")
+        .sort((a, b) => a.split('/').length - b.split('/').length)
+        .slice(0, MAX_DEP_FILES);
       for (const packagePath of packagePaths) {
         const packageFile = await safeGetFile(packagePath);
         if (!packageFile?.content) continue;
@@ -131,7 +150,9 @@ export function registerDockerRoutes(app: Express): void {
         }
       }
 
-      const requirementsPaths = findMatchingPaths("requirements.txt");
+      const requirementsPaths = findMatchingPaths("requirements.txt")
+        .sort((a, b) => a.split('/').length - b.split('/').length)
+        .slice(0, MAX_DEP_FILES);
       for (const requirementsPath of requirementsPaths) {
         const requirementsFile = await safeGetFile(requirementsPath);
         if (!requirementsFile?.content) continue;
@@ -142,7 +163,9 @@ export function registerDockerRoutes(app: Express): void {
         dependencyFiles.push({ file: requirementsFile.path, entries: deps });
       }
 
-      const goModPaths = findMatchingPaths("go.mod");
+      const goModPaths = findMatchingPaths("go.mod")
+        .sort((a, b) => a.split('/').length - b.split('/').length)
+        .slice(0, MAX_DEP_FILES);
       for (const goModPath of goModPaths) {
         const goModFile = await safeGetFile(goModPath);
         if (!goModFile?.content) continue;
@@ -809,6 +832,359 @@ export function registerDockerRoutes(app: Express): void {
       } catch (cleanupError) {
         // Ignore cleanup errors
       }
+    }
+  });
+
+  // Docker Best Practices Validation
+  app.post("/api/sessions/:id/docker-best-practices", async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      const files = await storage.getFilesBySession(sessionId);
+      const dockerfile = files.find(
+        (f) =>
+          f.fileName.toLowerCase() === "dockerfile" ||
+          f.fileName.toLowerCase().endsWith(".dockerfile")
+      );
+
+      if (!dockerfile) {
+        return res.status(400).json({
+          error: "Dockerfile not found",
+          details: "Generate a Dockerfile first",
+        });
+      }
+
+      console.log(`\n🔍 ========== DOCKER BEST PRACTICES ==========`);
+      console.log(`Session: ${sessionId}`);
+      const content = dockerfile.content;
+      const lines = content.split("\n");
+
+      // ── Official / verified base image check ──
+      const officialPrefixes = [
+        "node", "python", "golang", "ruby", "php", "openjdk", "amazoncorretto",
+        "eclipse-temurin", "maven", "gradle", "rust", "alpine", "ubuntu",
+        "debian", "centos", "fedora", "busybox", "nginx", "httpd", "redis",
+        "postgres", "mysql", "mongo", "memcached", "traefik", "haproxy",
+        "consul", "vault", "envoy", "caddy", "mcr.microsoft.com/",
+        "docker.io/library/", "ghcr.io/", "gcr.io/", "registry.access.redhat.com/",
+      ];
+      const fromLines = lines.filter((l) =>
+        l.trim().toUpperCase().startsWith("FROM")
+      );
+
+      interface Finding {
+        id: string;
+        severity: "PASSED" | "WARNING" | "FAILED";
+        title: string;
+        description: string;
+        line?: number;
+        fix?: string;
+      }
+      const findings: Finding[] = [];
+
+      for (const fromLine of fromLines) {
+        const match = fromLine.match(/FROM\s+(\S+)/i);
+        if (!match) continue;
+        let image = match[1];
+        // Strip --platform= prefix
+        if (image.startsWith("--")) {
+          const imgMatch = fromLine.match(/FROM\s+\S+\s+(\S+)/i);
+          if (imgMatch) image = imgMatch[1];
+        }
+
+        const imageBase = image.split(":")[0].split("@")[0].toLowerCase();
+        const isOfficial = officialPrefixes.some(
+          (p) => imageBase === p || imageBase.startsWith(p + "/") || imageBase.startsWith(p)
+        );
+        const hasTag = image.includes(":") || image.includes("@");
+        const usesLatest = image.endsWith(":latest");
+        const isSlimOrAlpine =
+          image.includes("alpine") || image.includes("slim") || image.includes("distroless");
+
+        if (!isOfficial && !imageBase.includes("/")) {
+          // single-name images without a namespace are Docker Hub official
+          // e.g. "node", "python" — these are fine
+        } else if (!isOfficial) {
+          findings.push({
+            id: "DOCKER_BP_001",
+            severity: "FAILED",
+            title: "Non-official base image",
+            description: `Image "${image}" is not a recognized official or verified publisher image. Use official images from Docker Hub or trusted registries (mcr.microsoft.com, gcr.io, ghcr.io).`,
+            line: lines.indexOf(fromLine) + 1,
+            fix: `Replace with an official image, e.g. node:20-alpine, python:3.12-slim`,
+          });
+        } else {
+          findings.push({
+            id: "DOCKER_BP_001",
+            severity: "PASSED",
+            title: "Official base image",
+            description: `Image "${image}" is from an official or verified publisher.`,
+            line: lines.indexOf(fromLine) + 1,
+          });
+        }
+
+        if (usesLatest) {
+          findings.push({
+            id: "DOCKER_BP_002",
+            severity: "FAILED",
+            title: "Using :latest tag",
+            description: `Image "${image}" uses the :latest tag. Pin to a specific version for reproducible builds.`,
+            line: lines.indexOf(fromLine) + 1,
+            fix: `Pin the image version, e.g. node:20.11-alpine instead of node:latest`,
+          });
+        } else if (!hasTag) {
+          findings.push({
+            id: "DOCKER_BP_002",
+            severity: "WARNING",
+            title: "No version tag specified",
+            description: `Image "${image}" has no explicit tag — this defaults to :latest. Pin a specific version.`,
+            line: lines.indexOf(fromLine) + 1,
+            fix: `Add a version tag, e.g. ${image}:20-alpine`,
+          });
+        } else {
+          findings.push({
+            id: "DOCKER_BP_002",
+            severity: "PASSED",
+            title: "Version pinned",
+            description: `Image "${image}" has a pinned version tag.`,
+            line: lines.indexOf(fromLine) + 1,
+          });
+        }
+
+        if (!isSlimOrAlpine) {
+          findings.push({
+            id: "DOCKER_BP_003",
+            severity: "WARNING",
+            title: "Consider slim/alpine variant",
+            description: `Image "${image}" is not using an alpine or slim variant. Smaller base images reduce attack surface and image size.`,
+            line: lines.indexOf(fromLine) + 1,
+            fix: `Use ${imageBase}:<version>-alpine or ${imageBase}:<version>-slim`,
+          });
+        } else {
+          findings.push({
+            id: "DOCKER_BP_003",
+            severity: "PASSED",
+            title: "Minimal base image",
+            description: `Image "${image}" uses a minimal variant (alpine/slim/distroless).`,
+            line: lines.indexOf(fromLine) + 1,
+          });
+        }
+      }
+
+      // ── Multi-stage build ──
+      if (fromLines.length > 1) {
+        findings.push({
+          id: "DOCKER_BP_004",
+          severity: "PASSED",
+          title: "Multi-stage build",
+          description: `Dockerfile uses ${fromLines.length} stages for optimized layering.`,
+        });
+      } else {
+        findings.push({
+          id: "DOCKER_BP_004",
+          severity: "WARNING",
+          title: "Single-stage build",
+          description: "Consider using multi-stage builds to separate build dependencies from the runtime image.",
+          fix: "Add a builder stage and copy only required artifacts to the final stage.",
+        });
+      }
+
+      // ── Non-root user ──
+      const hasUser = lines.some((l) => l.trim().toUpperCase().startsWith("USER"));
+      findings.push(
+        hasUser
+          ? { id: "DOCKER_BP_005", severity: "PASSED", title: "Non-root user", description: "Dockerfile sets a non-root USER." }
+          : { id: "DOCKER_BP_005", severity: "FAILED", title: "Running as root", description: "No USER directive found. Container will run as root, which is a security risk.", fix: "Add `RUN addgroup -S app && adduser -S app -G app` and `USER app`." }
+      );
+
+      // ── HEALTHCHECK ──
+      const hasHealthcheck = lines.some((l) => l.trim().toUpperCase().startsWith("HEALTHCHECK"));
+      findings.push(
+        hasHealthcheck
+          ? { id: "DOCKER_BP_006", severity: "PASSED", title: "Health check configured", description: "HEALTHCHECK instruction is present." }
+          : { id: "DOCKER_BP_006", severity: "WARNING", title: "Missing HEALTHCHECK", description: "No HEALTHCHECK instruction. Orchestrators cannot verify container health.", fix: "Add `HEALTHCHECK --interval=30s CMD wget -qO- http://localhost:PORT/ || exit 1`." }
+      );
+
+      // ── .dockerignore ──
+      const hasDockerignore = files.some(
+        (f) => f.fileName.toLowerCase() === ".dockerignore"
+      );
+      findings.push(
+        hasDockerignore
+          ? { id: "DOCKER_BP_007", severity: "PASSED", title: ".dockerignore present", description: "A .dockerignore file exists to exclude unnecessary files from the build context." }
+          : { id: "DOCKER_BP_007", severity: "WARNING", title: "Missing .dockerignore", description: "No .dockerignore file. This may include node_modules, .git, and other files in the image.", fix: "Create a .dockerignore with: node_modules, .git, dist, *.log, .env" }
+      );
+
+      // ── COPY vs ADD ──
+      const addLines = lines.filter(
+        (l) => l.trim().toUpperCase().startsWith("ADD") && !l.trim().toUpperCase().startsWith("ADDGROUP") && !l.trim().toUpperCase().startsWith("ADDUSER")
+      );
+      if (addLines.length > 0) {
+        findings.push({
+          id: "DOCKER_BP_008",
+          severity: "WARNING",
+          title: "Using ADD instead of COPY",
+          description: `Found ${addLines.length} ADD instruction(s). Use COPY unless you need ADD's tar-extraction or URL features.`,
+          fix: "Replace ADD with COPY for local file copies.",
+        });
+      } else {
+        findings.push({
+          id: "DOCKER_BP_008",
+          severity: "PASSED",
+          title: "COPY used correctly",
+          description: "Dockerfile uses COPY instead of ADD.",
+        });
+      }
+
+      // ── ENV NODE_ENV=production ──
+      const hasNodeEnv = content.includes("NODE_ENV=production");
+      const isNode = content.toLowerCase().includes("node") || content.toLowerCase().includes("npm");
+      if (isNode && !hasNodeEnv) {
+        findings.push({
+          id: "DOCKER_BP_009",
+          severity: "WARNING",
+          title: "NODE_ENV not set",
+          description: "Node.js app detected but NODE_ENV=production is not set.",
+          fix: "Add `ENV NODE_ENV=production` for optimized runtime.",
+        });
+      }
+
+      // ── Summary ──
+      const passed = findings.filter((f) => f.severity === "PASSED").length;
+      const warnings = findings.filter((f) => f.severity === "WARNING").length;
+      const failed = findings.filter((f) => f.severity === "FAILED").length;
+
+      console.log(`✅ Best practices: ${passed} passed, ${warnings} warnings, ${failed} failed`);
+
+      res.json({
+        success: true,
+        summary: { passed, warnings, failed, total: findings.length },
+        findings,
+      });
+    } catch (error: any) {
+      console.error("Docker best practices validation failed:", error);
+      res.status(500).json({
+        error: "Validation failed",
+        details: error.message,
+      });
+    }
+  });
+
+  // Fix Dockerfile based on best practices findings
+  app.post("/api/sessions/:id/docker-fix-best-practices", async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+      const { findings } = req.body as {
+        findings: Array<{
+          id: string;
+          severity: string;
+          title: string;
+          description: string;
+          line?: number;
+          fix?: string;
+        }>;
+      };
+
+      if (!findings || findings.length === 0) {
+        return res.status(400).json({ error: "No findings to fix" });
+      }
+
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      const files = await storage.getFilesBySession(sessionId);
+      const dockerfile = files.find(
+        (f) =>
+          f.fileName.toLowerCase() === "dockerfile" ||
+          f.fileName.toLowerCase().endsWith(".dockerfile")
+      );
+
+      if (!dockerfile) {
+        return res.status(400).json({ error: "Dockerfile not found" });
+      }
+
+      console.log(`\n🔧 ========== DOCKER FIX BEST PRACTICES ==========`);
+      console.log(`Session: ${sessionId}`);
+      console.log(`Findings to fix: ${findings.length}`);
+
+      const issuesList = findings
+        .filter((f) => f.severity !== "PASSED")
+        .map((f) => `- [${f.id}] ${f.title}: ${f.description}${f.fix ? ` (Suggested: ${f.fix})` : ""}`)
+        .join("\n");
+
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a Docker expert. Fix the provided Dockerfile to address the listed best-practice issues.
+Rules:
+- Use ONLY official Docker Hub images or trusted registries (mcr.microsoft.com, gcr.io, ghcr.io)
+- Always pin specific version tags (never use :latest or omit the tag)
+- Prefer alpine or slim variants for minimal image size
+- Use multi-stage builds when beneficial
+- Run as non-root user
+- Include HEALTHCHECK instruction
+- Use COPY instead of ADD
+- Set NODE_ENV=production for Node.js apps
+- Keep ALL existing functionality intact — only fix the identified issues
+- Return ONLY the fixed Dockerfile content, no explanations or markdown.`,
+          },
+          {
+            role: "user",
+            content: `Fix this Dockerfile to address the following best practice issues:
+
+Issues:
+${issuesList}
+
+Current Dockerfile:
+\`\`\`dockerfile
+${dockerfile.content}
+\`\`\`
+
+Return ONLY the fixed Dockerfile content.`,
+          },
+        ],
+        temperature: 0.2,
+        max_tokens: 4000,
+      });
+
+      let fixedContent = completion.choices[0]?.message?.content?.trim() || "";
+      // Strip markdown fencing if present
+      fixedContent = fixedContent
+        .replace(/^```dockerfile\s*\n?/i, "")
+        .replace(/^```\s*\n?/, "")
+        .replace(/\n?```\s*$/, "");
+
+      if (!fixedContent || !fixedContent.toUpperCase().includes("FROM")) {
+        return res.status(500).json({
+          error: "AI returned invalid Dockerfile",
+          details: "The fixed Dockerfile is empty or missing FROM instruction",
+        });
+      }
+
+      // Update the file in storage
+      await storage.updateFile(dockerfile.id, fixedContent);
+      console.log(`✅ Dockerfile updated (${fixedContent.length} chars)`);
+
+      res.json({
+        success: true,
+        fixedContent,
+        fixedCount: findings.filter((f) => f.severity !== "PASSED").length,
+      });
+    } catch (error: any) {
+      console.error("Docker fix best practices failed:", error);
+      res.status(500).json({
+        error: "Fix failed",
+        details: error.message,
+      });
     }
   });
 

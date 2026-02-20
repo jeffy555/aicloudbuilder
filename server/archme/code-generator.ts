@@ -44,6 +44,29 @@ function parseResourceBlocks(terraform: string): ResourceBlock[] {
 
     while (cursor < terraform.length && depth > 0) {
       const char = terraform[cursor];
+      // Skip string literals (braces inside quotes don't count)
+      if (char === '"') {
+        cursor += 1;
+        while (cursor < terraform.length && terraform[cursor] !== '"') {
+          if (terraform[cursor] === '\\') cursor += 1; // skip escaped chars
+          cursor += 1;
+        }
+        cursor += 1;
+        continue;
+      }
+      // Skip single-line comments (# or //)
+      if (char === '#' || (char === '/' && terraform[cursor + 1] === '/')) {
+        while (cursor < terraform.length && terraform[cursor] !== '\n') cursor += 1;
+        cursor += 1;
+        continue;
+      }
+      // Skip multi-line comments (/* ... */)
+      if (char === '/' && terraform[cursor + 1] === '*') {
+        cursor += 2;
+        while (cursor < terraform.length - 1 && !(terraform[cursor] === '*' && terraform[cursor + 1] === '/')) cursor += 1;
+        cursor += 2;
+        continue;
+      }
       if (char === '{') depth += 1;
       if (char === '}') depth -= 1;
       cursor += 1;
@@ -208,7 +231,7 @@ Generate complete, production-ready ${component.codeType} code for this componen
 
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
@@ -225,6 +248,22 @@ Generate complete, production-ready ${component.codeType} code for this componen
       .replace(/^```\n?/i, '')
       .replace(/\n?```$/i, '')
       .trim();
+
+    // Validate generated code quality
+    if (code.length < 20) {
+      console.warn(`⚠️ AI returned suspiciously short code for ${component.name}: "${code.substring(0, 50)}"`);
+    }
+    const codeValidators: Record<string, RegExp> = {
+      terraform: /resource\s+"|variable\s+"|provider\s+"|module\s+"/,
+      yaml: /apiVersion:|kind:|metadata:/,
+      helm: /^\s*(replicaCount|image|service|ingress)/m,
+      arm: /\$schema.*deploymentTemplate/i,
+      kubernetes: /apiVersion:|kind:|metadata:/,
+    };
+    const expectedPattern = codeValidators[component.codeType];
+    if (expectedPattern && !expectedPattern.test(code)) {
+      console.warn(`⚠️ Generated code for ${component.name} may not be valid ${component.codeType} — expected patterns not found`);
+    }
 
     if (component.codeType === "terraform" && !shouldAllowDuplicateResources(component)) {
       code = dedupeTerraformResources(code);

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Shield, DollarSign, Wrench, Loader2, Network } from "lucide-react";
 import CheckovScanner, { CheckovScannerRef } from "./CheckovScanner";
@@ -7,34 +7,40 @@ import RefactorValidator, { RefactorValidatorRef } from "./RefactorValidator";
 import ArchitectureDiagram, { ArchitectureDiagramRef } from "./ArchitectureDiagram";
 import KubernetesValidator, { KubernetesValidatorRef } from "./KubernetesValidator";
 import KubernetesBestPractices, { KubernetesBestPracticesRef } from "./KubernetesBestPractices";
+import DockerBestPractices, { DockerBestPracticesRef } from "./DockerBestPractices";
 
 interface ActivityPanelProps {
   sessionId: string;
-  onScanComplete?: (result?: any) => void; // Allow passing scan result
-  onFixesApproved?: () => void; // Called when security fixes are approved - parent should refresh files
-  workflowType?: 'terraform' | 'kubernetes' | 'docker'; // Add workflow type prop
-  moduleApproach?: 'child-module' | 'standalone-root' | 'aggregated-root' | null; // Module approach for Terraform
+  onScanComplete?: (result?: any) => void;
+  onFixesApproved?: () => void;
+  workflowType?: 'terraform' | 'kubernetes' | 'docker' | 'archme';
+  moduleApproach?: 'child-module' | 'standalone-root' | 'aggregated-root' | null;
+  checkovFramework?: 'terraform' | 'kubernetes' | 'docker';
 }
 
-type RunningActivity = 'security' | 'cost' | 'refactor' | 'diagram' | 'validate' | null;
+type Activity = 'security' | 'cost' | 'refactor' | 'diagram' | 'validate';
+type RunningActivity = Activity | null;
 
-export default function ActivityPanel({ sessionId, onScanComplete, onFixesApproved, workflowType = 'terraform', moduleApproach = null }: ActivityPanelProps) {
+export default function ActivityPanel({ sessionId, onScanComplete, onFixesApproved, workflowType = 'terraform', moduleApproach = null, checkovFramework }: ActivityPanelProps) {
   const [runningActivity, setRunningActivity] = useState<RunningActivity>(null);
-  const [activeView, setActiveView] = useState<RunningActivity>(null); // Track which view to show
+  const [activeView, setActiveView] = useState<RunningActivity>(null);
+  // Track which activities have completed at least once - don't re-trigger on view switch
+  const [completedActivities, setCompletedActivities] = useState<Set<Activity>>(new Set());
   const [shouldTriggerScan, setShouldTriggerScan] = useState(false);
   const [shouldTriggerCost, setShouldTriggerCost] = useState(false);
   const [shouldTriggerRefactor, setShouldTriggerRefactor] = useState(false);
   const [shouldTriggerDiagram, setShouldTriggerDiagram] = useState(false);
   const [shouldTriggerValidate, setShouldTriggerValidate] = useState(false);
-  const [isFixing, setIsFixing] = useState(false); // Track if fix is in progress
+  const [isFixing, setIsFixing] = useState(false);
   const checkovRef = useRef<CheckovScannerRef>(null);
   const costRef = useRef<CostAnalyzerRef>(null);
   const refactorRef = useRef<RefactorValidatorRef>(null);
   const diagramRef = useRef<ArchitectureDiagramRef>(null);
   const kubernetesValidatorRef = useRef<KubernetesValidatorRef>(null);
   const kubernetesBestPracticesRef = useRef<KubernetesBestPracticesRef>(null);
+  const dockerBestPracticesRef = useRef<DockerBestPracticesRef>(null);
 
-  // Trigger scan after CheckovScanner component is mounted
+  // Trigger effects - fire action when component is ready
   useEffect(() => {
     if (shouldTriggerScan && activeView === 'security' && checkovRef.current) {
       checkovRef.current.triggerScan();
@@ -42,7 +48,6 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     }
   }, [shouldTriggerScan, activeView]);
 
-  // Trigger cost analysis after CostAnalyzer component is mounted
   useEffect(() => {
     if (shouldTriggerCost && activeView === 'cost' && costRef.current) {
       costRef.current.triggerAnalysis();
@@ -50,15 +55,18 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     }
   }, [shouldTriggerCost, activeView]);
 
-  // Trigger validation after RefactorValidator component is mounted
   useEffect(() => {
-    if (shouldTriggerRefactor && activeView === 'refactor' && refactorRef.current) {
-      refactorRef.current.triggerValidate();
-      setShouldTriggerRefactor(false);
+    if (shouldTriggerRefactor && activeView === 'refactor') {
+      if (workflowType === 'docker' && dockerBestPracticesRef.current) {
+        dockerBestPracticesRef.current.triggerValidate();
+        setShouldTriggerRefactor(false);
+      } else if (refactorRef.current) {
+        refactorRef.current.triggerValidate();
+        setShouldTriggerRefactor(false);
+      }
     }
-  }, [shouldTriggerRefactor, activeView]);
+  }, [shouldTriggerRefactor, activeView, workflowType]);
 
-  // Trigger diagram generation after ArchitectureDiagram component is mounted
   useEffect(() => {
     if (shouldTriggerDiagram && activeView === 'diagram' && diagramRef.current) {
       diagramRef.current.triggerGenerate();
@@ -66,7 +74,6 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     }
   }, [shouldTriggerDiagram, activeView]);
 
-  // Trigger Kubernetes validation after component is mounted
   useEffect(() => {
     if (shouldTriggerValidate && activeView === 'validate' && kubernetesValidatorRef.current) {
       kubernetesValidatorRef.current.triggerValidate();
@@ -74,39 +81,65 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     }
   }, [shouldTriggerValidate, activeView]);
 
+  // Mark an activity as completed so future clicks just switch view
+  const markCompleted = useCallback((activity: Activity) => {
+    setCompletedActivities(prev => new Set(prev).add(activity));
+  }, []);
+
+  // Click handlers: first click triggers action, subsequent clicks just switch view
   const handleSecurityScan = () => {
+    if (completedActivities.has('security')) {
+      setActiveView('security'); // Just show existing results
+      return;
+    }
     setRunningActivity('security');
-    setActiveView('security'); // Show security view
-    setShouldTriggerScan(true); // Trigger scan after component mounts
+    setActiveView('security');
+    setShouldTriggerScan(true);
   };
 
   const handleCostAnalysis = () => {
+    if (completedActivities.has('cost')) {
+      setActiveView('cost');
+      return;
+    }
     setRunningActivity('cost');
-    setActiveView('cost'); // Show cost view
-    setShouldTriggerCost(true); // Trigger analysis after component mounts
+    setActiveView('cost');
+    setShouldTriggerCost(true);
   };
 
   const handleRefactorValidate = () => {
+    if (completedActivities.has('refactor')) {
+      setActiveView('refactor');
+      return;
+    }
     setRunningActivity('refactor');
-    setActiveView('refactor'); // Show refactor view
-    setShouldTriggerRefactor(true); // Trigger validation after component mounts
+    setActiveView('refactor');
+    setShouldTriggerRefactor(true);
   };
 
   const handleDiagramGenerate = () => {
+    if (completedActivities.has('diagram')) {
+      setActiveView('diagram');
+      return;
+    }
     setRunningActivity('diagram');
-    setActiveView('diagram'); // Show diagram view
-    setShouldTriggerDiagram(true); // Trigger generation after component mounts
+    setActiveView('diagram');
+    setShouldTriggerDiagram(true);
   };
 
   const handleValidate = () => {
+    if (completedActivities.has('validate')) {
+      setActiveView('validate');
+      return;
+    }
     setRunningActivity('validate');
-    setActiveView('validate'); // Show validate view
-    setShouldTriggerValidate(true); // Trigger validation after component mounts
+    setActiveView('validate');
+    setShouldTriggerValidate(true);
   };
 
-  const handleActivityComplete = () => {
+  const handleActivityComplete = (activity: Activity) => {
     setRunningActivity(null);
-    // Keep activeView so results stay visible
+    markCompleted(activity);
   };
 
   const isAnyRunning = runningActivity !== null;
@@ -118,15 +151,14 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
 
   return (
     <div className="w-full space-y-6" role="region" aria-label="Activity panel">
-      {/* Horizontal Button Bar - Order: Best Approach → Draw → Cost Analysis → Scanning */}
-      {/* For Kubernetes: Draw → Security Scan → Validate (Best Approach removed) */}
+      {/* Horizontal Button Bar */}
       <div className="flex flex-wrap gap-3 mb-6" role="toolbar" aria-label="Activity actions">
-        {/* Best Approach - Only for Terraform, but NOT for aggregated-root */}
-        {workflowType === 'terraform' && moduleApproach !== 'aggregated-root' && !isFixing && (!isAnyRunning || isRefactorRunning) ? (
+        {/* Best Approach - Terraform (not aggregated-root) and Docker */}
+        {((workflowType === 'terraform' && moduleApproach !== 'aggregated-root') || workflowType === 'docker') && !isFixing && (
           <Button
             onClick={handleRefactorValidate}
-            disabled={isRefactorRunning}
-            variant="default"
+            disabled={isAnyRunning}
+            variant={activeView === 'refactor' ? 'default' : 'outline'}
             className="flex-1"
             data-testid="button-refactor-validate"
           >
@@ -142,13 +174,13 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
               </>
             )}
           </Button>
-        ) : null}
-        {/* Draw - First for Kubernetes, Second for Terraform (not for Docker) */}
-        {workflowType !== 'docker' && !isFixing && (!isAnyRunning || isDiagramRunning) ? (
+        )}
+        {/* Draw - not for Docker or ArchMe (ArchMe has diagram in step 1) */}
+        {workflowType !== 'docker' && workflowType !== 'archme' && !isFixing && (
           <Button
             onClick={handleDiagramGenerate}
-            disabled={isDiagramRunning || (workflowType === 'terraform' && isRefactorRunning)}
-            variant="default"
+            disabled={isAnyRunning}
+            variant={activeView === 'diagram' ? 'default' : 'outline'}
             className="flex-1"
             data-testid="button-draw"
           >
@@ -164,14 +196,14 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
               </>
             )}
           </Button>
-        ) : null}
-        
-        {/* Cost Analysis - Only for Terraform */}
-        {workflowType === 'terraform' && !isFixing && (!isAnyRunning || isCostRunning) ? (
+        )}
+
+        {/* Cost Analysis - Terraform and ArchMe (only when generating Terraform code) */}
+        {(workflowType === 'terraform' || (workflowType === 'archme' && checkovFramework !== 'kubernetes')) && !isFixing && (
           <Button
             onClick={handleCostAnalysis}
-            disabled={isCostRunning || isRefactorRunning}
-            variant="default"
+            disabled={isAnyRunning}
+            variant={activeView === 'cost' ? 'default' : 'outline'}
             className="flex-1"
             data-testid="button-cost-analysis"
           >
@@ -187,14 +219,13 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
               </>
             )}
           </Button>
-        ) : null}
-        {/* Security Scan - Second for Kubernetes, Third for Terraform */}
-        {/* Hidden for aggregated-root Terraform modules (child module scanned separately) */}
-        {!isFixing && (!isAnyRunning || isSecurityRunning) && !(workflowType === 'terraform' && moduleApproach === 'aggregated-root') ? (
+        )}
+        {/* Security Scan - not for aggregated-root */}
+        {!isFixing && !(workflowType === 'terraform' && moduleApproach === 'aggregated-root') && (
           <Button
             onClick={handleSecurityScan}
-            disabled={isSecurityRunning || (workflowType === 'terraform' && isRefactorRunning)}
-            variant="default"
+            disabled={isAnyRunning}
+            variant={activeView === 'security' ? 'default' : 'outline'}
             className="flex-1"
             data-testid="button-security-scan"
           >
@@ -210,14 +241,14 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
               </>
             )}
           </Button>
-        ) : null}
-        
-        {/* Validate - Only for Kubernetes (Fourth) */}
-        {workflowType === 'kubernetes' && !isFixing && (!isAnyRunning || isValidateRunning) ? (
+        )}
+
+        {/* Validate - Kubernetes only */}
+        {workflowType === 'kubernetes' && !isFixing && (
           <Button
             onClick={handleValidate}
-            disabled={isValidateRunning || isRefactorRunning}
-            variant="default"
+            disabled={isAnyRunning}
+            variant={activeView === 'validate' ? 'default' : 'outline'}
             className="flex-1"
             data-testid="button-validate"
           >
@@ -233,103 +264,124 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
               </>
             )}
           </Button>
-        ) : null}
+        )}
       </div>
 
-      {/* Show only the active view - one at a time */}
-      {/* Security Scan - Hidden for aggregated-root Terraform modules (child module scanned separately) */}
-      {activeView === 'security' && !(workflowType === 'terraform' && moduleApproach === 'aggregated-root') && (
-        <CheckovScanner
-          ref={checkovRef}
-          sessionId={sessionId}
-          framework={workflowType === 'kubernetes' ? 'kubernetes' : workflowType === 'docker' ? 'docker' : 'terraform'}
-          onScanComplete={(result) => {
-            handleActivityComplete();
-            onScanComplete?.(result);
-          }}
-          onScanStart={() => {
-            setRunningActivity('security');
-            setActiveView('security');
-          }}
-          onFixesApproved={() => {
-            // Notify parent to refresh files when fixes are approved
-            onFixesApproved?.();
-          }}
-        />
+      {/* All activity components stay mounted to preserve state across switches.
+         Inactive views are hidden with display:none so they retain their results. */}
+
+      {/* Security Scan */}
+      {!(workflowType === 'terraform' && moduleApproach === 'aggregated-root') && (
+        <div style={{ display: activeView === 'security' ? undefined : 'none' }}>
+          <CheckovScanner
+            ref={checkovRef}
+            sessionId={sessionId}
+            framework={checkovFramework || (workflowType === 'kubernetes' ? 'kubernetes' : workflowType === 'docker' ? 'docker' : 'terraform')}
+            onScanComplete={(result) => {
+              handleActivityComplete('security');
+              onScanComplete?.(result);
+            }}
+            onScanStart={() => {
+              setRunningActivity('security');
+              setActiveView('security');
+            }}
+            onFixesApproved={() => {
+              onFixesApproved?.();
+            }}
+          />
+        </div>
       )}
 
-      {activeView === 'cost' && (
-        <CostAnalyzer 
+      <div style={{ display: activeView === 'cost' ? undefined : 'none' }}>
+        <CostAnalyzer
           ref={costRef}
           sessionId={sessionId}
           onAnalysisComplete={() => {
-            handleActivityComplete();
+            handleActivityComplete('cost');
           }}
           onAnalysisStart={() => {
             setRunningActivity('cost');
             setActiveView('cost');
           }}
         />
+      </div>
+
+      {/* RefactorValidator (Terraform only) */}
+      {workflowType === 'terraform' && (
+        <div style={{ display: activeView === 'refactor' ? undefined : 'none' }}>
+          <RefactorValidator
+            ref={refactorRef}
+            sessionId={sessionId}
+            onValidationComplete={() => {
+              handleActivityComplete('refactor');
+            }}
+            onValidationStart={() => {
+              setRunningActivity('refactor');
+              setActiveView('refactor');
+            }}
+            onFixStart={() => {
+              setIsFixing(true);
+              setRunningActivity(null);
+            }}
+            onFixComplete={() => {
+              setIsFixing(false);
+              setRunningActivity(null);
+            }}
+          />
+        </div>
       )}
 
-      {/* Show RefactorValidator when active (Terraform) or KubernetesBestPractices (Kubernetes) */}
-      {activeView === 'refactor' && workflowType === 'terraform' && (
-        <RefactorValidator 
-          ref={refactorRef}
-          sessionId={sessionId}
-          onValidationComplete={() => {
-            handleActivityComplete();
-          }}
-          onValidationStart={() => {
-            setRunningActivity('refactor');
-            setActiveView('refactor');
-          }}
-          onFixStart={() => {
-            setIsFixing(true);
-            setRunningActivity(null); // Clear running activity to hide Best Approach button
-          }}
-          onFixComplete={() => {
-            setIsFixing(false);
-            // Restore all buttons by clearing running activity
-            setRunningActivity(null);
-            // Keep activeView as 'refactor' to show applied fixes, but buttons will be visible
-            // The buttons are controlled by isFixing and isAnyRunning, not activeView
-          }}
-        />
+      {/* DockerBestPractices (Docker only) */}
+      {workflowType === 'docker' && (
+        <div style={{ display: activeView === 'refactor' ? undefined : 'none' }}>
+          <DockerBestPractices
+            ref={dockerBestPracticesRef}
+            sessionId={sessionId}
+            onValidationComplete={() => {
+              handleActivityComplete('refactor');
+            }}
+            onValidationStart={() => {
+              setRunningActivity('refactor');
+              setActiveView('refactor');
+            }}
+          />
+        </div>
       )}
 
-      {/* Best Approach removed for Kubernetes workflow */}
-
-      {/* Show KubernetesValidator when active */}
-      {activeView === 'validate' && workflowType === 'kubernetes' && (
-        <KubernetesValidator 
-          ref={kubernetesValidatorRef}
-          sessionId={sessionId}
-          onValidationComplete={() => {
-            handleActivityComplete();
-          }}
-          onValidationStart={() => {
-            setRunningActivity('validate');
-            setActiveView('validate');
-          }}
-        />
+      {/* KubernetesValidator (Kubernetes only) */}
+      {workflowType === 'kubernetes' && (
+        <div style={{ display: activeView === 'validate' ? undefined : 'none' }}>
+          <KubernetesValidator
+            ref={kubernetesValidatorRef}
+            sessionId={sessionId}
+            onValidationComplete={() => {
+              handleActivityComplete('validate');
+            }}
+            onValidationStart={() => {
+              setRunningActivity('validate');
+              setActiveView('validate');
+            }}
+          />
+        </div>
       )}
 
-      {/* Show ArchitectureDiagram when active */}
-      {activeView === 'diagram' && (
-        <ArchitectureDiagram 
-          ref={diagramRef}
-          sessionId={sessionId}
-          useArchMeEndpoint={false} // Use Terraform/Kubernetes endpoint, not ArchMe
-          workflowType={workflowType}
-          onDiagramComplete={() => {
-            handleActivityComplete();
-          }}
-          onDiagramStart={() => {
-            setRunningActivity('diagram');
-            setActiveView('diagram');
-          }}
-        />
+      {/* ArchitectureDiagram - not for Docker or ArchMe */}
+      {workflowType !== 'docker' && workflowType !== 'archme' && (
+        <div style={{ display: activeView === 'diagram' ? undefined : 'none' }}>
+          <ArchitectureDiagram
+            ref={diagramRef}
+            sessionId={sessionId}
+            useArchMeEndpoint={false}
+            workflowType={workflowType}
+            onDiagramComplete={() => {
+              handleActivityComplete('diagram');
+            }}
+            onDiagramStart={() => {
+              setRunningActivity('diagram');
+              setActiveView('diagram');
+            }}
+          />
+        </div>
       )}
 
       {!activeView && (
@@ -340,4 +392,3 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     </div>
   );
 }
-

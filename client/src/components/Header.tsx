@@ -1,4 +1,4 @@
-import { Sparkles, Settings, LogOut, LayoutDashboard } from "lucide-react";
+import { Sparkles, Settings, LogOut, LayoutDashboard, Clock } from "lucide-react";
 import { ReactNode } from "react";
 import { useLocation, Link } from "wouter";
 import { useAuth } from "@/hooks/auth/useAuth";
@@ -27,7 +27,7 @@ export default function Header({ children }: HeaderProps) {
             <Sparkles className="w-5 h-5 text-primary-foreground" aria-hidden="true" />
           </div>
           <h1 className="text-lg sm:text-xl font-semibold tracking-tight text-foreground">
-            AI-Driven DevOps
+            SpiritOps
           </h1>
         </div>
       </Link>
@@ -52,6 +52,16 @@ export default function Header({ children }: HeaderProps) {
               title="Dashboard"
             >
               <LayoutDashboard className="w-5 h-5" />
+            </Button>
+
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setLocation('/history')}
+              className={location === '/history' ? "text-primary" : "text-muted-foreground"}
+              title="History"
+            >
+              <Clock className="w-5 h-5" />
             </Button>
 
             <Button

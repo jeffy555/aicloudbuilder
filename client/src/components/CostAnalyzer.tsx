@@ -1,10 +1,20 @@
-import { useState, forwardRef, useImperativeHandle } from "react";
+import { useState, forwardRef, useImperativeHandle, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DollarSign,
   TrendingUp,
@@ -13,10 +23,11 @@ import {
   HelpCircle,
   RefreshCw,
   Info,
+  Pencil,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import type { CostAnalysisResult, CostResource, UsageProfile } from "@shared/schema";
+import type { CostAnalysisResult, CostResource, UsageProfile, UsageDimensionInfo } from "@shared/schema";
 
 interface CostAnalyzerProps {
   sessionId: string;
@@ -52,15 +63,27 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [costResult, setCostResult] = useState<CostAnalysisResult | null>(null);
   const [profile, setProfile] = useState<UsageProfile>('medium');
+  const [customUsage, setCustomUsage] = useState<Record<string, Record<string, number>>>({});
+  const [editingResource, setEditingResource] = useState<CostResource | null>(null);
+  const [editValues, setEditValues] = useState<Record<string, string>>({});
   const { toast } = useToast();
 
-  const analyzeCost = async (selectedProfile?: UsageProfile) => {
+  const analyzeCost = useCallback(async (
+    selectedProfile?: UsageProfile,
+    overrideCustomUsage?: Record<string, Record<string, number>>
+  ) => {
     setIsAnalyzing(true);
     onAnalysisStart?.();
     try {
-      const response = await apiRequest('POST', `/api/sessions/${sessionId}/analyze-cost`, {
+      const usageToSend = overrideCustomUsage ?? customUsage;
+      const body: Record<string, any> = {
         profile: selectedProfile || profile,
-      });
+      };
+      if (Object.keys(usageToSend).length > 0) {
+        body.customUsage = usageToSend;
+      }
+
+      const response = await apiRequest('POST', `/api/sessions/${sessionId}/analyze-cost`, body);
       const result = await response.json() as CostAnalysisResult;
       setCostResult(result);
       onCostComplete?.(result);
@@ -96,7 +119,7 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
       setIsAnalyzing(false);
       onAnalysisComplete?.();
     }
-  };
+  }, [sessionId, profile, customUsage, onAnalysisStart, onAnalysisComplete, onCostComplete, toast]);
 
   useImperativeHandle(ref, () => ({
     triggerAnalysis: () => analyzeCost()
@@ -117,6 +140,43 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
     if (costResult) {
       analyzeCost(p);
     }
+  };
+
+  const openUsageEditor = (resource: CostResource) => {
+    const resourceAddr = `${resource.resourceType}.${resource.resourceName}`;
+    const existing = customUsage[resourceAddr] || {};
+    const initial: Record<string, string> = {};
+
+    for (const dim of resource.usageDimensions || []) {
+      initial[dim.key] = String(existing[dim.key] ?? resource.providedUsage?.[dim.key] ?? dim.defaultValue);
+    }
+
+    setEditValues(initial);
+    setEditingResource(resource);
+  };
+
+  const saveUsageValues = () => {
+    if (!editingResource) return;
+    const resourceAddr = `${editingResource.resourceType}.${editingResource.resourceName}`;
+    const parsed: Record<string, number> = {};
+
+    for (const [key, val] of Object.entries(editValues)) {
+      const num = parseFloat(val);
+      if (!isNaN(num) && num >= 0) {
+        parsed[key] = num;
+      }
+    }
+
+    const updated = { ...customUsage, [resourceAddr]: parsed };
+    setCustomUsage(updated);
+    setEditingResource(null);
+
+    analyzeCost(profile, updated);
+  };
+
+  const hasCustomUsage = (resource: CostResource): boolean => {
+    const addr = `${resource.resourceType}.${resource.resourceName}`;
+    return !!customUsage[addr] && Object.keys(customUsage[addr]).length > 0;
   };
 
   const renderStatusBadge = (resource: CostResource) => {
@@ -153,10 +213,74 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
     );
   };
 
+  const renderUsageAction = (resource: CostResource) => {
+    const dims = resource.usageDimensions;
+    if (!dims || dims.length === 0) return null;
+
+    if (resource.status === 'needs_input' && resource.pricingMatchType === 'unsupported') {
+      return null;
+    }
+
+    const isCustom = hasCustomUsage(resource);
+
+    return (
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-6 px-2 text-xs gap-1"
+        onClick={() => openUsageEditor(resource)}
+      >
+        <Pencil className="w-3 h-3" />
+        {isCustom ? 'Edit' : 'Customize'}
+      </Button>
+    );
+  };
+
   const summary = costResult?.summary;
 
   return (
     <div className="w-full space-y-4">
+      {/* Usage editor dialog */}
+      <Dialog open={!!editingResource} onOpenChange={(open) => !open && setEditingResource(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-base">
+              Usage for {editingResource?.resourceName}
+            </DialogTitle>
+            <DialogDescription className="text-xs font-mono">
+              {editingResource?.resourceType}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {editingResource?.usageDimensions?.map((dim: UsageDimensionInfo) => (
+              <div key={dim.key} className="grid grid-cols-3 items-center gap-3">
+                <Label htmlFor={dim.key} className="text-sm text-right">
+                  {dim.label}
+                </Label>
+                <Input
+                  id={dim.key}
+                  type="number"
+                  min="0"
+                  step="any"
+                  className="h-8"
+                  value={editValues[dim.key] || ''}
+                  onChange={(e) => setEditValues(prev => ({ ...prev, [dim.key]: e.target.value }))}
+                />
+                <span className="text-xs text-muted-foreground">{dim.unit}</span>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setEditingResource(null)}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={saveUsageValues}>
+              Apply & Recalculate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {costResult && (
         <div className="space-y-4">
           {/* Profile selector + recalc */}
@@ -172,6 +296,11 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
                 <SelectItem value="high">High</SelectItem>
               </SelectContent>
             </Select>
+            {Object.keys(customUsage).length > 0 && (
+              <Badge variant="secondary" className="text-xs">
+                {Object.keys(customUsage).length} custom override(s)
+              </Badge>
+            )}
             {isAnalyzing && (
               <RefreshCw className="w-4 h-4 animate-spin text-muted-foreground" />
             )}
@@ -252,7 +381,10 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
                             </Badge>
                           </TableCell>
                           <TableCell>
-                            {renderStatusBadge(resource)}
+                            <div className="flex items-center gap-1.5">
+                              {renderStatusBadge(resource)}
+                              {renderUsageAction(resource)}
+                            </div>
                           </TableCell>
                           <TableCell className="text-right font-medium">
                             {resource.status === 'needs_input'
