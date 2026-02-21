@@ -7,7 +7,7 @@ pr: none
 
 variables:
   # Azure service connection name in Azure DevOps
-  azureServiceConnection: "spiritops-azure-sc"
+  azureServiceConnection: "SPNBuild"
 
   # Container registry settings
   acrName: "spiritops"
