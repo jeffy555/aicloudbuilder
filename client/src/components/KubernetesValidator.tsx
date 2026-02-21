@@ -52,6 +52,7 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
   const [isValidating, setIsValidating] = useState(false);
   const [isFixing, setIsFixing] = useState(false);
+  const [fixesApplied, setFixesApplied] = useState(false);
 
   // Fix mutation - applies best practices to fix validation issues
   const fixMutation = useMutation({
@@ -62,6 +63,7 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
       return response.json();
     },
     onSuccess: (result) => {
+      setFixesApplied(true);
       toast({
         title: "Fixes Applied",
         description: result.message || `Fixed ${result.totalFixed} file(s) with best practices`,
@@ -69,8 +71,8 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
       });
       // Invalidate file queries to refresh the code editor
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      // Re-run validation to show updated results
-      setTimeout(() => triggerValidate(), 500);
+      // Re-run validation to show updated results (don't reset fixesApplied flag)
+      setTimeout(() => triggerValidate(false), 500);
     },
     onError: (error: any) => {
       toast({
@@ -131,9 +133,13 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
     }
   });
 
-  const triggerValidate = () => {
+  const triggerValidate = (resetFixesFlag: boolean = true) => {
     setIsValidating(true);
     setValidationResult(null);
+    // Only reset fixes flag if explicitly requested (not for auto-revalidation after fixes)
+    if (resetFixesFlag) {
+      setFixesApplied(false);
+    }
     onValidationStart?.();
     validateMutation.mutate();
   };
@@ -242,8 +248,8 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
               </div>
             )}
 
-            {/* Fix Button - Show when there are issues */}
-            {(validationResult.errors.length > 0 || validationResult.warnings.length > 0) && (
+            {/* Fix Button - Show when there are issues and fixes haven't been applied */}
+            {(validationResult.errors.length > 0 || validationResult.warnings.length > 0) && !fixesApplied && (
               <div className="pt-2">
                 <Button
                   onClick={handleFix}
@@ -263,6 +269,15 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
                     </>
                   )}
                 </Button>
+              </div>
+            )}
+
+            {/* Show message if fixes were applied but issues remain */}
+            {fixesApplied && (validationResult.errors.length > 0 || validationResult.warnings.length > 0) && (
+              <div className="pt-2 p-3 rounded-lg bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800">
+                <p className="text-sm text-blue-800 dark:text-blue-200">
+                  ✓ Fixes have been applied. Some issues may require manual intervention.
+                </p>
               </div>
             )}
           </div>

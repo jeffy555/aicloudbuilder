@@ -39,6 +39,9 @@ export const sessions = pgTable("sessions", {
   backendLocation: text("backend_location"), // Azure location for storage account
   backendValidated: text("backend_validated"), // 'true' | 'false' | 'pending' | 'skipped' | null
   backendDeclined: text("backend_declined"), // 'true' | 'false' | null (user chose to skip backend)
+  // Valuation module fields
+  scannedResources: text("scanned_resources"), // JSON string of scanned Azure resources
+  scanTimestamp: text("scan_timestamp"), // ISO timestamp of last resource scan
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -315,3 +318,107 @@ export const costAnalysisRequestSchema = z.object({
 });
 
 export type CostAnalysisRequest = z.infer<typeof costAnalysisRequestSchema>;
+
+// ─── Valuation Module Types ─────────────────────────────────────────────────
+
+export const azureResourceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.string(), // Azure ARM type (e.g., Microsoft.Storage/storageAccounts)
+  location: z.string(),
+  resourceGroup: z.string(),
+  sku: z.string().optional(),
+  tier: z.string().optional(),
+  properties: z.any().optional(),
+  actualCostMTD: z.number().optional(), // Actual cost month-to-date from Azure Cost Management
+});
+
+export type AzureResource = z.infer<typeof azureResourceSchema>;
+
+export const remediationPlanSchema = z.object({
+  recommended_sku: z.string(),
+  recommended_tier: z.string().optional(),
+  savings_monthly: z.number(),
+  savings_percent: z.number(),
+  reason: z.string(),
+  confidence: z.enum(['high', 'medium', 'low']),
+  action_required: z.string(),
+});
+
+export type RemediationPlan = z.infer<typeof remediationPlanSchema>;
+
+export const valuationResourceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.string(), // Friendly name (e.g., "Storage Account")
+  azureType: z.string(), // Original Azure ARM type
+  terraformType: z.string().optional(), // Mapped Terraform type
+  location: z.string(),
+  resourceGroup: z.string(),
+  currentSku: z.string(),
+  currentTier: z.string().optional(),
+  monthlyCost: z.number(),
+  yearlyCost: z.number(),
+  currency: z.string().default('USD'),
+  remediation: remediationPlanSchema.optional(),
+  pricingDetails: z.any().optional(),
+  usageMetrics: z.lazy(() => usageMetricsSchema).optional(), // Azure Monitor metrics
+  metricsAvailable: z.boolean().default(false), // Whether metrics were fetched
+});
+
+export type ValuationResource = z.infer<typeof valuationResourceSchema>;
+
+export const valuationSummarySchema = z.object({
+  totalMonthlyCost: z.number(),
+  totalYearlyCost: z.number(),
+  potentialSavings: z.number(),
+  savingsPercent: z.number(),
+  resourceCount: z.number(),
+  recommendationCount: z.number(),
+});
+
+export type ValuationSummary = z.infer<typeof valuationSummarySchema>;
+
+// Resource Group Summary for selection UI
+export const resourceGroupSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  location: z.string(),
+  resourceCount: z.number(),
+  estimatedMonthlyCost: z.number().optional(),
+  tags: z.record(z.string()).optional()
+});
+
+export type ResourceGroupSummary = z.infer<typeof resourceGroupSummarySchema>;
+
+// Usage Metrics from Azure Monitor
+export const usageMetricsSchema = z.object({
+  resourceId: z.string(),
+  resourceType: z.string(),
+  timespan: z.object({
+    start: z.string(),
+    end: z.string()
+  }),
+  metrics: z.array(z.object({
+    name: z.string(),
+    unit: z.string(),
+    timeseries: z.array(z.object({
+      data: z.array(z.object({
+        timeStamp: z.string(),
+        average: z.number().optional(),
+        minimum: z.number().optional(),
+        maximum: z.number().optional()
+      }))
+    }))
+  })),
+  statistics: z.object({
+    avgCpuPercent: z.number().optional(),
+    maxCpuPercent: z.number().optional(),
+    avgMemoryPercent: z.number().optional(),
+    avgStorageUsedGB: z.number().optional(),
+    avgDtuPercent: z.number().optional(),
+    sampleCount: z.number()
+  }).optional()
+});
+
+export type UsageMetrics = z.infer<typeof usageMetricsSchema>;

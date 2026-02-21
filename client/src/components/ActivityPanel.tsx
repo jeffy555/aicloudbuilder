@@ -148,6 +148,15 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
   const isRefactorRunning = runningActivity === 'refactor';
   const isDiagramRunning = runningActivity === 'diagram';
   const isValidateRunning = runningActivity === 'validate';
+  const isKubernetesWorkflow = workflowType === 'kubernetes';
+
+  const getActivityButtonClassName = (activity: Activity) => {
+    if (!isKubernetesWorkflow) return "flex-1";
+    const isActive = activeView === activity;
+    return isActive
+      ? "flex-1 bg-blue-700 hover:bg-blue-800 border-blue-700 text-white"
+      : "flex-1 bg-blue-600 hover:bg-blue-700 border-blue-600 text-white";
+  };
 
   return (
     <div className="w-full space-y-6" role="region" aria-label="Activity panel">
@@ -159,7 +168,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             onClick={handleRefactorValidate}
             disabled={isAnyRunning}
             variant={activeView === 'refactor' ? 'default' : 'outline'}
-            className="flex-1"
+            className={getActivityButtonClassName('refactor')}
             data-testid="button-refactor-validate"
           >
             {isRefactorRunning ? (
@@ -181,7 +190,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             onClick={handleDiagramGenerate}
             disabled={isAnyRunning}
             variant={activeView === 'diagram' ? 'default' : 'outline'}
-            className="flex-1"
+            className={getActivityButtonClassName('diagram')}
             data-testid="button-draw"
           >
             {isDiagramRunning ? (
@@ -204,7 +213,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             onClick={handleCostAnalysis}
             disabled={isAnyRunning}
             variant={activeView === 'cost' ? 'default' : 'outline'}
-            className="flex-1"
+            className={getActivityButtonClassName('cost')}
             data-testid="button-cost-analysis"
           >
             {isCostRunning ? (
@@ -226,7 +235,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             onClick={handleSecurityScan}
             disabled={isAnyRunning}
             variant={activeView === 'security' ? 'default' : 'outline'}
-            className="flex-1"
+            className={getActivityButtonClassName('security')}
             data-testid="button-security-scan"
           >
             {isSecurityRunning ? (
@@ -249,7 +258,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             onClick={handleValidate}
             disabled={isAnyRunning}
             variant={activeView === 'validate' ? 'default' : 'outline'}
-            className="flex-1"
+            className={getActivityButtonClassName('validate')}
             data-testid="button-validate"
           >
             {isValidateRunning ? (

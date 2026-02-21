@@ -22,6 +22,8 @@ import KubernetesWorkflow from "@/pages/KubernetesWorkflow";
 import KubernetesIntro from "@/pages/KubernetesIntro";
 import DockerWorkflow from "@/pages/DockerWorkflow";
 import DockerIntro from "@/pages/DockerIntro";
+import ValuationWorkflow from "@/pages/ValuationWorkflow";
+import ValuationIntro from "@/pages/ValuationIntro";
 import History from "@/pages/History";
 import NotFound from "@/pages/not-found";
 
@@ -161,6 +163,20 @@ function Router() {
         <ProtectedRoute>
           <PageTransition>
             <DockerWorkflow />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/valuation">
+        <ProtectedRoute>
+          <PageTransition>
+            <ValuationIntro />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/valuation/app">
+        <ProtectedRoute>
+          <PageTransition>
+            <ValuationWorkflow />
           </PageTransition>
         </ProtectedRoute>
       </Route>

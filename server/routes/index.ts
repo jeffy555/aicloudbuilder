@@ -11,6 +11,7 @@ import { registerAutomationRoutes } from "./automation";
 import { registerTerraformRoutes } from "./terraform";
 import { registerKubernetesRoutes } from "./kubernetes";
 import { registerArchMeRoutes } from "./archme";
+import { registerValuationRoutes } from "./valuation";
 import { registerActivityRoutes } from "./activities";
 import { registerCommitRoutes } from "./commit";
 import { registerDebugRoutes } from "./debug";
@@ -52,6 +53,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerTerraformRoutes(app);
   registerKubernetesRoutes(app);
   registerArchMeRoutes(app);
+  registerValuationRoutes(app);
   registerActivityRoutes(app);
   registerCommitRoutes(app);
   registerDebugRoutes(app);

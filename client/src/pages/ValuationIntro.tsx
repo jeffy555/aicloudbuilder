@@ -3,9 +3,9 @@ import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowRight, Home } from "lucide-react";
-import KubernetesWalkthrough from "@/components/KubernetesWalkthrough";
+import ValuationWalkthrough from "@/components/ValuationWalkthrough";
 
-export default function KubernetesIntro() {
+export default function ValuationIntro() {
   const [, setLocation] = useLocation();
 
   return (
@@ -16,9 +16,9 @@ export default function KubernetesIntro() {
         <div className="max-w-4xl mx-auto space-y-6">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-3xl font-bold">Kubernetes Module</h1>
+              <h1 className="text-3xl font-bold">Valuation Module</h1>
               <p className="text-muted-foreground mt-1">
-                Quick overview before starting the Kubernetes workflow.
+                Quick overview before starting the Valuation workflow.
               </p>
             </div>
             <Button variant="outline" onClick={() => setLocation("/")}>
@@ -29,16 +29,17 @@ export default function KubernetesIntro() {
 
           <Card>
             <CardHeader>
-              <CardTitle>What Kubernetes Module Does</CardTitle>
+              <CardTitle>What Valuation Module Does</CardTitle>
               <CardDescription>
-                Kubernetes module helps build and validate deployment manifests with
-                built-in best-practice and security-oriented checks.
+                Analyze your live Azure resources and identify cost optimization opportunities.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3 text-sm text-muted-foreground">
-              <p>- Capture workload intent and target setup.</p>
-              <p>- Generate Kubernetes YAML/manifests.</p>
-              <p>- Validate, scan, remediate findings, and prepare for commit.</p>
+              <p>- Connect to your Azure subscription and verify credentials.</p>
+              <p>- Scan all deployed resources to identify SKUs and tiers.</p>
+              <p>- Calculate current costs using Azure Retail Pricing API.</p>
+              <p>- Generate cost reduction recommendations based on resource analysis.</p>
+              <p>- Export detailed report with potential savings.</p>
             </CardContent>
           </Card>
 
@@ -46,17 +47,17 @@ export default function KubernetesIntro() {
             <CardHeader>
               <CardTitle>Quick Walkthrough</CardTitle>
               <CardDescription>
-                Interactive walkthrough of the Kubernetes workflow. Click play or navigate through the slides.
+                Interactive walkthrough of the Valuation workflow. Click play or navigate through the slides.
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <KubernetesWalkthrough />
+              <ValuationWalkthrough />
             </CardContent>
           </Card>
 
           <div className="flex justify-end">
-            <Button onClick={() => setLocation("/kubernetes/app")}>
-              Proceed to Kubernetes
+            <Button onClick={() => setLocation("/valuation/app")}>
+              Proceed to Valuation
               <ArrowRight className="w-4 h-4 ml-2" />
             </Button>
           </div>
@@ -65,5 +66,3 @@ export default function KubernetesIntro() {
     </div>
   );
 }
-
-

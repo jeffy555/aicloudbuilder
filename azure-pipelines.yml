@@ -10,13 +10,13 @@ variables:
   azureServiceConnection: "spiritops-azure-sc"
 
   # Container registry settings
-  acrName: "spiritopsacr"
-  acrLoginServer: "spiritopsacr.azurecr.io"
+  acrName: "spiritops"
+  acrLoginServer: "spiritops.azurecr.io"
   imageRepository: "spiritops-app"
 
   # Azure Container Apps settings
-  resourceGroup: "rg-spiritops-prod"
-  containerAppEnvironment: "aca-env-spiritops-prod"
+  resourceGroup: "AICloudBuilder"
+  containerAppEnvironment: "aca-env-spiritops"
   containerAppName: "spiritops-app"
   containerPort: "9005"
 

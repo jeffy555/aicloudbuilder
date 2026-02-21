@@ -535,7 +535,7 @@ ${yamlWithFiles}
 Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. No explanations or code blocks.`;
 
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -562,32 +562,48 @@ Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. 
         .filter(r => r.length > 0);
 
       console.log(`📄 Parsed ${fixedResources.length} resource(s) from fixed YAML`);
+      console.log(`📋 Original files: ${yamlFiles.map(f => f.fileName).join(', ')}`);
 
       // Import yaml parser
       const yaml = await import('js-yaml');
 
       // Update each file in storage
       const updatedFiles: Array<{ fileName: string; content: string }> = [];
+      const errors: string[] = [];
 
-      for (const resource of fixedResources) {
+      for (let i = 0; i < fixedResources.length; i++) {
+        const resource = fixedResources[i];
         try {
           // Extract file name from comment if present
           const fileMatch = resource.match(/^#\s*File:\s*(.+)$/m);
           let fileName: string | null = fileMatch ? fileMatch[1].trim() : null;
 
+          console.log(`\n   Processing resource ${i + 1}/${fixedResources.length}`);
+          console.log(`   File comment found: ${fileName || 'none'}`);
+
           // Remove the file comment for the actual content
           const cleanContent = resource.replace(/^#\s*File:\s*.+\n?/m, '').trim();
 
-          const parsed = yaml.load(cleanContent) as any;
-          if (!parsed || !parsed.kind || !parsed.metadata?.name) {
-            console.warn('⚠️  Skipping unparseable resource');
+          if (!cleanContent) {
+            console.warn(`   ⚠️  Resource ${i + 1} has no content after removing comments, skipping`);
             continue;
           }
+
+          const parsed = yaml.load(cleanContent) as any;
+          if (!parsed || !parsed.kind || !parsed.metadata?.name) {
+            const error = `Resource ${i + 1} is unparseable or missing kind/metadata.name`;
+            console.warn(`   ⚠️  ${error}`);
+            errors.push(error);
+            continue;
+          }
+
+          console.log(`   ✓ Parsed: ${parsed.kind}/${parsed.metadata.name}`);
 
           // Generate filename if not extracted
           if (!fileName) {
             const sanitizedName = parsed.metadata.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
             fileName = `${sanitizedName}-${parsed.kind.toLowerCase()}.yaml`;
+            console.log(`   Generated filename: ${fileName}`);
           }
 
           // Find existing file
@@ -595,30 +611,52 @@ Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. 
 
           if (existingFile) {
             await storage.updateFile(existingFile.id, cleanContent);
-            console.log(`   📝 Updated: ${fileName}`);
+            console.log(`   📝 Updated: ${fileName} (ID: ${existingFile.id})`);
           } else {
-            await storage.createFile({
+            const newFile = await storage.createFile({
               sessionId,
               fileName,
               content: cleanContent
             });
-            console.log(`   ✨ Created: ${fileName}`);
+            console.log(`   ✨ Created: ${fileName} (ID: ${newFile.id})`);
           }
 
           updatedFiles.push({ fileName, content: cleanContent });
         } catch (parseError: any) {
-          console.warn(`⚠️  Failed to parse resource: ${parseError.message}`);
+          const error = `Failed to parse resource ${i + 1}: ${parseError.message}`;
+          console.error(`   ❌ ${error}`);
+          errors.push(error);
         }
       }
 
-      console.log(`✅ Fixed ${updatedFiles.length} file(s)`);
+      if (errors.length > 0) {
+        console.warn(`\n⚠️  Encountered ${errors.length} error(s) during fix application:`);
+        errors.forEach((err, idx) => console.warn(`   ${idx + 1}. ${err}`));
+      }
+
+      console.log(`\n✅ Fixed ${updatedFiles.length} file(s)`);
+      if (errors.length > 0) {
+        console.log(`⚠️  ${errors.length} error(s) occurred during processing`);
+      }
       console.log('==========================================\n');
+
+      if (updatedFiles.length === 0) {
+        return res.status(500).json({
+          success: false,
+          error: 'No files were updated',
+          details: errors.length > 0
+            ? `Failed to update files: ${errors.join('; ')}`
+            : 'AI generated fixes but no files could be parsed or matched',
+          errors
+        });
+      }
 
       res.json({
         success: true,
         message: `Fixed ${updatedFiles.length} file(s) with best practices applied`,
         updatedFiles: updatedFiles.map(f => f.fileName),
-        totalFixed: updatedFiles.length
+        totalFixed: updatedFiles.length,
+        errors: errors.length > 0 ? errors : undefined
       });
 
     } catch (error: any) {
