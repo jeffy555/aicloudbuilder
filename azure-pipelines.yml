@@ -197,3 +197,9 @@ stages:
 
                 FQDN="$(az containerapp show --name "$(containerAppName)" --resource-group "$(resourceGroup)" --query properties.configuration.ingress.fqdn -o tsv)"
                 echo "Container App FQDN: ${FQDN}"
+            env:
+              DATABASE_URL: $(DATABASE_URL)
+              JWT_SECRET: $(JWT_SECRET)
+              OPENAI_API_KEY: $(OPENAI_API_KEY)
+              BITWARDEN_ACCESS_TOKEN: $(BITWARDEN_ACCESS_TOKEN)
+              BITWARDEN_PROJECT_ID: $(BITWARDEN_PROJECT_ID)
