@@ -6,24 +6,42 @@ trigger:
 pr: none
 
 variables:
-  # Azure service connection name in Azure DevOps
-  azureServiceConnection: "SPNBuild"
-  AZURE_LOCATION: "southindia"
+  # Create a Library variable group in Azure DevOps (example: spiritops-variable-group)
+  # and store secrets there: DATABASE_URL, JWT_SECRET, OPENAI_API_KEY,
+  # BITWARDEN_ACCESS_TOKEN, BITWARDEN_PROJECT_ID
+  - group: spiritops-variable-group
+
+  # Pipeline/runtime settings
+  - name: azureServiceConnection
+    value: "SPNBuild"
+  - name: AZURE_LOCATION
+    value: "southindia"
+  - name: runDbMigrations
+    value: "true"
 
   # Container registry settings
-  acrName: "spiritops"
-  acrLoginServer: "spiritops.azurecr.io"
-  imageRepository: "spiritops-app"
+  - name: acrName
+    value: "spiritops"
+  - name: acrLoginServer
+    value: "spiritops.azurecr.io"
+  - name: imageRepository
+    value: "spiritops-app"
 
   # Azure Container Apps settings
-  resourceGroup: "AICloudBuilder"
-  containerAppEnvironment: "spiritops-container-app-env"
-  containerAppName: "spiritops-app"
-  containerPort: "9005"
+  - name: resourceGroup
+    value: "AICloudBuilder"
+  - name: containerAppEnvironment
+    value: "spiritops-container-app-env"
+  - name: containerAppName
+    value: "spiritops-app"
+  - name: containerPort
+    value: "9005"
 
   # Build settings
-  dockerfilePath: "Dockerfile"
-  imageTag: "$(Build.BuildId)"
+  - name: dockerfilePath
+    value: "Dockerfile"
+  - name: imageTag
+    value: "$(Build.BuildId)"
 
 stages:
   - stage: Build
@@ -67,6 +85,26 @@ stages:
         variables:
           builtImage: $[ stageDependencies.Build.BuildAndPush.outputs['buildStep.fullImageName'] ]
         steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            displayName: Use Node.js 20 for migrations
+            condition: and(succeeded(), eq(variables['runDbMigrations'], 'true'))
+            inputs:
+              versionSpec: "20.x"
+
+          - script: |
+              set -euo pipefail
+              : "${DATABASE_URL:?DATABASE_URL is required for db migration}"
+              echo "Installing dependencies for migration..."
+              npm ci
+              echo "Running drizzle-kit push..."
+              npx drizzle-kit push
+            displayName: Run database migration (pipeline-only)
+            condition: and(succeeded(), eq(variables['runDbMigrations'], 'true'))
+            env:
+              DATABASE_URL: $(DATABASE_URL)
+
           - task: AzureCLI@2
             displayName: Create/Update Azure Container App
             inputs:

@@ -11,8 +11,20 @@ export interface AuthenticatedRequest extends Request {
   };
 }
 
-// JWT secret from environment variable
-const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-in-production";
+const FALLBACK_JWT_SECRET = "your-secret-key-change-in-production";
+const configuredJwtSecret = process.env.JWT_SECRET?.trim();
+const isProduction = process.env.NODE_ENV === "production";
+
+if (!configuredJwtSecret && isProduction) {
+  throw new Error("JWT_SECRET is required in production.");
+}
+
+if (!configuredJwtSecret && !isProduction) {
+  console.warn("⚠️  JWT_SECRET is not set. Using development fallback secret.");
+}
+
+// JWT secret from environment variable (fallback allowed only in development)
+const JWT_SECRET = configuredJwtSecret || FALLBACK_JWT_SECRET;
 
 /**
  * Middleware to require authentication
