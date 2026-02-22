@@ -144,6 +144,16 @@ stages:
 
                 if az containerapp show --name "$(containerAppName)" --resource-group "$(resourceGroup)" >/dev/null 2>&1; then
                   echo "Container App exists - updating."
+                  az containerapp secret set \
+                    --name "$(containerAppName)" \
+                    --resource-group "$(resourceGroup)" \
+                    --secrets \
+                      database-url="$(DATABASE_URL)" \
+                      jwt-secret="$(JWT_SECRET)" \
+                      openai-api-key="$(OPENAI_API_KEY)" \
+                      bitwarden-access-token="$(BITWARDEN_ACCESS_TOKEN)" \
+                      bitwarden-project-id="$(BITWARDEN_PROJECT_ID)"
+
                   az containerapp update \
                     --name "$(containerAppName)" \
                     --resource-group "$(resourceGroup)" \
@@ -155,16 +165,14 @@ stages:
                       JWT_SECRET=secretref:jwt-secret \
                       OPENAI_API_KEY=secretref:openai-api-key \
                       BITWARDEN_ACCESS_TOKEN=secretref:bitwarden-access-token \
-                      BITWARDEN_PROJECT_ID=secretref:bitwarden-project-id \
-                    --secrets \
-                      database-url="$(DATABASE_URL)" \
-                      jwt-secret="$(JWT_SECRET)" \
-                      openai-api-key="$(OPENAI_API_KEY)" \
-                      bitwarden-access-token="$(BITWARDEN_ACCESS_TOKEN)" \
-                      bitwarden-project-id="$(BITWARDEN_PROJECT_ID)" \
-                    --registry-server "$(acrLoginServer)" \
-                    --registry-username "${ACR_USERNAME}" \
-                    --registry-password "${ACR_PASSWORD}"
+                      BITWARDEN_PROJECT_ID=secretref:bitwarden-project-id
+
+                  az containerapp registry set \
+                    --name "$(containerAppName)" \
+                    --resource-group "$(resourceGroup)" \
+                    --server "$(acrLoginServer)" \
+                    --username "${ACR_USERNAME}" \
+                    --password "${ACR_PASSWORD}"
                 else
                   echo "Container App does not exist - creating."
                   az containerapp create \
