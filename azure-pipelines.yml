@@ -16,7 +16,7 @@ variables:
 
   # Azure Container Apps settings
   resourceGroup: "AICloudBuilder"
-  containerAppEnvironment: "aca-env-spiritops"
+  containerAppEnvironment: "spiritops-container-app-env"
   containerAppName: "spiritops-app"
   containerPort: "9005"
 
