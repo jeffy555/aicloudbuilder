@@ -18,7 +18,6 @@ export function log(message: string, source = "express") {
 export async function setupVite(app: Express, server: Server) {
   // Load Vite only in development runtime to avoid requiring it in production containers.
   const { createServer: createViteServer, createLogger } = await import("vite");
-  const { default: viteConfig } = await import("../vite.config");
   const viteLogger = createLogger();
 
   const serverOptions = {
@@ -28,8 +27,6 @@ export async function setupVite(app: Express, server: Server) {
   };
 
   const vite = await createViteServer({
-    ...viteConfig,
-    configFile: false,
     customLogger: {
       ...viteLogger,
       error: (msg, options) => {
