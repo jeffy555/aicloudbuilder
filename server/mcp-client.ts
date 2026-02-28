@@ -931,7 +931,7 @@ Check if the MCP server package is properly installed.`;
         const refs = Array.isArray(data.value) ? data.value : [];
         return refs
           .map((ref: any) => typeof ref.name === "string" && ref.name.replace("refs/heads/", ""))
-          .filter((name): name is string => typeof name === "string" && name.length > 0)
+          .filter((name: unknown): name is string => typeof name === "string" && name.length > 0)
           .slice(0, limit);
       } else {
         throw new Error(`Unsupported provider: ${provider}`);
@@ -942,37 +942,65 @@ Check if the MCP server package is properly installed.`;
     }
   }
 
-  async createRepository(provider: MCPProvider, name: string, description?: string): Promise<any> {
+  async createRepository(
+    provider: MCPProvider,
+    name: string,
+    description?: string,
+    credentials: RepositoryCredentials = {}
+  ): Promise<any> {
     try {
       if (provider === 'github') {
-        // GitHub - Use MCP server
-        const result = await this.callTool(provider, 'create_repository', {
-          owner: process.env.GITHUB_OWNER || '',
-          name,
-          description: description || '',
-          private: false,
-          auto_init: false, // Don't initialize - we'll make the first commit ourselves
-        });
-        // Parse MCP content parts
-        let repoData: any = { name };
-        if (result.content && Array.isArray(result.content)) {
-          const textContent = result.content.find((item: any) => item.type === 'text');
-          if (textContent && textContent.text) {
-            repoData = JSON.parse(textContent.text);
-            // Convert repository ID to string for schema compatibility
-            if (repoData.id) {
-              repoData.id = String(repoData.id);
-            }
+        // GitHub - Use REST API so we can honor per-user Bitwarden credentials
+        const token = credentials.github?.token || process.env.GITHUB_TOKEN || '';
+        const owner = credentials.github?.owner || process.env.GITHUB_OWNER || '';
+        if (!token) {
+          throw new Error('GitHub credentials not configured. Missing token.');
+        }
+
+        const octokit = new Octokit({ auth: token });
+        let createdRepo: any;
+
+        // If owner is supplied, attempt org creation first (best for org repos)
+        if (owner) {
+          try {
+            const { data } = await octokit.rest.repos.createInOrg({
+              org: owner,
+              name,
+              description: description || '',
+              private: false,
+              auto_init: false,
+            });
+            createdRepo = data;
+          } catch (orgError: any) {
+            // Fallback: create under authenticated user account
+            console.warn(`⚠️ createInOrg failed for ${owner}, falling back to user repo creation: ${orgError?.message}`);
           }
         }
-        
-        console.log(`✅ Repository ${name} created via GitHub MCP (empty, ready for first commit)`);
-        return repoData;
+
+        if (!createdRepo) {
+          const { data } = await octokit.rest.repos.createForAuthenticatedUser({
+            name,
+            description: description || '',
+            private: false,
+            auto_init: false,
+          });
+          createdRepo = data;
+        }
+
+        console.log(`✅ Repository ${name} created via GitHub REST API`);
+        return {
+          id: String(createdRepo.id),
+          name: createdRepo.name,
+          full_name: createdRepo.full_name,
+          default_branch: createdRepo.default_branch || 'main',
+          updated_at: createdRepo.updated_at,
+          url: createdRepo.html_url,
+        };
       } else if (provider === 'azure') {
-        // Azure DevOps - Use REST API directly (MCP doesn't support repository creation)
-        const org = process.env.AZURE_DEVOPS_ORG;
-        const pat = process.env.AZURE_DEVOPS_PAT;
-        const project = process.env.AZURE_DEVOPS_PROJECT;
+        // Azure DevOps - Use REST API directly with Bitwarden/user credentials support
+        const org = credentials.azure?.org || process.env.AZURE_DEVOPS_ORG;
+        const pat = credentials.azure?.pat || process.env.AZURE_DEVOPS_PAT;
+        const project = credentials.azure?.project || process.env.AZURE_DEVOPS_PROJECT;
         
         if (!org || !pat || !project) {
           throw new Error('Azure DevOps credentials not configured. Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT environment variables.');

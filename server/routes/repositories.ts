@@ -77,6 +77,13 @@ export function registerRepositoryRoutes(app: Express): void {
   app.get("/api/repositories/:provider", optionalAuth, async (req: AuthenticatedRequest, res) => {
     const requestStart = Date.now();
     try {
+      // If caller sends an auth header but token cannot be resolved, surface auth issue clearly.
+      if (req.headers.authorization && !req.userId) {
+        return res.status(401).json({
+          error: 'Authentication token is invalid or expired. Please login again.'
+        });
+      }
+
       const provider = req.params.provider as MCPProvider;
       const credentials = await resolveRepositoryCredentials(provider, req.userId);
       
@@ -195,20 +202,28 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // Create repository
-  app.post("/api/repositories/:provider", async (req, res) => {
+  app.post("/api/repositories/:provider", optionalAuth, async (req: AuthenticatedRequest, res) => {
     const provider = req.params.provider as MCPProvider;
     const { name, description } = req.body;
     
     try {
+      const credentials = await resolveRepositoryCredentials(provider, req.userId);
+
+      const githubToken = credentials.github?.token || process.env.GITHUB_TOKEN;
+      const githubOwner = credentials.github?.owner || process.env.GITHUB_OWNER;
+      const azureOrg = credentials.azure?.org || process.env.AZURE_DEVOPS_ORG;
+      const azurePat = credentials.azure?.pat || process.env.AZURE_DEVOPS_PAT;
+      const azureProject = credentials.azure?.project || process.env.AZURE_DEVOPS_PROJECT;
+
       // Validate provider credentials
-      if (provider === 'azure' && (!process.env.AZURE_DEVOPS_ORG || !process.env.AZURE_DEVOPS_PAT || !process.env.AZURE_DEVOPS_PROJECT)) {
+      if (provider === 'azure' && (!azureOrg || !azurePat || !azureProject)) {
         return res.status(400).json({ error: 'Azure DevOps credentials not configured. Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT environment variables.' });
       }
-      if (provider === 'github' && (!process.env.GITHUB_TOKEN || !process.env.GITHUB_OWNER)) {
+      if (provider === 'github' && (!githubToken || !githubOwner)) {
         return res.status(400).json({ error: 'GitHub credentials not configured. Please set GITHUB_TOKEN and GITHUB_OWNER environment variables.' });
       }
 
-      const repo = await mcpClient.createRepository(provider, name, description);
+      const repo = await mcpClient.createRepository(provider, name, description, credentials);
       res.json(repo);
     } catch (error: any) {
       console.error('Error creating repository:', error);
