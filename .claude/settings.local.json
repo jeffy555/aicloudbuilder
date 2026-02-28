@@ -7,7 +7,15 @@
       "Bash(taskkill:*)",
       "Bash(node:*)",
       "Bash(powershell:*)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(\"/c/Program Files/Pandoc/pandoc.exe\" \"d:/AICloudBuilder/TECHNICAL_DOCUMENTATION.md\" -o \"d:/AICloudBuilder/AICloudBuilder_Technical_Documentation.docx\" --toc --toc-depth=3 -s --highlight-style=tango)",
+      "Bash(cmd.exe /c '\"\"C:\\\\Program Files\\\\Pandoc\\\\pandoc.exe\"\" --version 2>&1')",
+      "Bash(powershell.exe -Command \"Get-Command pandoc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
+      "Bash(powershell.exe -Command \"& ''C:\\\\Users\\\\JEFFY\\\\AppData\\\\Local\\\\Pandoc\\\\pandoc.exe'' ''D:\\\\AICloudBuilder\\\\TECHNICAL_DOCUMENTATION.md'' -o ''D:\\\\AICloudBuilder\\\\AICloudBuilder_Technical_Documentation.docx'' --toc --toc-depth=3 -s --highlight-style=tango 2>&1\")",
+      "Bash(powershell.exe -Command \"\\(Get-Item ''D:\\\\AICloudBuilder\\\\TECHNICAL_DOCUMENTATION.md''\\).Length / 1KB\")",
+      "Bash(powershell.exe -Command \"Get-Item ''D:\\\\AICloudBuilder\\\\AICloudBuilder_Technical_Documentation.docx'' | Select-Object Name, Length, LastWriteTime\")",
+      "Bash(powershell.exe -Command \"Get-Item ''D:\\\\AICloudBuilder\\\\AICloudBuilder_Technical_Documentation.docx'' | Format-List Name, Length, LastWriteTime\")",
+      "Bash(powershell.exe -Command \"& ''C:\\\\Users\\\\JEFFY\\\\AppData\\\\Local\\\\Pandoc\\\\pandoc.exe'' ''D:\\\\AICloudBuilder\\\\TECHNICAL_DOCUMENTATION_ENHANCED.md'' -o ''D:\\\\AICloudBuilder\\\\AICloudBuilder_Technical_Documentation.docx'' --toc --toc-depth=3 -s --syntax-highlighting=tango 2>&1; Write-Host ''Exit:'' $LASTEXITCODE\")"
     ]
   },
   "model": "claude-opus-4.6"

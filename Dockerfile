@@ -13,6 +13,11 @@ RUN npm run build && npm prune --omit=dev
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && update-ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
 ENV PORT=9005
 
