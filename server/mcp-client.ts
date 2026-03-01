@@ -1406,16 +1406,17 @@ Check if the MCP server package is properly installed.`;
   async scanRepositoryFiles(
     provider: MCPProvider,
     repoName: string,
-    branch: string = 'main'
+    branch: string = 'main',
+    credentials?: RepositoryCredentials
   ): Promise<{ path: string; content: string }[]> {
     try {
       if (provider === 'github') {
         const octokit = new Octokit({
-          auth: process.env.GITHUB_TOKEN,
+          auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
         });
 
         // Parse repository name: could be "owner/repo" or just "repo"
-        let owner = process.env.GITHUB_OWNER || '';
+        let owner = credentials?.github?.owner || process.env.GITHUB_OWNER || '';
         let repo = repoName;
         
         if (repoName.includes('/')) {
@@ -1486,7 +1487,7 @@ Check if the MCP server package is properly installed.`;
       } else if (provider === 'azure') {
         // Azure DevOps - Use REST API directly (MCP doesn't support file content reading)
         console.log(`📖 Scanning Azure DevOps repository "${repoName}" via REST API...`);
-        return await this.scanRepositoryFilesViaAzureDevOpsAPI(repoName, branch);
+        return await this.scanRepositoryFilesViaAzureDevOpsAPI(repoName, branch, credentials);
       } else {
         throw new Error(`Unsupported provider: ${provider}`);
       }
@@ -1496,8 +1497,8 @@ Check if the MCP server package is properly installed.`;
     }
   }
 
-  private parseGitHubRepoName(repoName: string): { owner: string; repo: string } {
-    let owner = process.env.GITHUB_OWNER || '';
+  private parseGitHubRepoName(repoName: string, credentials?: RepositoryCredentials): { owner: string; repo: string } {
+    let owner = credentials?.github?.owner || process.env.GITHUB_OWNER || '';
     let repo = repoName;
     if (repoName.includes('/')) {
       const parts = repoName.split('/');
@@ -1532,13 +1533,14 @@ Check if the MCP server package is properly installed.`;
   async listRepositoryPaths(
     provider: MCPProvider,
     repoName: string,
-    branch: string = 'main'
+    branch: string = 'main',
+    credentials?: RepositoryCredentials
   ): Promise<string[]> {
     if (provider === 'github') {
       const octokit = new Octokit({
-        auth: process.env.GITHUB_TOKEN,
+        auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
       });
-      const { owner, repo } = this.parseGitHubRepoName(repoName);
+      const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
       const commitSha = await this.resolveGitHubCommitSha(octokit, owner, repo, branch);
       try {
         const { data: treeData } = await octokit.rest.git.getTree({
@@ -1561,9 +1563,9 @@ Check if the MCP server package is properly installed.`;
       }
     } else if (provider === 'azure') {
       // List ALL file paths (not just .tf) — used by Docker, ArchMe, etc.
-      const org = process.env.AZURE_DEVOPS_ORG;
-      const pat = process.env.AZURE_DEVOPS_PAT;
-      const project = process.env.AZURE_DEVOPS_PROJECT;
+      const org = credentials?.azure?.org || process.env.AZURE_DEVOPS_ORG;
+      const pat = credentials?.azure?.pat || process.env.AZURE_DEVOPS_PAT;
+      const project = credentials?.azure?.project || process.env.AZURE_DEVOPS_PROJECT;
       if (!org || !pat || !project) {
         throw new Error('Azure DevOps credentials not configured.');
       }
@@ -1591,13 +1593,14 @@ Check if the MCP server package is properly installed.`;
     provider: MCPProvider,
     repoName: string,
     filePath: string,
-    branch: string = 'main'
+    branch: string = 'main',
+    credentials?: RepositoryCredentials
   ): Promise<{ path: string; content: string }> {
     if (provider === 'github') {
       const octokit = new Octokit({
-        auth: process.env.GITHUB_TOKEN,
+        auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
       });
-      const { owner, repo } = this.parseGitHubRepoName(repoName);
+      const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
       const response = await octokit.rest.repos.getContent({
         owner,
         repo,
@@ -1616,9 +1619,9 @@ Check if the MCP server package is properly installed.`;
         content: Buffer.from(data.content, 'base64').toString('utf-8'),
       };
     } else if (provider === 'azure') {
-      const org = process.env.AZURE_DEVOPS_ORG;
-      const pat = process.env.AZURE_DEVOPS_PAT;
-      const project = process.env.AZURE_DEVOPS_PROJECT;
+      const org = credentials?.azure?.org || process.env.AZURE_DEVOPS_ORG;
+      const pat = credentials?.azure?.pat || process.env.AZURE_DEVOPS_PAT;
+      const project = credentials?.azure?.project || process.env.AZURE_DEVOPS_PROJECT;
       if (!org || !pat || !project) {
         throw new Error('Azure DevOps credentials not configured.');
       }
@@ -1864,13 +1867,14 @@ Check if the MCP server package is properly installed.`;
    */
   private async scanRepositoryFilesViaAzureDevOpsAPI(
     repoName: string,
-    branch: string = 'main'
+    branch: string = 'main',
+    credentials?: RepositoryCredentials
   ): Promise<Array<{ path: string; content: string }>> {
     try {
-      const org = process.env.AZURE_DEVOPS_ORG;
-      const pat = process.env.AZURE_DEVOPS_PAT;
-      const project = process.env.AZURE_DEVOPS_PROJECT;
-      
+      const org = credentials?.azure?.org || process.env.AZURE_DEVOPS_ORG;
+      const pat = credentials?.azure?.pat || process.env.AZURE_DEVOPS_PAT;
+      const project = credentials?.azure?.project || process.env.AZURE_DEVOPS_PROJECT;
+
       if (!org || !pat || !project) {
         throw new Error('Azure DevOps credentials not configured. Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT environment variables.');
       }

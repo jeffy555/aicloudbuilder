@@ -1,7 +1,6 @@
 import type { Express } from "express";
 import { storage } from "../storage";
-import { mcpClient, type MCPProvider, type MCPServerType, type RepositoryCredentials } from "../mcp-client";
-import { bitwardenService, isBitwardenConfigured } from "../services/bitwarden-service";
+import { mcpClient, type MCPProvider, type MCPServerType } from "../mcp-client";
 import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
 import { type Repository } from "@shared/schema";
 import { analyzeTerraformFiles } from "../terraform-parser";
@@ -9,81 +8,7 @@ import { validateTerraformRequest } from "../terraform-validator";
 import { openaiService } from "../openai-service";
 import { type InsertSession } from "@shared/schema";
 import { type GeneratedFile } from "@shared/schema";
-
-type CredentialResult = {
-  credentials: RepositoryCredentials;
-  reason?: string; // Set when credentials could not be resolved — used for clear error messages
-};
-
-async function resolveRepositoryCredentials(
-  provider: MCPProvider,
-  userId?: string
-): Promise<CredentialResult> {
-  // No userId means the JWT didn't validate (token missing, expired, or secret mismatch).
-  // We skip Bitwarden (which requires a userId) and let the caller fall through to env-var
-  // credentials. Only surface an auth error if env vars are also absent.
-  if (!userId) {
-    console.warn(`⚠️  [credentials] No userId — JWT validation failed. Skipping Bitwarden lookup for ${provider}. Will try env vars.`);
-    return { credentials: {} };
-  }
-
-  if (!isBitwardenConfigured()) {
-    const missing: string[] = [];
-    if (!process.env.BITWARDEN_ACCESS_TOKEN) missing.push('BITWARDEN_ACCESS_TOKEN');
-    if (!process.env.BITWARDEN_PROJECT_ID) missing.push('BITWARDEN_PROJECT_ID');
-    console.warn(`⚠️  Bitwarden not configured — missing env vars: ${missing.join(', ')}`);
-    return {
-      credentials: {},
-      reason: `Bitwarden is not configured on the server. Missing environment variables: ${missing.join(', ')}. Add them to your Azure Container App configuration.`,
-    };
-  }
-
-  try {
-    if (provider === "github") {
-      const secret = await bitwardenService.getUserSecret(userId, "github");
-      if (secret?.token) {
-        return {
-          credentials: {
-            github: {
-              token: secret.token,
-              owner: secret.owner,
-            },
-          },
-        };
-      }
-      return {
-        credentials: {},
-        reason: `GitHub credentials were not found in Bitwarden for this account. Please re-save them in Settings.`,
-      };
-    } else if (provider === "azure") {
-      const secret = await bitwardenService.getUserSecret(userId, "azure-devops");
-      if (secret?.org && secret?.pat && secret?.project) {
-        return {
-          credentials: {
-            azure: {
-              org: secret.org,
-              pat: secret.pat,
-              project: secret.project,
-            },
-          },
-        };
-      }
-      return {
-        credentials: {},
-        reason: `Azure DevOps credentials were not found in Bitwarden for this account. Please re-save them in Settings.`,
-      };
-    }
-  } catch (error: any) {
-    const msg = error?.message || String(error);
-    console.error(`❌ Bitwarden lookup failed for user ${userId} / ${provider}:`, msg);
-    return {
-      credentials: {},
-      reason: `Bitwarden lookup failed: ${msg}`,
-    };
-  }
-
-  return { credentials: {} };
-}
+import { resolveRepositoryCredentials } from "../utils/credentials";
 
 /**
  * Repository operations routes
@@ -369,11 +294,11 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // Scan child module repository to extract available resources
-  app.post("/api/sessions/:id/scan-child-module", async (req, res) => {
+  app.post("/api/sessions/:id/scan-child-module", optionalAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { repositoryId, provider } = req.body;
-      
+
       if (!repositoryId || !provider) {
         return res.status(400).json({ error: 'Repository ID and provider are required' });
       }
@@ -383,21 +308,24 @@ export function registerRepositoryRoutes(app: Express): void {
         return res.status(404).json({ error: 'Session not found' });
       }
 
+      const { credentials } = await resolveRepositoryCredentials(provider as MCPProvider, req.userId);
+
       // Get repository name from ID
-      const repos = await mcpClient.listRepositories(provider as MCPProvider);
+      const repos = await mcpClient.listRepositories(provider as MCPProvider, credentials);
       const repo = repos.find(r => r.id === repositoryId || r.name === repositoryId);
-      
+
       if (!repo) {
         return res.status(404).json({ error: 'Repository not found' });
       }
 
       console.log(`\n📦 Scanning child module repository: ${repo.name}`);
 
-      // Scan repository files
+      // Scan repository files (pass Bitwarden credentials so no env-var dependency)
       const files = await mcpClient.scanRepositoryFiles(
         provider as MCPProvider,
         repo.name,
-        'main'
+        'main',
+        credentials
       );
 
       // Filter Terraform files
@@ -451,12 +379,12 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // Scan repository for existing Terraform configuration
-  app.post("/api/sessions/:id/scan-repository", async (req, res) => {
+  app.post("/api/sessions/:id/scan-repository", optionalAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { refresh = false } = req.body || {}; // Option to clear existing files first
       const session = await storage.getSession(sessionId);
-      
+
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
@@ -464,6 +392,12 @@ export function registerRepositoryRoutes(app: Express): void {
       if (!session.provider || !session.repositoryName) {
         return res.status(400).json({ error: 'Provider and repository must be selected before scanning' });
       }
+
+      // Resolve Bitwarden credentials for this user (falls back to env vars if not authed)
+      const { credentials } = await resolveRepositoryCredentials(
+        session.provider as MCPProvider,
+        (req as AuthenticatedRequest).userId
+      );
 
       // If refresh is true, clear existing files first to start fresh
       if (refresh) {
@@ -478,7 +412,8 @@ export function registerRepositoryRoutes(app: Express): void {
       const files = await mcpClient.scanRepositoryFiles(
         session.provider as MCPProvider,
         session.repositoryName,
-        'main'
+        'main',
+        credentials
       );
 
       // CRITICAL: Log ALL files returned from repository (before any processing)

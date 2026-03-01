@@ -2,13 +2,15 @@ import type { Express } from "express";
 import OpenAI from "openai";
 import { storage } from "../storage";
 import { mcpClient, type MCPProvider } from "../mcp-client";
+import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { resolveRepositoryCredentials } from "../utils/credentials";
 
 /**
  * Docker routes
  */
 export function registerDockerRoutes(app: Express): void {
   // Scan repository metadata for Docker info
-  app.post("/api/sessions/:id/docker-scan", async (req, res) => {
+  app.post("/api/sessions/:id/docker-scan", optionalAuth, async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
@@ -36,11 +38,14 @@ export function registerDockerRoutes(app: Express): void {
       console.log(`Session ID: ${sessionId}`);
       console.log(`Provider: ${provider}, Repository: ${repoName}`);
 
+      // Resolve Bitwarden credentials (falls back to env vars if JWT not present)
+      const { credentials } = await resolveRepositoryCredentials(provider, req.userId);
+
       const branch =
         (req.body && typeof req.body.branch === "string" && req.body.branch.trim())
           ? req.body.branch.trim()
           : session.repositoryBranch || "main";
-      const rawPaths = await mcpClient.listRepositoryPaths(provider, repoName, branch);
+      const rawPaths = await mcpClient.listRepositoryPaths(provider, repoName, branch, credentials);
 
       // Filter out vendored/generated directories that bloat the scan
       const ignoredPrefixes = [
@@ -118,7 +123,7 @@ export function registerDockerRoutes(app: Express): void {
       const dependencyFiles: Array<{ file: string; entries: string[] }> = [];
       const safeGetFile = async (filePath: string) => {
         try {
-          return await mcpClient.getRepositoryFile(provider, repoName, filePath, branch);
+          return await mcpClient.getRepositoryFile(provider, repoName, filePath, branch, credentials);
         } catch (error: any) {
           console.warn(`   ⚠️  Unable to read ${filePath}: ${error.message}`);
           return null;
