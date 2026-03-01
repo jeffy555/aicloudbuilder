@@ -108,13 +108,9 @@ export function registerRepositoryRoutes(app: Express): void {
   app.get("/api/repositories/:provider", optionalAuth, async (req: AuthenticatedRequest, res) => {
     const requestStart = Date.now();
     try {
-      // If caller sends an auth header but token cannot be resolved, surface auth issue clearly.
-      if (req.headers.authorization && !req.userId) {
-        return res.status(401).json({
-          error: 'Authentication token is invalid or expired. Please login again.'
-        });
-      }
-
+      // Note: optionalAuth sets req.userId if token is valid, leaves it undefined if not.
+      // We do NOT hard-block on invalid tokens here — we still attempt env var credentials
+      // so the endpoint works even when the browser holds an expired token.
       const provider = req.params.provider as MCPProvider;
       const { credentials, reason } = await resolveRepositoryCredentials(provider, req.userId);
 

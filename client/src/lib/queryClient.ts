@@ -44,6 +44,11 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
+function clearStaleToken() {
+  localStorage.removeItem('token');
+  sessionStorage.removeItem('token');
+}
+
 export async function apiRequest(
   method: string,
   url: string,
@@ -51,11 +56,11 @@ export async function apiRequest(
 ): Promise<Response> {
   const token = localStorage.getItem('token') || sessionStorage.getItem('token');
   const headers: Record<string, string> = {};
-  
+
   if (data) {
     headers["Content-Type"] = "application/json";
   }
-  
+
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
@@ -66,6 +71,15 @@ export async function apiRequest(
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
+
+  // If server rejects our token as invalid/expired, clear it so the browser
+  // stops sending a stale token on every subsequent request.
+  if (res.status === 401 && token) {
+    clearStaleToken();
+    // Redirect to login so the user can get a fresh token
+    window.location.href = '/login';
+    return res;
+  }
 
   await throwIfResNotOk(res);
   return res;
@@ -89,8 +103,16 @@ export const getQueryFn: <T>(options: {
       credentials: "include",
     });
 
-    if (unauthorizedBehavior === "returnNull" && res.status === 401) {
-      return null;
+    if (res.status === 401) {
+      if (token) {
+        // Stale/invalid token — clear it so we stop sending it
+        clearStaleToken();
+        window.location.href = '/login';
+        return null;
+      }
+      if (unauthorizedBehavior === "returnNull") {
+        return null;
+      }
     }
 
     await throwIfResNotOk(res);
