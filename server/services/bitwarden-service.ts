@@ -206,40 +206,56 @@ export class BitwardenService {
     secretType: 'azure-devops' | 'azure-cloud' | 'github' | 'aws' | 'gcp'
   ): Promise<Record<string, string> | null> {
     const cacheKey = `${userId}:${secretType}`;
-    
+
     // Check cache
     const cached = secretCache.get<Record<string, string>>(cacheKey);
     if (cached) {
       return cached;
     }
-    
+
     await this.ensureInitialized();
     if (!this.organizationId) return null;
 
-    const secretName = `user_${userId}_${secretType.replace('-', '_')}`;
-    
+    const secretName = `user_${userId}_${secretType.replace(/-/g, '_')}`;
+    const typeSuffix = `_${secretType.replace(/-/g, '_')}`;
+
     try {
-      let secret = null;
+      let secretsResponse: any = null;
       try {
-        const secretsResponse = await this.client.secrets().list(this.organizationId);
-        secret = secretsResponse.data.find(s => s.key === secretName);
+        secretsResponse = await this.client.secrets().list(this.organizationId);
       } catch (listError: any) {
         if (listError.message.includes("404") || listError.message.includes("Resource not found")) {
           console.warn("⚠️ Bitwarden secrets list failed with 404 for getUserSecret");
-        } else {
-          throw listError;
+          return null;
+        }
+        throw listError;
+      }
+
+      // Primary lookup: exact userId match
+      let secret = secretsResponse.data.find((s: any) => s.key === secretName);
+
+      // Fallback lookup: find by type suffix when userId changed (e.g. fresh DB after container restart)
+      if (!secret) {
+        console.warn(`⚠️ Secret not found for key "${secretName}". Trying type-based fallback...`);
+        const fallback = secretsResponse.data.find((s: any) => s.key.endsWith(typeSuffix));
+        if (fallback) {
+          console.log(`✅ Found fallback secret via type suffix: ${fallback.key}`);
+          secret = fallback;
         }
       }
-      
-      if (!secret) return null;
-      
+
+      if (!secret) {
+        console.warn(`⚠️ No secret found for type "${secretType}" (checked ${secretsResponse.data.length} secrets)`);
+        return null;
+      }
+
       // Get the full secret to get the value
       const fullSecret = await this.client.secrets().get(secret.id);
       const data = JSON.parse(fullSecret.value);
-      
+
       // Cache the result
       secretCache.set(cacheKey, data);
-      
+
       return data;
     } catch (error: any) {
       console.error(`❌ Failed to get secret from Bitwarden: ${error.message}`);

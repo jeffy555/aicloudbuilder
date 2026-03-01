@@ -10,14 +10,28 @@ import { openaiService } from "../openai-service";
 import { type InsertSession } from "@shared/schema";
 import { type GeneratedFile } from "@shared/schema";
 
+type CredentialResult = {
+  credentials: RepositoryCredentials;
+  reason?: string; // Set when credentials could not be resolved — used for clear error messages
+};
+
 async function resolveRepositoryCredentials(
   provider: MCPProvider,
   userId?: string
-): Promise<RepositoryCredentials> {
-  if (!userId) return {};
+): Promise<CredentialResult> {
+  if (!userId) {
+    return { credentials: {}, reason: 'User is not authenticated. Please log in and try again.' };
+  }
 
   if (!isBitwardenConfigured()) {
-    return {};
+    const missing: string[] = [];
+    if (!process.env.BITWARDEN_ACCESS_TOKEN) missing.push('BITWARDEN_ACCESS_TOKEN');
+    if (!process.env.BITWARDEN_PROJECT_ID) missing.push('BITWARDEN_PROJECT_ID');
+    console.warn(`⚠️  Bitwarden not configured — missing env vars: ${missing.join(', ')}`);
+    return {
+      credentials: {},
+      reason: `Bitwarden is not configured on the server. Missing environment variables: ${missing.join(', ')}. Add them to your Azure Container App configuration.`,
+    };
   }
 
   try {
@@ -25,29 +39,46 @@ async function resolveRepositoryCredentials(
       const secret = await bitwardenService.getUserSecret(userId, "github");
       if (secret?.token) {
         return {
-          github: {
-            token: secret.token,
-            owner: secret.owner,
+          credentials: {
+            github: {
+              token: secret.token,
+              owner: secret.owner,
+            },
           },
         };
       }
+      return {
+        credentials: {},
+        reason: `GitHub credentials were not found in Bitwarden for this account. Please re-save them in Settings.`,
+      };
     } else if (provider === "azure") {
       const secret = await bitwardenService.getUserSecret(userId, "azure-devops");
       if (secret?.org && secret?.pat && secret?.project) {
         return {
-          azure: {
-            org: secret.org,
-            pat: secret.pat,
-            project: secret.project,
+          credentials: {
+            azure: {
+              org: secret.org,
+              pat: secret.pat,
+              project: secret.project,
+            },
           },
         };
       }
+      return {
+        credentials: {},
+        reason: `Azure DevOps credentials were not found in Bitwarden for this account. Please re-save them in Settings.`,
+      };
     }
   } catch (error: any) {
-    console.warn(`⚠️  Unable to load ${provider} secrets for user ${userId}:`, error?.message || error);
+    const msg = error?.message || String(error);
+    console.error(`❌ Bitwarden lookup failed for user ${userId} / ${provider}:`, msg);
+    return {
+      credentials: {},
+      reason: `Bitwarden lookup failed: ${msg}`,
+    };
   }
 
-  return {};
+  return { credentials: {} };
 }
 
 /**
@@ -85,8 +116,8 @@ export function registerRepositoryRoutes(app: Express): void {
       }
 
       const provider = req.params.provider as MCPProvider;
-      const credentials = await resolveRepositoryCredentials(provider, req.userId);
-      
+      const { credentials, reason } = await resolveRepositoryCredentials(provider, req.userId);
+
       const githubToken = credentials.github?.token || process.env.GITHUB_TOKEN;
       const githubOwner = credentials.github?.owner || process.env.GITHUB_OWNER;
       const azureOrg = credentials.azure?.org || process.env.AZURE_DEVOPS_ORG;
@@ -95,12 +126,12 @@ export function registerRepositoryRoutes(app: Express): void {
 
       if (provider === 'azure' && (!azureOrg || !azurePat || !azureProject)) {
         return res.status(400).json({
-          error: 'Azure DevOps credentials not configured. Please add them in Settings or set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT environment variables.'
+          error: reason || 'Azure DevOps credentials not configured. Please add them in Settings.',
         });
       }
       if (provider === 'github' && (!githubToken || !githubOwner)) {
         return res.status(400).json({
-          error: 'GitHub credentials not configured. Please add them in Settings or set GITHUB_TOKEN and GITHUB_OWNER environment variables.'
+          error: reason || 'GitHub credentials not configured. Please add them in Settings.',
         });
       }
       
@@ -207,7 +238,7 @@ export function registerRepositoryRoutes(app: Express): void {
     const { name, description } = req.body;
     
     try {
-      const credentials = await resolveRepositoryCredentials(provider, req.userId);
+      const { credentials, reason } = await resolveRepositoryCredentials(provider, req.userId);
 
       const githubToken = credentials.github?.token || process.env.GITHUB_TOKEN;
       const githubOwner = credentials.github?.owner || process.env.GITHUB_OWNER;
@@ -217,10 +248,10 @@ export function registerRepositoryRoutes(app: Express): void {
 
       // Validate provider credentials
       if (provider === 'azure' && (!azureOrg || !azurePat || !azureProject)) {
-        return res.status(400).json({ error: 'Azure DevOps credentials not configured. Please set AZURE_DEVOPS_ORG, AZURE_DEVOPS_PAT, and AZURE_DEVOPS_PROJECT environment variables.' });
+        return res.status(400).json({ error: reason || 'Azure DevOps credentials not configured. Please add them in Settings.' });
       }
       if (provider === 'github' && (!githubToken || !githubOwner)) {
-        return res.status(400).json({ error: 'GitHub credentials not configured. Please set GITHUB_TOKEN and GITHUB_OWNER environment variables.' });
+        return res.status(400).json({ error: reason || 'GitHub credentials not configured. Please add them in Settings.' });
       }
 
       const repo = await mcpClient.createRepository(provider, name, description, credentials);
