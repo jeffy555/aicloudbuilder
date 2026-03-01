@@ -19,8 +19,12 @@ async function resolveRepositoryCredentials(
   provider: MCPProvider,
   userId?: string
 ): Promise<CredentialResult> {
+  // No userId means the JWT didn't validate (token missing, expired, or secret mismatch).
+  // We skip Bitwarden (which requires a userId) and let the caller fall through to env-var
+  // credentials. Only surface an auth error if env vars are also absent.
   if (!userId) {
-    return { credentials: {}, reason: 'User is not authenticated. Please log in and try again.' };
+    console.warn(`⚠️  [credentials] No userId — JWT validation failed. Skipping Bitwarden lookup for ${provider}. Will try env vars.`);
+    return { credentials: {} };
   }
 
   if (!isBitwardenConfigured()) {
@@ -121,13 +125,19 @@ export function registerRepositoryRoutes(app: Express): void {
       const azureProject = credentials.azure?.project || process.env.AZURE_DEVOPS_PROJECT;
 
       if (provider === 'azure' && (!azureOrg || !azurePat || !azureProject)) {
+        const notAuthenticated = !req.userId;
         return res.status(400).json({
-          error: reason || 'Azure DevOps credentials not configured. Please add them in Settings.',
+          error: notAuthenticated
+            ? 'Your session has expired or is invalid. Please log out and log back in, then re-save your Azure DevOps credentials in Settings.'
+            : (reason || 'Azure DevOps credentials not found in Bitwarden. Please re-save them in Settings.'),
         });
       }
       if (provider === 'github' && (!githubToken || !githubOwner)) {
+        const notAuthenticated = !req.userId;
         return res.status(400).json({
-          error: reason || 'GitHub credentials not configured. Please add them in Settings.',
+          error: notAuthenticated
+            ? 'Your session has expired or is invalid. Please log out and log back in, then re-save your GitHub credentials in Settings.'
+            : (reason || 'GitHub credentials not found in Bitwarden. Please re-save them in Settings.'),
         });
       }
       

@@ -78,7 +78,7 @@ export class BitwardenService {
     await this.ensureInitialized();
     if (!this.organizationId) throw new Error("Organization ID not found");
     
-    const secretName = `user_${userId}_${secretType.replace('-', '_')}`;
+    const secretName = `user_${userId}_${secretType.replace(/-/g, '_')}`;
     const secretValue = JSON.stringify(data);
     
     try {

@@ -102,9 +102,12 @@ export function optionalAuth(
           username: decoded.username,
           email: decoded.email,
         };
-      } catch (error) {
-        // Token invalid, but continue without auth
+      } catch (error: any) {
+        // Log why the token failed — visible in Azure Container App logs
+        console.warn(`⚠️  [optionalAuth] JWT verification failed: ${error?.name} — ${error?.message}. Token preview: ${token?.substring(0, 20)}...`);
       }
+    } else {
+      console.debug(`[optionalAuth] No Authorization header or session token on ${req.method} ${req.path}`);
     }
 
     next();
