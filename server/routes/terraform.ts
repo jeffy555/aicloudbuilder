@@ -12,13 +12,15 @@ import type { GeneratedFile } from "@shared/schema";
 import { validateTerraformRequest, formatValidationErrors } from "../terraform-validator";
 import { generateArchitectureDiagram } from "../diagram/terraform-diagram-generator";
 import { findMatchingBrace } from "../utils/route-helpers";
+import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { bitwardenService, isBitwardenConfigured } from "../services/bitwarden-service";
 
 /**
  * Register Terraform-specific routes
  */
 export function registerTerraformRoutes(app: Express) {
   // Configure Terraform backend (Azure/AWS/GCP)
-  app.post("/api/sessions/:id/configure-backend", async (req, res) => {
+  app.post("/api/sessions/:id/configure-backend", optionalAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { action, backendConfig } = req.body; // action: 'validate' | 'create' | 'decline'
@@ -234,7 +236,29 @@ export function registerTerraformRoutes(app: Express) {
           }
 
           // Azure backend configuration (existing logic)
-          // Step 0: Verify Service Principal permissions before attempting resource creation
+          // Step 0: Load Azure Cloud credentials from Bitwarden into process.env if not already set.
+          // This allows users who stored credentials via Settings to use Terraform backend
+          // without requiring AZURE_* env vars to be pre-configured in the container.
+          if (!process.env.AZURE_CLIENT_ID && req.userId && isBitwardenConfigured()) {
+            try {
+              const azureSecret = await bitwardenService.getUserSecret(req.userId, 'azure-cloud');
+              if (azureSecret?.clientId && azureSecret?.tenantId && azureSecret?.subscriptionId) {
+                process.env.AZURE_CLIENT_ID = azureSecret.clientId;
+                process.env.AZURE_TENANT_ID = azureSecret.tenantId;
+                process.env.AZURE_SUBSCRIPTION_ID = azureSecret.subscriptionId;
+                if (azureSecret.clientSecret) {
+                  process.env.AZURE_CLIENT_SECRET = azureSecret.clientSecret;
+                }
+                console.log(`✅ Azure Cloud credentials loaded from Bitwarden for user ${req.userId}`);
+              } else {
+                console.warn(`⚠️ Azure Cloud credentials not found in Bitwarden for user ${req.userId}`);
+              }
+            } catch (bwErr: any) {
+              console.warn(`⚠️ Failed to load Azure Cloud credentials from Bitwarden: ${bwErr.message}`);
+            }
+          }
+
+          // Step 1: Verify Service Principal permissions before attempting resource creation
           // This prevents confusing errors later and provides clear instructions if permissions are missing
           const permissionCheck = await mcpClient.ensureServicePrincipalRoles();
           

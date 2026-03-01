@@ -2416,7 +2416,7 @@ Original error: ${errorMsg}`
       if (!process.env.AZURE_CLIENT_ID || !process.env.AZURE_SUBSCRIPTION_ID || !process.env.AZURE_TENANT_ID) {
         return {
           success: false,
-          message: 'Service Principal credentials not configured. Please set AZURE_CLIENT_ID, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID in .env file.'
+          message: 'Azure Cloud credentials not configured. Please save your Azure Service Principal credentials in Settings → Azure Cloud, or set AZURE_CLIENT_ID, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID as environment variables in your deployment.'
         };
       }
 
