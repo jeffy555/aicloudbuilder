@@ -168,11 +168,14 @@ export function registerRepositoryRoutes(app: Express): void {
       console.error('Error listing repositories:', error);
 
       if (error?.status === 401) {
-        return res.status(401).json({
+        // Use 400 (not 401) so the client doesn't mistake this for a JWT auth failure.
+        // 401 from GitHub/Azure APIs means bad credentials, not an expired session token.
+        return res.status(400).json({
           error:
             (req.params.provider as MCPProvider) === "github"
               ? "GitHub credentials are invalid or expired. Update them in Settings."
-              : "Azure DevOps credentials are invalid or missing."
+              : "Azure DevOps credentials are invalid or missing.",
+          code: "INVALID_PROVIDER_CREDENTIALS"
         });
       }
 

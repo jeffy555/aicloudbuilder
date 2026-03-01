@@ -72,13 +72,25 @@ export async function apiRequest(
     credentials: "include",
   });
 
-  // If server rejects our token as invalid/expired, clear it so the browser
-  // stops sending a stale token on every subsequent request.
+  // Only treat 401 as a session expiry if the server signals it came from our
+  // own JWT auth layer (not from an external provider like GitHub or Azure).
+  // External-provider credential errors are returned as 400 with code INVALID_PROVIDER_CREDENTIALS.
   if (res.status === 401 && token) {
-    clearStaleToken();
-    // Redirect to login so the user can get a fresh token
-    window.location.href = '/login';
-    return res;
+    try {
+      const cloned = res.clone();
+      const body = await cloned.json().catch(() => ({}));
+      // External API 401s are re-mapped to 400 on the server. If we still see a
+      // raw 401 here it means our JWT was rejected — clear it and go to login.
+      if (body?.code !== 'INVALID_PROVIDER_CREDENTIALS') {
+        clearStaleToken();
+        window.location.href = '/login';
+        return res;
+      }
+    } catch {
+      clearStaleToken();
+      window.location.href = '/login';
+      return res;
+    }
   }
 
   await throwIfResNotOk(res);
@@ -105,10 +117,14 @@ export const getQueryFn: <T>(options: {
 
     if (res.status === 401) {
       if (token) {
-        // Stale/invalid token — clear it so we stop sending it
-        clearStaleToken();
-        window.location.href = '/login';
-        return null;
+        // Only treat as JWT expiry if the server didn't mark it as an external
+        // provider credential error (those are re-mapped to 400 on the server).
+        const body = await res.clone().json().catch(() => ({}));
+        if (body?.code !== 'INVALID_PROVIDER_CREDENTIALS') {
+          clearStaleToken();
+          window.location.href = '/login';
+          return null;
+        }
       }
       if (unauthorizedBehavior === "returnNull") {
         return null;
