@@ -18,9 +18,9 @@ function isExpired(entry: CacheEntry): boolean {
 }
 
 function prune(): void {
-  for (const [key, entry] of cache) {
+  cache.forEach((entry, key) => {
     if (isExpired(entry)) cache.delete(key);
-  }
+  });
 }
 
 export function getCachedPricing(filter: string): any[] | null {
