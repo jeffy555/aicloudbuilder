@@ -46,11 +46,13 @@ const RefactorValidator = forwardRef<RefactorValidatorRef, RefactorValidatorProp
   const queryClient = useQueryClient();
   const [refactorResult, setRefactorResult] = useState<RefactorResult | null>(null);
   const [appliedFixes, setAppliedFixes] = useState<Array<{ fix: string; timestamp: Date }>>([]);
+  const [fixesByPass, setFixesByPass] = useState<Array<{ pass: number; fixes: string[] }>>([]);
   const [fixSummary, setFixSummary] = useState<{
     fixed: number;
     failed: number;
     skipped: number;
     total: number;
+    passes: number;
     details: Array<{ fix: string; status: 'fixed' | 'failed' | 'skipped'; timestamp: Date }>;
   } | null>(null);
 
@@ -99,7 +101,7 @@ const RefactorValidator = forwardRef<RefactorValidatorRef, RefactorValidatorProp
       );
       
       const fixResponse = await Promise.race([fixPromise, timeoutPromise]) as Response;
-      const fixResult = await fixResponse.json() as { success: boolean; fixedIssues: number; message: string; fixes: string[] };
+      const fixResult = await fixResponse.json() as { success: boolean; fixedIssues: number; passes: number; message: string; fixes: string[]; fixesByPass: Array<{ pass: number; fixes: string[] }> };
       
       // Re-validate after fixing to get updated status
       const revalidatePromise = apiRequest('POST', `/api/sessions/${sessionId}/refactor`);
@@ -120,19 +122,23 @@ const RefactorValidator = forwardRef<RefactorValidatorRef, RefactorValidatorProp
       const remainingIssues = data.validationResult.summary.totalIssues || 0;
       const fixesList = data.fixResult.fixes || [];
       const totalAttempted = fixedCount + remainingIssues;
-      
+      const passesRun = data.fixResult.passes || 1;
+      const passBuckets = data.fixResult.fixesByPass || [];
+
       // Store applied fixes for display - always update to show fixes
       setAppliedFixes(fixesList.map(fix => ({
         fix,
         timestamp: new Date()
       })));
-      
+      setFixesByPass(passBuckets);
+
       // Store fix summary for display (like Checkov scan result)
       setFixSummary({
         fixed: fixedCount,
         failed: remainingIssues,
         skipped: 0,
         total: totalAttempted,
+        passes: passesRun,
         details: fixesList.map((fix, idx) => ({
           fix: fix,
           status: idx < fixedCount ? 'fixed' : 'failed',
@@ -199,6 +205,7 @@ const RefactorValidator = forwardRef<RefactorValidatorRef, RefactorValidatorProp
     setRefactorResult(null);
     setFixSummary(null);
     setAppliedFixes([]);
+    setFixesByPass([]);
     fixMutation.mutate();
   };
 
@@ -231,7 +238,7 @@ const RefactorValidator = forwardRef<RefactorValidatorRef, RefactorValidatorProp
                 Fix Summary
               </h4>
             </div>
-            <div className="grid grid-cols-4 gap-4 mb-4">
+            <div className="grid grid-cols-5 gap-4 mb-4">
               <div className="text-center">
                 <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{fixSummary.total}</div>
                 <div className="text-xs text-gray-600 dark:text-gray-400">Total</div>
@@ -242,13 +249,37 @@ const RefactorValidator = forwardRef<RefactorValidatorRef, RefactorValidatorProp
               </div>
               <div className="text-center">
                 <div className="text-2xl font-bold text-red-600 dark:text-red-400">{fixSummary.failed}</div>
-                <div className="text-xs text-gray-600 dark:text-gray-400">Failed</div>
+                <div className="text-xs text-gray-600 dark:text-gray-400">Remaining</div>
               </div>
               <div className="text-center">
                 <div className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{fixSummary.skipped}</div>
                 <div className="text-xs text-gray-600 dark:text-gray-400">Skipped</div>
               </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-blue-600 dark:text-blue-400">{fixSummary.passes}</div>
+                <div className="text-xs text-gray-600 dark:text-gray-400">Passes</div>
+              </div>
             </div>
+
+            {/* Per-pass breakdown */}
+            {fixesByPass.length > 0 && (
+              <div className="space-y-2 mt-2">
+                <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Pass Breakdown</p>
+                {fixesByPass.map(({ pass, fixes }) => (
+                  <div key={pass} className="rounded bg-white dark:bg-gray-900 border border-blue-200 dark:border-blue-800 p-2">
+                    <p className="text-xs font-bold text-blue-700 dark:text-blue-300 mb-1">Pass {pass} — {fixes.length} fix{fixes.length !== 1 ? 'es' : ''}</p>
+                    <ul className="space-y-0.5">
+                      {fixes.map((fix, i) => (
+                        <li key={i} className="text-xs text-gray-700 dark:text-gray-300 flex items-start gap-1">
+                          <CheckCircle2 className="w-3 h-3 text-green-500 mt-0.5 flex-shrink-0" />
+                          {fix}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Applied Fixes Details */}

@@ -399,39 +399,35 @@ export default function TerraformWorkflow() {
     onSuccess: async (data) => {
       console.log('✅ Generation successful, response:', data);
       
-      // CRITICAL: Refetch session to get updated currentStep from backend
+      // Refetch session to get updated currentStep from backend
       console.log('🔄 Refreshing session to sync step...');
       await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId] });
-      
-      // CRITICAL: Aggressively invalidate and refetch files to ensure UI shows updated content
-      console.log('🔄 Refreshing files in UI...');
+
+      // Poll until main.tf is present and non-empty — avoids fixed time delays
+      console.log('🔄 Polling for generated files...');
       await queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      // Longer delay to ensure backend has finished updating files
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Increased delay
-      // Refetch files multiple times to ensure we get the latest
-      await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const result = await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      console.log('🔄 Refetched files:', result);
-      
-      // Force UI to update by checking file content
-      const filesAfterRefresh = await queryClient.fetchQuery<GeneratedFile[]>({
-        queryKey: ['/api/sessions', sessionId, 'files'],
-      });
-      const mainTfAfter = filesAfterRefresh.find(f => f.fileName === 'main.tf');
-      if (mainTfAfter) {
-        const hasContainerEnv = mainTfAfter.content.includes('azurerm_container_app_environment');
-        const hasContainerRegistry = mainTfAfter.content.includes('azurerm_container_registry');
-        console.log('🔍 [UI] Final main.tf check after refresh:');
-        console.log(`   - Container App Environment: ${hasContainerEnv ? '✅ FOUND' : '❌ NOT FOUND'}`);
-        console.log(`   - Container Registry: ${hasContainerRegistry ? '✅ FOUND' : '❌ NOT FOUND'}`);
-        console.log(`   - File size: ${mainTfAfter.content.length} chars`);
+      const POLL_INTERVAL_MS = 400;
+      const POLL_TIMEOUT_MS = 15_000;
+      const pollStart = Date.now();
+      let filesAfterRefresh: GeneratedFile[] = [];
+      while (Date.now() - pollStart < POLL_TIMEOUT_MS) {
+        await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+        filesAfterRefresh = await queryClient.fetchQuery<GeneratedFile[]>({
+          queryKey: ['/api/sessions', sessionId, 'files'],
+        });
+        const mainTf = filesAfterRefresh.find(f => f.fileName === 'main.tf');
+        if (mainTf && mainTf.content.trim().length > 0) {
+          console.log(`✅ main.tf ready after ${Date.now() - pollStart}ms (${mainTf.content.length} chars)`);
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
       }
-      
+      if (!filesAfterRefresh.find(f => f.fileName === 'main.tf' && f.content.trim().length > 0)) {
+        console.warn('⚠️ Poll timeout: main.tf not ready after 15s — proceeding anyway');
+      }
+
       // Compare files before and after
-      const filesAfter = await queryClient.fetchQuery<GeneratedFile[]>({
-        queryKey: ['/api/sessions', sessionId, 'files'],
-      });
+      const filesAfter = filesAfterRefresh;
       
       console.log('🔍 COMPARING FILES (BEFORE vs AFTER):');
       let updatedCount = 0;

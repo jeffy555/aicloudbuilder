@@ -2568,28 +2568,65 @@ The Service Principal needs the following roles assigned at the subscription lev
         }
       }
       
-      // Fallback: Use GitHub Releases API (this is fine - version fetching is separate from code generation)
-      const response = await fetch('https://api.github.com/repos/hashicorp/terraform/releases/latest', {
+      // Fallback 1: HashiCorp Checkpoint API — the official version-check endpoint
+      // used by Terraform itself (no auth, no rate limits beyond GitHub)
+      try {
+        const checkpointRes = await fetch('https://checkpoint-api.hashicorp.com/v1/check/terraform', {
+          headers: { 'User-Agent': 'AICloudBuilder' }
+        });
+        if (checkpointRes.ok) {
+          const data = await checkpointRes.json();
+          const version = data.current_version as string | undefined;
+          if (version && /^\d+\.\d+\.\d+/.test(version)) {
+            console.log(`   ✅ Got version from HashiCorp Checkpoint API: ${version}`);
+            return version;
+          }
+        }
+      } catch (checkpointErr: any) {
+        console.warn(`   ⚠️  HashiCorp Checkpoint API failed: ${checkpointErr.message}`);
+      }
+
+      // Fallback 2: HashiCorp Releases API
+      try {
+        const releasesRes = await fetch('https://api.releases.hashicorp.com/v1/releases/terraform/latest', {
+          headers: { 'User-Agent': 'AICloudBuilder' }
+        });
+        if (releasesRes.ok) {
+          const data = await releasesRes.json();
+          const version = (data.version as string | undefined)?.replace(/^v/, '');
+          if (version && /^\d+\.\d+\.\d+/.test(version)) {
+            console.log(`   ✅ Got version from HashiCorp Releases API: ${version}`);
+            return version;
+          }
+        }
+      } catch (releasesErr: any) {
+        console.warn(`   ⚠️  HashiCorp Releases API failed: ${releasesErr.message}`);
+      }
+
+      // Fallback 3: GitHub Releases API
+      const ghResponse = await fetch('https://api.github.com/repos/hashicorp/terraform/releases/latest', {
         headers: {
           'Accept': 'application/vnd.github.v3+json',
           'User-Agent': 'AICloudBuilder'
         }
       });
-      
-      if (response.ok) {
-        const data = await response.json();
-        // Extract version from tag (e.g., "v1.9.0" -> "1.9.0")
-        const version = data.tag_name?.replace(/^v/, '') || '1.9.0';
-        console.log(`   ✅ Got version from GitHub API: ${version}`);
-        return version;
+      if (ghResponse.ok) {
+        const data = await ghResponse.json();
+        const version = (data.tag_name as string | undefined)?.replace(/^v/, '');
+        if (version && /^\d+\.\d+\.\d+/.test(version)) {
+          console.log(`   ✅ Got version from GitHub API: ${version}`);
+          return version;
+        }
       }
     } catch (error) {
       console.error('❌ Error fetching Terraform version:', error);
     }
-    
-    // Final fallback: return a reasonable default
-    console.log(`   ⚠️  Using default Terraform version: 1.9.0`);
-    return '1.9.0';
+
+    throw new Error(
+      'Unable to determine the latest Terraform version. ' +
+      'HashiCorp Checkpoint API, HashiCorp Releases API, and GitHub Releases API all failed. ' +
+      'Check network connectivity or supply the version manually.'
+    );
   }
 
   async cleanup() {

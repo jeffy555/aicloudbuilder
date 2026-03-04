@@ -123,18 +123,16 @@ export async function generateArchitectureDiagram(
   
   console.log(`   ✅ Generated ${diagramType} diagram (${mermaidSyntax.split('\n').length} lines)`);
 
-  // Step 3: Enhance with AI if enabled (only for flowcharts)
-  if (useAI && diagramType === 'flowchart') {
-    console.log('\n🤖 Step 3: Enhancing diagram with AI...');
+  // Step 3: Enhance with AI if enabled (all diagram types)
+  if (useAI) {
+    console.log(`\n🤖 Step 3: Enhancing ${diagramType} diagram with AI...`);
     try {
-      mermaidSyntax = await enhanceWithAI(graph, mermaidSyntax, cloudProvider);
+      mermaidSyntax = await enhanceWithAI(graph, mermaidSyntax, cloudProvider, diagramType);
       console.log('   ✅ AI enhancement complete');
     } catch (error: any) {
       console.warn(`   ⚠️  AI enhancement failed: ${error.message}`);
       console.warn('   📝 Using base diagram without AI enhancement');
     }
-  } else if (useAI && diagramType !== 'flowchart') {
-    console.log(`\n⏭️  Skipping AI enhancement for ${diagramType} diagram type`);
   }
 
   // Step 4: Extract categories
@@ -174,23 +172,74 @@ export async function generateArchitectureDiagram(
   return result;
 }
 
+// Per-type enhancement instructions and validation patterns
+const DIAGRAM_TYPE_GUIDANCE: Record<string, { instructions: string; validTokens: string[] }> = {
+  flowchart: {
+    instructions: `1. Review the current Mermaid syntax
+2. Improve the layout and organization
+3. Ensure all resources and relationships are correctly represented
+4. Add better labels and descriptions where helpful
+5. Optimize the visual hierarchy (Resource Groups at top, dependencies flow downward)
+6. Group related resources logically using subgraph blocks
+7. Use clear, descriptive node labels`,
+    validTokens: ['graph', 'flowchart'],
+  },
+  sequence: {
+    instructions: `1. Model deployment order and runtime interactions between resources
+2. Show initialization sequence (RG → Storage → App Service → etc.)
+3. Represent key runtime flows (e.g., App → Key Vault secret fetch, App → DB connection)
+4. Use clear participant labels (use friendly names, not resource IDs)
+5. Add activation bars where appropriate
+6. Keep interactions realistic for the infrastructure type`,
+    validTokens: ['sequenceDiagram'],
+  },
+  classDiagram: {
+    instructions: `1. Represent each resource as a class with its key Terraform attributes
+2. Show inheritance / composition relationships between dependent resources
+3. Add cardinality labels (1..* for resource groups containing multiple resources)
+4. Use meaningful attribute names (location, sku, tier, etc.)
+5. Group by category using namespace blocks where helpful`,
+    validTokens: ['classDiagram'],
+  },
+  stateDiagram: {
+    instructions: `1. Model the provisioning lifecycle of the main resource(s)
+2. States: Planned → Creating → Running → Updating → Destroying
+3. Show transitions triggered by terraform apply / destroy / import
+4. Include error/failed states with recovery paths
+5. Use stateDiagram-v2 syntax`,
+    validTokens: ['stateDiagram'],
+  },
+  erDiagram: {
+    instructions: `1. Treat each Terraform resource as an entity with its key attributes
+2. Define relationships using Terraform dependency direction
+3. Use correct cardinality (one resource group to many resources, etc.)
+4. Show foreign-key-like linkages (resource_group_name, subnet_id, etc.)
+5. Use standard ERD notation`,
+    validTokens: ['erDiagram'],
+  },
+};
+
 /**
- * Enhance Mermaid syntax using OpenAI
+ * Enhance Mermaid syntax using OpenAI — works for all diagram types
  */
 async function enhanceWithAI(
   graph: ResourceGraph,
   baseSyntax: string,
-  cloudProvider: string
+  cloudProvider: string,
+  diagramType: string = 'flowchart'
 ): Promise<string> {
-  const resourcesText = graph.resources.map(r => 
+  const resourcesText = graph.resources.map(r =>
     `- ${r.type} "${r.name}" (${r.file})`
   ).join('\n');
 
-  const relationshipsText = graph.relationships.map(r => 
+  const relationshipsText = graph.relationships.map(r =>
     `- ${r.from} → ${r.to} (${r.type}: ${r.description || 'N/A'})`
   ).join('\n');
 
-  const prompt = `You are an expert in cloud architecture diagrams. Analyze this Terraform infrastructure and improve the Mermaid diagram syntax.
+  const guidance = DIAGRAM_TYPE_GUIDANCE[diagramType] ?? DIAGRAM_TYPE_GUIDANCE['flowchart'];
+
+  const prompt = `You are an expert in cloud architecture diagrams and Mermaid syntax.
+Analyze this ${cloudProvider} Terraform infrastructure and improve the provided ${diagramType} Mermaid diagram.
 
 CLOUD PROVIDER: ${cloudProvider}
 
@@ -206,20 +255,14 @@ ${baseSyntax}
 \`\`\`
 
 Your task:
-1. Review the current Mermaid syntax
-2. Improve the layout and organization
-3. Ensure all resources and relationships are correctly represented
-4. Add better labels and descriptions where helpful
-5. Optimize the visual hierarchy (Resource Groups at top, dependencies flow downward)
-6. Group related resources logically
-7. Use clear, descriptive node labels
+${guidance.instructions}
 
-IMPORTANT:
-- Return ONLY the improved Mermaid syntax
-- Do not include markdown code blocks
-- Keep the syntax valid and functional
-- Maintain all existing relationships
-- Use Azure color scheme if cloud provider is Azure
+STRICT RULES:
+- Return ONLY the improved Mermaid syntax — no explanations, no markdown fences
+- The output MUST start with the correct Mermaid diagram declaration (e.g., "${guidance.validTokens[0]}")
+- Keep the syntax valid and parseable by Mermaid
+- Maintain all existing resources and relationships
+- Do not invent resources that are not in the list above
 
 Return the improved Mermaid syntax:`;
 
@@ -227,7 +270,7 @@ Return the improved Mermaid syntax:`;
     const response = await openaiService.chat([
       {
         role: 'system',
-        content: 'You are an expert in cloud architecture diagrams and Mermaid syntax. Generate clean, professional architecture diagrams from Terraform code.'
+        content: `You are an expert in cloud architecture diagrams and Mermaid syntax. You produce clean, professional ${diagramType} diagrams for ${cloudProvider} infrastructure.`
       },
       {
         role: 'user',
@@ -235,21 +278,23 @@ Return the improved Mermaid syntax:`;
       }
     ]);
 
-    // Clean up response (remove markdown code blocks if present)
+    // Strip markdown code fences if the model wrapped the output
     let enhancedSyntax = response.trim();
     if (enhancedSyntax.startsWith('```mermaid')) {
       enhancedSyntax = enhancedSyntax.replace(/^```mermaid\s*\n/, '').replace(/\n```\s*$/, '');
     } else if (enhancedSyntax.startsWith('```')) {
       enhancedSyntax = enhancedSyntax.replace(/^```\s*\n/, '').replace(/\n```\s*$/, '');
     }
+    enhancedSyntax = enhancedSyntax.trim();
 
-    // Validate that it's still valid Mermaid syntax
-    if (enhancedSyntax.includes('graph') || enhancedSyntax.includes('flowchart')) {
-      return enhancedSyntax;
-    } else {
-      console.warn('⚠️  AI returned invalid syntax, using base syntax');
+    // Validate the output starts with the expected token for this diagram type
+    const isValid = guidance.validTokens.some(token => enhancedSyntax.startsWith(token));
+    if (!isValid) {
+      console.warn(`⚠️  AI returned syntax that doesn't start with expected token for ${diagramType}, using base syntax`);
       return baseSyntax;
     }
+
+    return enhancedSyntax;
   } catch (error: any) {
     console.error('❌ AI enhancement error:', error.message);
     throw error;

@@ -25,6 +25,7 @@ import { runCheckovKubernetes } from "./kubernetes/checkov-validator";
 import { analyzeKubernetesBestPractices } from "./kubernetes/best-practices-analyzer";
 import { validateKubernetesYAML } from "./kubernetes/kubeval-validator";
 import type { DiagramType } from "./diagram/diagram-type-generator";
+import { getCachedPricing, setCachedPricing } from "./utils/pricing-cache";
 import {
   HOURS_PER_MONTH,
   resolveAzureLocation,
@@ -1394,15 +1395,9 @@ Keep responses brief and automation-focused.`;
 
             const providerTfContent = openaiService.generateProviderTf('aws');
 
-            // Fetch latest Terraform version from MCP server or API
-            let latestVersion = '1.9.0'; // Default fallback
-            try {
-              latestVersion = await mcpClient.getLatestTerraformVersion();
-              console.log(`Using Terraform version: ${latestVersion}`);
-            } catch (versionError) {
-              console.error('Error fetching Terraform version, using default:', versionError);
-              // Continue with default version
-            }
+            // Fetch latest Terraform version (tries MCP → Checkpoint API → Releases API → GitHub)
+            const latestVersion = await mcpClient.getLatestTerraformVersion();
+            console.log(`Using Terraform version: ${latestVersion}`);
             
             // Generate terraform.tf with specific version (exact version, not >=)
             const terraformTfContent = `terraform {
@@ -9534,33 +9529,47 @@ Remember: Return ONLY the JSON object, no other text.`;
 
             console.log(`      🔍 Filter: ${filter}`);
 
-            const apiUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(filter)}&$top=50`;
-            const apiResponse = await fetch(apiUrl);
-            if (!apiResponse.ok) {
-              throw new Error(`Azure Pricing API returned ${apiResponse.status}: ${apiResponse.statusText}`);
+            // Check cache first — avoids re-hitting the Azure Pricing API for the same
+            // filter within the 1-hour TTL (eliminates N sequential calls per /analyze-cost)
+            let items: any[] = getCachedPricing(filter) ?? [];
+            if (items.length > 0) {
+              console.log(`      ✅ Cache hit — ${items.length} pricing item(s) (no API call)`);
+            } else {
+              const apiUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(filter)}&$top=50`;
+              const apiResponse = await fetch(apiUrl);
+              if (!apiResponse.ok) {
+                throw new Error(`Azure Pricing API returned ${apiResponse.status}: ${apiResponse.statusText}`);
+              }
+              const pricingData = await apiResponse.json();
+              items = pricingData?.Items || [];
+              console.log(`      📊 Found ${items.length} pricing item(s)`);
+              setCachedPricing(filter, items);
             }
-
-            const pricingData = await apiResponse.json();
-            let items: any[] = pricingData?.Items || [];
-            console.log(`      📊 Found ${items.length} pricing item(s)`);
 
             // If no results, try a broader fallback filter (serviceName + region only)
             if (items.length === 0 && pricingConfig) {
               console.log(`      🔄 Trying broader filter...`);
               matchType = 'config_broad';
               const broadFilter = `serviceName eq '${pricingConfig.serviceName}' and armRegionName eq '${azureLocation}' and priceType eq 'Consumption'`;
-              const broadUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(broadFilter)}&$top=50`;
-              try {
-                const broadResponse = await fetch(broadUrl);
-                if (broadResponse.ok) {
-                  const broadData = await broadResponse.json();
-                  items = broadData?.Items || [];
-                  if (items.length > 0) {
-                    console.log(`      ✅ Found ${items.length} item(s) with broader filter`);
+              const cachedBroad = getCachedPricing(broadFilter);
+              if (cachedBroad && cachedBroad.length > 0) {
+                items = cachedBroad;
+                console.log(`      ✅ Cache hit (broad) — ${items.length} item(s)`);
+              } else {
+                try {
+                  const broadUrl = `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(broadFilter)}&$top=50`;
+                  const broadResponse = await fetch(broadUrl);
+                  if (broadResponse.ok) {
+                    const broadData = await broadResponse.json();
+                    items = broadData?.Items || [];
+                    if (items.length > 0) {
+                      console.log(`      ✅ Found ${items.length} item(s) with broader filter`);
+                      setCachedPricing(broadFilter, items);
+                    }
                   }
+                } catch (broadErr: any) {
+                  console.warn(`      ⚠️  Broader query failed: ${broadErr.message}`);
                 }
-              } catch (broadErr: any) {
-                console.warn(`      ⚠️  Broader query failed: ${broadErr.message}`);
               }
             }
 

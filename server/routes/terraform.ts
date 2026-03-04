@@ -186,15 +186,9 @@ export function registerTerraformRoutes(app: Express) {
 
             const providerTfContent = openaiService.generateProviderTf('aws');
 
-            // Fetch latest Terraform version from MCP server or API
-            let latestVersion = '1.9.0'; // Default fallback
-            try {
-              latestVersion = await mcpClient.getLatestTerraformVersion();
-              console.log(`Using Terraform version: ${latestVersion}`);
-            } catch (versionError) {
-              console.error('Error fetching Terraform version, using default:', versionError);
-              // Continue with default version
-            }
+            // Fetch latest Terraform version (tries MCP → Checkpoint API → Releases API → GitHub)
+            const latestVersion = await mcpClient.getLatestTerraformVersion();
+            console.log(`Using Terraform version: ${latestVersion}`);
             
             // Generate terraform.tf with specific version (exact version, not >=)
             const terraformTfContent = `terraform {
@@ -921,6 +915,7 @@ export function registerTerraformRoutes(app: Express) {
       
       let totalFixedIssues = 0;
       const allFixes: string[] = [];
+      const fixesByPass: Array<{ pass: number; fixes: string[] }> = [];
       const maxPasses = 5; // Maximum number of fix passes to prevent infinite loops
       let pass = 0;
 
@@ -1351,6 +1346,9 @@ export function registerTerraformRoutes(app: Express) {
 
         totalFixedIssues += fixedIssues;
         allFixes.push(...fixes);
+        if (fixes.length > 0) {
+          fixesByPass.push({ pass, fixes: [...fixes] });
+        }
 
         console.log(`   ✅ Pass ${pass} complete: Fixed ${fixedIssues} issue(s)`);
         if (fixes.length > 0) {
@@ -1397,7 +1395,8 @@ export function registerTerraformRoutes(app: Express) {
         fixedIssues: totalFixedIssues,
         passes: pass,
         message: `Successfully fixed ${totalFixedIssues} issue(s) in ${pass} pass(es)`,
-        fixes: allFixes
+        fixes: allFixes,
+        fixesByPass,
       });
     } catch (error: any) {
       console.error('Error fixing Terraform files:', error);
