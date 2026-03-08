@@ -1497,6 +1497,109 @@ Check if the MCP server package is properly installed.`;
     }
   }
 
+  /**
+   * Scan a repository for application files relevant to Helm chart generation.
+   * Returns up to 15 files: Dockerfile, package.json, requirements.txt, pom.xml, go.mod,
+   * docker-compose.yml, README, etc. — at most 2 directory levels deep.
+   */
+  async scanRepositoryAppFiles(
+    provider: MCPProvider,
+    repoName: string,
+    branch: string = 'main',
+    credentials?: RepositoryCredentials
+  ): Promise<{ path: string; content: string; name: string }[]> {
+    // Files we care about (exact basename match, case-insensitive)
+    const APP_FILENAMES = new Set([
+      'dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
+      'package.json', 'package-lock.json',
+      'requirements.txt', 'pyproject.toml', 'setup.py', 'pipfile',
+      'pom.xml', 'build.gradle', 'build.gradle.kts',
+      'go.mod',
+      'composer.json', 'gemfile',
+      'readme.md', 'readme.txt',
+      '.env.example', 'env.example',
+      'makefile', 'procfile',
+    ]);
+
+    const isAppFile = (filePath: string) => {
+      const depth = filePath.split('/').length;
+      if (depth > 3) return false; // skip deeply nested files
+      const basename = filePath.split('/').pop()?.toLowerCase() || '';
+      if (APP_FILENAMES.has(basename)) return true;
+      // Also catch *.csproj, *.sln
+      if (basename.endsWith('.csproj') || basename.endsWith('.sln')) return true;
+      return false;
+    };
+
+    try {
+      if (provider === 'github') {
+        const octokit = new Octokit({
+          auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
+        });
+        const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+
+        let commitSha = branch;
+        try {
+          const refResult = await this.withRetry(() =>
+            octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` })
+          );
+          commitSha = refResult.data.object.sha;
+        } catch { /* use branch name as-is */ }
+
+        const { data: tree } = await this.withRetry(() =>
+          octokit.rest.git.getTree({ owner, repo, tree_sha: commitSha, recursive: 'true' })
+        );
+
+        const allAppFiles = tree.tree
+          .filter(item => item.type === 'blob' && item.path && isAppFile(item.path));
+
+        // Deduplicate by basename: keep the shallowest copy (root-level preferred over service subdirs)
+        const byBasename = new Map<string, typeof allAppFiles[0]>();
+        for (const item of allAppFiles) {
+          const basename = item.path!.split('/').pop()!.toLowerCase();
+          const existing = byBasename.get(basename);
+          if (!existing || item.path!.split('/').length < existing.path!.split('/').length) {
+            byBasename.set(basename, item);
+          }
+        }
+        const appFiles = Array.from(byBasename.values()).slice(0, 15);
+
+        if (appFiles.length === 0) return []; // empty / new repo
+
+        const results = await Promise.all(
+          appFiles.map(async (file) => {
+            if (!file.path) return null;
+            try {
+              const { data } = await this.withRetry(() =>
+                octokit.rest.repos.getContent({ owner, repo, path: file.path!, ref: branch })
+              );
+              if ('content' in data && data.content) {
+                const content = Buffer.from(data.content, 'base64').toString('utf-8');
+                const name = file.path!.split('/').pop() || file.path!;
+                return { path: file.path!, content: content.substring(0, 8000), name };
+              }
+              return null;
+            } catch { return null; }
+          })
+        );
+        return results.filter((f): f is { path: string; content: string; name: string } => f !== null);
+
+      } else if (provider === 'azure') {
+        // Re-use Azure DevOps scanning but post-filter to app files
+        const allFiles = await this.scanRepositoryFilesViaAzureDevOpsAPI(repoName, branch, credentials);
+        return allFiles
+          .filter(f => isAppFile(f.path))
+          .slice(0, 15)
+          .map(f => ({ ...f, name: f.path.split('/').pop() || f.path }));
+      }
+      return [];
+    } catch (error: any) {
+      if (error.status === 409 || error.message?.includes('empty')) return [];
+      console.error(`Error scanning app files for ${repoName}:`, error.message);
+      return [];
+    }
+  }
+
   private parseGitHubRepoName(repoName: string, credentials?: RepositoryCredentials): { owner: string; repo: string } {
     let owner = credentials?.github?.owner || process.env.GITHUB_OWNER || '';
     let repo = repoName;

@@ -15,7 +15,12 @@
       "Bash(powershell.exe -Command \"\\(Get-Item ''D:\\\\AICloudBuilder\\\\TECHNICAL_DOCUMENTATION.md''\\).Length / 1KB\")",
       "Bash(powershell.exe -Command \"Get-Item ''D:\\\\AICloudBuilder\\\\AICloudBuilder_Technical_Documentation.docx'' | Select-Object Name, Length, LastWriteTime\")",
       "Bash(powershell.exe -Command \"Get-Item ''D:\\\\AICloudBuilder\\\\AICloudBuilder_Technical_Documentation.docx'' | Format-List Name, Length, LastWriteTime\")",
-      "Bash(powershell.exe -Command \"& ''C:\\\\Users\\\\JEFFY\\\\AppData\\\\Local\\\\Pandoc\\\\pandoc.exe'' ''D:\\\\AICloudBuilder\\\\TECHNICAL_DOCUMENTATION_ENHANCED.md'' -o ''D:\\\\AICloudBuilder\\\\AICloudBuilder_Technical_Documentation.docx'' --toc --toc-depth=3 -s --syntax-highlighting=tango 2>&1; Write-Host ''Exit:'' $LASTEXITCODE\")"
+      "Bash(powershell.exe -Command \"& ''C:\\\\Users\\\\JEFFY\\\\AppData\\\\Local\\\\Pandoc\\\\pandoc.exe'' ''D:\\\\AICloudBuilder\\\\TECHNICAL_DOCUMENTATION_ENHANCED.md'' -o ''D:\\\\AICloudBuilder\\\\AICloudBuilder_Technical_Documentation.docx'' --toc --toc-depth=3 -s --syntax-highlighting=tango 2>&1; Write-Host ''Exit:'' $LASTEXITCODE\")",
+      "Bash(git add server/routes/terraform.ts server/mcp-client.ts)",
+      "Bash(not configured\" in the container because it only checked process.env and not:*)",
+      "Bash(wc -l /d/AICloudBuilder/test/terraform/**/*.test.ts)",
+      "Bash(grep \"it\\(\" /d/AICloudBuilder/test/terraform/unit/*.test.ts /d/AICloudBuilder/test/terraform/integration/*.test.ts)",
+      "Bash(grep -v \"^//\")"
     ]
   },
   "model": "claude-opus-4.6"

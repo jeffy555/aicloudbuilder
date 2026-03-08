@@ -1,9 +1,24 @@
 /**
  * Resource Relationship Parser
- * 
+ *
  * Parses Terraform files to extract resources and their relationships.
  * Detects dependencies like resource_group_name, app_service_plan_id, etc.
  */
+
+import { buildVariableMap } from '../terraform-variable-resolver';
+import {
+  AZURE_CORE_TYPES,
+  MODULE_KEYWORD_RESOURCE_MAP,
+  RELATIONSHIP_PATTERNS,
+} from '../config/azure-catalog.js';
+import {
+  TERRAFORM_FILE_EXTENSIONS,
+  LOCAL_MODULE_PATH,
+  AZURE_RESOURCE_TYPE_PATTERN,
+  DIRECT_RESOURCE_REF_PATTERN,
+  REGISTRY_MODULE_PATTERN,
+} from '../config/terraform-patterns.js';
+import { lookupRegistryModule } from './registry-module-catalog.js';
 
 export interface TerraformResource {
   type: string;           // e.g., "azurerm_resource_group"
@@ -25,6 +40,7 @@ export interface ResourceGraph {
   resources: TerraformResource[];
   relationships: ResourceRelationship[];
   resourceGroups: string[]; // List of resource group names
+  warnings: string[];       // Non-fatal issues (e.g., circular dependencies)
 }
 
 /**
@@ -36,7 +52,7 @@ export function parseResources(
   const resources: TerraformResource[] = [];
 
   for (const file of files) {
-    if (!file.fileName.endsWith('.tf')) continue;
+    if (!file.fileName.endsWith(TERRAFORM_FILE_EXTENSIONS.HCL)) continue;
 
     const content = file.content;
     const lines = content.split('\n');
@@ -140,34 +156,12 @@ export function parseResources(
         // Extract source to infer resource type
         const sourceMatch = moduleBody.match(/source\s*=\s*["']([^"']+)["']/);
         const source = sourceMatch ? sourceMatch[1] : '';
-        
-        // Try to infer resource type from module name or source
-        // Common patterns: storage_account -> azurerm_storage_account, etc.
-        let inferredType = 'module';
-        if (moduleName.includes('storage') || source.includes('storage')) {
-          inferredType = 'azurerm_storage_account';
-        } else if (moduleName.includes('app_service') || source.includes('app-service')) {
-          inferredType = 'azurerm_app_service';
-        } else if (moduleName.includes('container') || source.includes('container')) {
-          inferredType = 'azurerm_container_group';
-        } else if (moduleName.includes('function') || source.includes('function')) {
-          inferredType = 'azurerm_function_app';
-        } else if (moduleName.includes('key_vault') || source.includes('key-vault')) {
-          inferredType = 'azurerm_key_vault';
-        } else if (moduleName.includes('sql') || source.includes('sql')) {
-          inferredType = 'azurerm_sql_server';
-        } else if (moduleName.includes('cosmos') || source.includes('cosmos')) {
-          inferredType = 'azurerm_cosmosdb_account';
-        } else if (moduleName.includes('redis') || source.includes('redis')) {
-          inferredType = 'azurerm_redis_cache';
-        } else if (moduleName.includes('eventhub') || source.includes('eventhub')) {
-          inferredType = 'azurerm_eventhub_namespace';
-        } else if (moduleName.includes('servicebus') || source.includes('servicebus')) {
-          inferredType = 'azurerm_servicebus_namespace';
-        } else {
-          // Use module name as type prefix
-          inferredType = `module.${moduleName}`;
-        }
+
+        // Fix #2: Try to infer type by inspecting the actual source module files first,
+        // then fall back to keyword-guessing from the call-site module name/source path.
+        const inferredType =
+          inferTypeFromSourceFiles(source, files) ||
+          inferTypeFromKeywords(moduleName, source);
 
         resources.push({
           type: inferredType,
@@ -221,68 +215,16 @@ export function detectRelationships(
 ): ResourceRelationship[] {
   const relationships: ResourceRelationship[] = [];
 
-  // Create a map of resource references for quick lookup
+  // Build O(1) lookup maps — eliminates the O(n) linear scan inside findReferencedResource
   const resourceMap = new Map<string, TerraformResource>();
+  const nameIndex = new Map<string, TerraformResource>();
   resources.forEach(r => {
-    const key = `${r.type}.${r.name}`;
-    resourceMap.set(key, r);
+    resourceMap.set(`${r.type}.${r.name}`, r);
+    nameIndex.set(r.name, r);
   });
 
-  // Common relationship patterns
-  const relationshipPatterns = [
-    // Azure Resource Group relationships
-    {
-      attribute: 'resource_group_name',
-      type: 'contains' as const,
-      description: 'Resource is contained in Resource Group'
-    },
-    // App Service relationships
-    {
-      attribute: 'app_service_plan_id',
-      type: 'depends_on' as const,
-      description: 'App Service depends on App Service Plan'
-    },
-    // Storage relationships
-    {
-      attribute: 'storage_account_name',
-      type: 'uses' as const,
-      description: 'Resource uses Storage Account'
-    },
-    // Network relationships
-    {
-      attribute: 'subnet_id',
-      type: 'uses' as const,
-      description: 'Resource uses Subnet'
-    },
-    {
-      attribute: 'virtual_network_id',
-      type: 'uses' as const,
-      description: 'Resource uses Virtual Network'
-    },
-    {
-      attribute: 'network_security_group_id',
-      type: 'uses' as const,
-      description: 'Resource uses Network Security Group'
-    },
-    // Database relationships
-    {
-      attribute: 'server_name',
-      type: 'depends_on' as const,
-      description: 'Resource depends on Database Server'
-    },
-    // Container relationships
-    {
-      attribute: 'container_registry_name',
-      type: 'uses' as const,
-      description: 'Resource uses Container Registry'
-    },
-    // Key Vault relationships
-    {
-      attribute: 'key_vault_id',
-      type: 'uses' as const,
-      description: 'Resource uses Key Vault'
-    }
-  ];
+  // Relationship patterns loaded from central catalog (azure-catalog.ts)
+  const relationshipPatterns = RELATIONSHIP_PATTERNS;
 
   // Track relationships to avoid duplicates
   const relationshipSet = new Set<string>();
@@ -290,14 +232,19 @@ export function detectRelationships(
   // Detect relationships based on attributes
   for (const resource of resources) {
     // Skip Resource Group for now - handle it separately
-    if (resource.type === 'azurerm_resource_group') continue;
+    if (resource.type === AZURE_CORE_TYPES.RESOURCE_GROUP) continue;
 
     for (const pattern of relationshipPatterns) {
+      // resource_group_name containment is handled by the special RG loop below.
+      // Processing it here too would create reversed (SA→RG) edges that conflict
+      // with the correct (RG→SA) direction, producing false circular dependency warnings.
+      if (pattern.attribute === 'resource_group_name') continue;
+
       const attributeValue = resource.attributes[pattern.attribute];
       
       if (attributeValue) {
-        // Check if it's a reference to another resource
-        const referencedResource = findReferencedResource(attributeValue, resourceMap, resources);
+        // Check if it's a reference to another resource (O(1) via pre-built indices)
+        const referencedResource = findReferencedResource(attributeValue, resourceMap, nameIndex);
         
         if (referencedResource) {
           // Create relationship key to avoid duplicates
@@ -318,29 +265,32 @@ export function detectRelationships(
     }
   }
 
-  // Special case: Resource Group contains all other resources (only one direction)
+  // Special case: Resource Group contains all other resources.
+  // Build an inverted index: rg name → resources that reference it (O(n) total instead of O(rg×n))
+  const rgMembership = new Map<string, TerraformResource[]>();
   for (const resource of resources) {
-    if (resource.type === 'azurerm_resource_group') {
-      // Find all resources that reference this resource group
-      for (const otherResource of resources) {
-        if (otherResource.type !== 'azurerm_resource_group' && 
-            otherResource.attributes.resource_group_name) {
-          const rgName = extractResourceName(otherResource.attributes.resource_group_name);
-          if (rgName === resource.name || otherResource.attributes.resource_group_name.includes(resource.name)) {
-            // Only add if not already added (avoid duplicates)
-            const relKey = `${resource.type}.${resource.name}->${otherResource.type}.${otherResource.name}`;
-            if (!relationshipSet.has(relKey)) {
-              relationshipSet.add(relKey);
-              relationships.push({
-                from: `${resource.type}.${resource.name}`,
-                to: `${otherResource.type}.${otherResource.name}`,
-                type: 'contains',
-                attribute: 'resource_group_name',
-                description: undefined // No label for containment - it's implied by hierarchy
-              });
-            }
-          }
-        }
+    if (resource.type === AZURE_CORE_TYPES.RESOURCE_GROUP) continue;
+    const rawRgRef = resource.attributes.resource_group_name;
+    if (!rawRgRef) continue;
+    const rgName = extractResourceName(rawRgRef);
+    if (!rgMembership.has(rgName)) rgMembership.set(rgName, []);
+    rgMembership.get(rgName)!.push(resource);
+  }
+
+  for (const resource of resources) {
+    if (resource.type !== AZURE_CORE_TYPES.RESOURCE_GROUP) continue;
+    const members = rgMembership.get(resource.name) ?? [];
+    for (const otherResource of members) {
+      const relKey = `${resource.type}.${resource.name}->${otherResource.type}.${otherResource.name}`;
+      if (!relationshipSet.has(relKey)) {
+        relationshipSet.add(relKey);
+        relationships.push({
+          from: `${resource.type}.${resource.name}`,
+          to: `${otherResource.type}.${otherResource.name}`,
+          type: 'contains',
+          attribute: 'resource_group_name',
+          description: undefined
+        });
       }
     }
   }
@@ -349,44 +299,32 @@ export function detectRelationships(
 }
 
 /**
- * Find referenced resource from attribute value
+ * Find referenced resource from attribute value.
+ * Uses pre-built O(1) lookup maps to avoid O(n) linear scans.
  */
 function findReferencedResource(
   attributeValue: string,
   resourceMap: Map<string, TerraformResource>,
-  allResources: TerraformResource[]
+  nameIndex: Map<string, TerraformResource>
 ): TerraformResource | null {
   if (!attributeValue) return null;
 
-  // Handle direct references: azurerm_resource_group.rg.name
-  const directRefMatch = attributeValue.match(/(azurerm_\w+)\.(\w+)/);
+  // Handle direct references: azurerm_resource_group.rg.name → O(1)
+  const directRefMatch = attributeValue.match(DIRECT_RESOURCE_REF_PATTERN);
   if (directRefMatch) {
     const [, resourceType, resourceName] = directRefMatch;
-    const key = `${resourceType}.${resourceName}`;
-    return resourceMap.get(key) || null;
+    return resourceMap.get(`${resourceType}.${resourceName}`) || null;
   }
 
-  // Handle variable references: var.resource_group_name
-  // In this case, we need to check if any resource matches
+  // Handle variable references: var.resource_group_name → O(1) via nameIndex
   if (attributeValue.startsWith('var.')) {
     const varName = attributeValue.replace('var.', '');
-    // Try to find resource by name pattern
-    for (const resource of allResources) {
-      if (resource.name.includes(varName) || varName.includes(resource.name)) {
-        return resource;
-      }
-    }
+    return nameIndex.get(varName) || null;
   }
 
-  // Handle string values that might match resource names
+  // Handle plain string values that match a resource name exactly → O(1)
   const cleanValue = attributeValue.replace(/["']/g, '').trim();
-  for (const resource of allResources) {
-    if (resource.name === cleanValue || cleanValue.includes(resource.name)) {
-      return resource;
-    }
-  }
-
-  return null;
+  return nameIndex.get(cleanValue) || null;
 }
 
 /**
@@ -399,23 +337,158 @@ function extractResourceName(reference: string): string {
 }
 
 /**
+ * Infer module resource type by inspecting the actual source files.
+ * Counts azurerm_* resource blocks across all files that share the module dir name.
+ * Returns the most frequent type, or null if the source isn't a local path or no files match.
+ */
+/**
+ * Inspect the module's source .tf files to infer the dominant resource type.
+ * Returns null when source is not a local relative path or no matching files exist.
+ */
+function inferTypeFromSourceFiles(
+  source: string,
+  files: Array<{ fileName: string; content: string }>
+): string | null {
+  if (!LOCAL_MODULE_PATH.test(source)) return null;
+
+  // Last path segment is the module directory name (e.g. "./modules/network" → "network")
+  const segments = source.replace(/\\/g, '/').split('/').filter(Boolean);
+  const moduleDirName = segments[segments.length - 1];
+  if (!moduleDirName) return null;
+
+  const moduleFiles = files.filter(
+    f => f.fileName.includes(moduleDirName) && f.fileName.endsWith(TERRAFORM_FILE_EXTENSIONS.HCL)
+  );
+  if (moduleFiles.length === 0) return null;
+
+  const typeCounts = new Map<string, number>();
+  for (const file of moduleFiles) {
+    // Reset lastIndex — AZURE_RESOURCE_TYPE_PATTERN is a global-flag regex
+    AZURE_RESOURCE_TYPE_PATTERN.lastIndex = 0;
+    let m;
+    while ((m = AZURE_RESOURCE_TYPE_PATTERN.exec(file.content)) !== null) {
+      typeCounts.set(m[1], (typeCounts.get(m[1]) ?? 0) + 1);
+    }
+  }
+  if (typeCounts.size === 0) return null;
+
+  let dominantType = '';
+  let maxCount = 0;
+  typeCounts.forEach((count, type) => {
+    if (count > maxCount) { maxCount = count; dominantType = type; }
+  });
+  return dominantType || null;
+}
+
+/**
+ * Module type inference for non-local sources.
+ * Lookup order:
+ *   1. Known registry module catalog (instant, no network)
+ *   2. Keyword heuristics from MODULE_KEYWORD_RESOURCE_MAP
+ *
+ * The registry catalog is checked first so that well-known public modules
+ * (e.g. "Azure/network/azurerm") resolve correctly without keyword guessing.
+ */
+function inferTypeFromKeywords(moduleName: string, source: string): string {
+  // 1. Registry catalog hit — fast, no network required
+  if (source && REGISTRY_MODULE_PATTERN.test(source)) {
+    const catalogHit = lookupRegistryModule(source);
+    if (catalogHit) return catalogHit;
+  }
+
+  // 2. Keyword heuristics
+  const combined = `${moduleName} ${source}`.toLowerCase();
+  for (const [keyword, resourceType] of MODULE_KEYWORD_RESOURCE_MAP) {
+    if (combined.includes(keyword)) return resourceType;
+  }
+  return `module.${moduleName}`;
+}
+
+/**
+ * Detect circular dependencies in the relationship graph using DFS.
+ * Returns an array of human-readable cycle descriptions, e.g. ["A → B → A"].
+ * An empty array means no cycles were found.
+ */
+function detectCircularDependencies(relationships: ResourceRelationship[]): string[] {
+  // Build adjacency list (directed graph)
+  const graph = new Map<string, string[]>();
+  for (const rel of relationships) {
+    if (!graph.has(rel.from)) graph.set(rel.from, []);
+    graph.get(rel.from)!.push(rel.to);
+  }
+
+  const visited  = new Set<string>();
+  const inStack  = new Set<string>();
+  const cycles: string[] = [];
+
+  function dfs(node: string, path: string[]): void {
+    if (inStack.has(node)) {
+      // node appears in the current DFS path — cycle found
+      const cycleStart = path.indexOf(node);
+      const cycle = [...path.slice(cycleStart), node].join(' → ');
+      if (!cycles.includes(cycle)) cycles.push(cycle);
+      return;
+    }
+    if (visited.has(node)) return;
+
+    visited.add(node);
+    inStack.add(node);
+
+    for (const neighbour of graph.get(node) || []) {
+      dfs(neighbour, [...path, node]);
+    }
+
+    inStack.delete(node);
+  }
+
+  for (const node of graph.keys()) {
+    if (!visited.has(node)) dfs(node, []);
+  }
+
+  return cycles;
+}
+
+/**
  * Build complete resource graph
  */
 export function buildResourceGraph(
   files: Array<{ fileName: string; content: string }>
 ): ResourceGraph {
+  // Fix #1: Build variable map first so var.* references in attributes can be resolved
+  // before relationship detection runs. Without this, modular configs that pass
+  // resource_group_name = var.rg_name show zero relationships.
+  const variableMap = buildVariableMap(files);
+
   const resources = parseResources(files);
+
+  // Resolve all var.* attribute values now that we have the variable map
+  for (const resource of resources) {
+    for (const [key, value] of Object.entries(resource.attributes)) {
+      if (typeof value === 'string' && value.startsWith('var.')) {
+        const varName = value.slice(4); // strip "var."
+        if (varName in variableMap) {
+          resource.attributes[key] = variableMap[varName];
+        }
+      }
+    }
+  }
+
   const relationships = detectRelationships(resources, files);
-  
+
+  // Detect circular dependencies before returning — callers can surface these as warnings
+  const cycles = detectCircularDependencies(relationships);
+  const warnings = cycles.map(c => `Circular dependency detected: ${c}`);
+
   // Extract resource groups
   const resourceGroups = resources
-    .filter(r => r.type === 'azurerm_resource_group')
+    .filter(r => r.type === AZURE_CORE_TYPES.RESOURCE_GROUP)
     .map(r => r.name);
 
   return {
     resources,
     relationships,
-    resourceGroups
+    resourceGroups,
+    warnings,
   };
 }
 

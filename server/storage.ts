@@ -119,6 +119,10 @@ export class MemStorage implements IStorage {
       backendLocation: insertSession.backendLocation ?? null,
       backendValidated: insertSession.backendValidated ?? null,
       backendDeclined: insertSession.backendDeclined ?? null,
+      scannedResources: insertSession.scannedResources ?? null,
+      scanTimestamp: insertSession.scanTimestamp ?? null,
+      selectedResourceGroups: insertSession.selectedResourceGroups ?? null,
+      usageMetricsCache: insertSession.usageMetricsCache ?? null,
       createdAt: now,
       updatedAt: now,
     };

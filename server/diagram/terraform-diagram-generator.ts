@@ -29,16 +29,20 @@ export interface DiagramGenerationResult {
     cloudProvider: string;
     categories: string[];
   };
+  warnings: string[]; // Non-fatal issues such as circular dependencies
 }
 
 /**
- * Generate architecture diagram from Terraform files
+ * Generate architecture diagram from Terraform files.
+ * @param costAnnotations - Optional map "resourceType.resourceName" → monthly USD cost.
+ *   When provided, flowchart node labels include a [$X/mo] annotation (Fix #5).
  */
 export async function generateArchitectureDiagram(
   files: Array<{ fileName: string; content: string }>,
   cloudProvider: string = 'azure',
   useAI: boolean = true,
-  diagramType: DiagramType = 'flowchart'
+  diagramType: DiagramType = 'flowchart',
+  costAnnotations?: Record<string, number>
 ): Promise<DiagramGenerationResult> {
   console.log('\n🎨 ========== ARCHITECTURE DIAGRAM GENERATION ==========');
   console.log(`📁 Files to analyze: ${files.length}`);
@@ -79,7 +83,8 @@ export async function generateArchitectureDiagram(
       diagramType: 'graph',
       theme: cloudProvider === 'azure' ? 'azure' : 'default',
       groupByCategory: true,
-      showLabels: true
+      showLabels: true,
+      costMap: costAnnotations, // Fix #5: inject cost labels when available
     };
     mermaidSyntax = generateMermaidSyntax(graph, baseOptions);
   } else {
@@ -123,8 +128,8 @@ export async function generateArchitectureDiagram(
   
   console.log(`   ✅ Generated ${diagramType} diagram (${mermaidSyntax.split('\n').length} lines)`);
 
-  // Step 3: Enhance with AI if enabled (all diagram types)
-  if (useAI) {
+  // Step 3: Enhance with AI only for flowchart (AI is unreliable for other Mermaid types)
+  if (useAI && diagramType === 'flowchart') {
     console.log(`\n🤖 Step 3: Enhancing ${diagramType} diagram with AI...`);
     try {
       mermaidSyntax = await enhanceWithAI(graph, mermaidSyntax, cloudProvider, diagramType);
@@ -133,6 +138,8 @@ export async function generateArchitectureDiagram(
       console.warn(`   ⚠️  AI enhancement failed: ${error.message}`);
       console.warn('   📝 Using base diagram without AI enhancement');
     }
+  } else if (useAI && diagramType !== 'flowchart') {
+    console.log(`   ⏭️  Skipping AI enhancement for ${diagramType} (base generator output used directly)`);
   }
 
   // Step 4: Extract categories
@@ -143,6 +150,10 @@ export async function generateArchitectureDiagram(
   });
 
   // Step 5: Build result
+  if (graph.warnings.length > 0) {
+    graph.warnings.forEach(w => console.warn(`   ⚠️  ${w}`));
+  }
+
   const result: DiagramGenerationResult = {
     mermaidSyntax,
     resources: graph.resources.map(r => ({
@@ -161,7 +172,8 @@ export async function generateArchitectureDiagram(
       totalRelationships: graph.relationships.length,
       cloudProvider,
       categories: Array.from(categories)
-    }
+    },
+    warnings: graph.warnings,
   };
 
   console.log('\n✅ Architecture diagram generation complete!');

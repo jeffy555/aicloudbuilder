@@ -273,7 +273,16 @@ export function registerDockerRoutes(app: Express): void {
         return lastSegment.includes("dockerfile");
       });
 
-      const filesToSave = dockerCandidates.length > 0 ? [dockerCandidates[0]] : filteredFiles.slice(0, 1);
+      const dockerignoreCandidates = filteredFiles.filter((file) => {
+        const lastSegment = (file.path || "").split("/").pop()?.toLowerCase() || "";
+        return lastSegment === ".dockerignore";
+      });
+
+      // Save Dockerfile + .dockerignore (if generated)
+      const filesToSave = [
+        ...(dockerCandidates.length > 0 ? [dockerCandidates[0]] : filteredFiles.slice(0, 1)),
+        ...dockerignoreCandidates.slice(0, 1),
+      ];
 
       // Cleanup existing docker artifacts before saving
       const dockerNamePattern = /dockerfile|dockerignore|docker-scan/i;
@@ -1058,6 +1067,22 @@ export function registerDockerRoutes(app: Express): void {
         });
       }
 
+      // ── OCI / Docker labels ──
+      const hasOciLabels =
+        content.includes("org.opencontainers.image.") ||
+        content.toUpperCase().includes("LABEL");
+      findings.push(
+        hasOciLabels
+          ? { id: "DOCKER_BP_010", severity: "PASSED" as const, title: "Image labels present", description: "Dockerfile includes LABEL / OCI image labels for metadata." }
+          : {
+              id: "DOCKER_BP_010",
+              severity: "WARNING" as const,
+              title: "Missing image labels",
+              description: "No LABEL instructions found. Add OCI image labels for maintainability.",
+              fix: 'Add labels: LABEL org.opencontainers.image.title="<app>" org.opencontainers.image.version="1.0" org.opencontainers.image.authors="<team>"',
+            }
+      );
+
       // ── Summary ──
       const passed = findings.filter((f) => f.severity === "PASSED").length;
       const warnings = findings.filter((f) => f.severity === "WARNING").length;
@@ -1193,6 +1218,82 @@ Return ONLY the fixed Dockerfile content.`,
     }
   });
 
+  // Generate docker-compose.yml
+  app.post("/api/sessions/:id/generate-compose", async (req, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+
+      const files = await storage.getFilesBySession(sessionId);
+      const dockerfile = files.find(
+        (f) => f.fileName.toLowerCase() === "dockerfile" || f.fileName.toLowerCase().endsWith(".dockerfile")
+      );
+
+      if (!dockerfile) {
+        return res.status(400).json({ error: "Dockerfile not found", details: "Generate a Dockerfile first" });
+      }
+
+      const { scanData } = req.body as {
+        scanData?: { languages?: string[]; frameworks?: string[]; entrypoint?: string };
+      };
+
+      console.log(`\n🐙 ========== DOCKER COMPOSE GENERATION ==========`);
+      console.log(`Session: ${sessionId}`);
+
+      const { generateDockerCompose } = await import('../docker/compose-generator');
+      const result = await generateDockerCompose({
+        projectName: session.repositoryName || "app",
+        languages: scanData?.languages ?? [],
+        frameworks: scanData?.frameworks ?? [],
+        entrypoint: scanData?.entrypoint,
+        existingDockerfileContent: dockerfile.content,
+      });
+
+      // Delete old compose file if exists
+      const existingCompose = files.find((f) => f.fileName.toLowerCase() === "docker-compose.yml");
+      if (existingCompose) await storage.deleteFile(existingCompose.id);
+
+      // Save new compose file
+      const saved = await storage.createFile({
+        sessionId,
+        fileName: "docker-compose.yml",
+        content: result.content,
+      });
+
+      console.log(`✅ docker-compose.yml generated with services: ${result.services.join(', ')}`);
+      res.json({ success: true, file: saved, services: result.services });
+    } catch (error: any) {
+      console.error("Compose generation failed:", error);
+      res.status(500).json({ error: "Failed to generate docker-compose.yml", details: error.message });
+    }
+  });
+
+  // Estimate image sizes from Dockerfile
+  app.post("/api/sessions/:id/image-size-estimate", async (req, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+
+      const files = await storage.getFilesBySession(sessionId);
+      const dockerfile = files.find(
+        (f) => f.fileName.toLowerCase() === "dockerfile" || f.fileName.toLowerCase().endsWith(".dockerfile")
+      );
+
+      if (!dockerfile) {
+        return res.status(400).json({ error: "Dockerfile not found" });
+      }
+
+      const { estimateImageSizes } = await import('../docker/compose-generator');
+      const estimates = estimateImageSizes(dockerfile.content);
+
+      res.json({ success: true, estimates });
+    } catch (error: any) {
+      res.status(500).json({ error: "Estimation failed", details: error.message });
+    }
+  });
+
   // Commit Dockerfile
   app.post("/api/sessions/:id/commit-docker", async (req, res) => {
     const sessionId = req.params.id;
@@ -1218,9 +1319,10 @@ Return ONLY the fixed Dockerfile content.`,
 
       // Get Docker files from session storage
       const sessionFiles = await storage.getFilesBySession(sessionId);
-      const dockerFiles = sessionFiles.filter(f => 
-        f.fileName.toLowerCase() === 'dockerfile' || 
+      const dockerFiles = sessionFiles.filter(f =>
+        f.fileName.toLowerCase() === 'dockerfile' ||
         f.fileName.toLowerCase() === '.dockerignore' ||
+        f.fileName.toLowerCase() === 'docker-compose.yml' ||
         f.fileName.toLowerCase().endsWith('.dockerfile')
       );
 

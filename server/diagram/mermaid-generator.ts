@@ -12,6 +12,8 @@ export interface MermaidOptions {
   theme?: 'default' | 'dark' | 'azure';
   groupByCategory?: boolean;
   showLabels?: boolean;
+  /** Fix #5: keyed by "resourceType.resourceName" → monthly cost in USD */
+  costMap?: Record<string, number>;
 }
 
 /**
@@ -25,7 +27,8 @@ export function generateMermaidSyntax(
     diagramType = 'graph',
     theme = 'default',
     groupByCategory = true,
-    showLabels = true
+    showLabels = true,
+    costMap = {},
   } = options;
 
   if (diagramType === 'C4') {
@@ -48,10 +51,10 @@ export function generateMermaidSyntax(
   // Add Resource Groups at the top (no subgraph)
   for (const resource of resourceGroups) {
     const nodeId = getNodeId(resource);
-    const label = formatResourceLabel(resource, showLabels);
+    const label = formatResourceLabel(resource, showLabels, costMap);
     syntax += `    ${nodeId}[${label}]\n`;
   }
-  
+
   if (resourceGroups.length > 0 && otherResources.length > 0) {
     syntax += '\n';
   }
@@ -60,11 +63,11 @@ export function generateMermaidSyntax(
   if (groupByCategory && Object.keys(groupedResources).length > 1) {
     for (const [category, resources] of Object.entries(groupedResources)) {
       if (resources.length === 0) continue;
-      
+
       syntax += `    subgraph "${category}"\n`;
       for (const resource of resources) {
         const nodeId = getNodeId(resource);
-        const label = formatResourceLabel(resource, showLabels);
+        const label = formatResourceLabel(resource, showLabels, costMap);
         syntax += `        ${nodeId}[${label}]\n`;
       }
       syntax += `    end\n\n`;
@@ -73,7 +76,7 @@ export function generateMermaidSyntax(
     // Add all resources without grouping
     for (const resource of otherResources) {
       const nodeId = getNodeId(resource);
-      const label = formatResourceLabel(resource, showLabels);
+      const label = formatResourceLabel(resource, showLabels, costMap);
       syntax += `    ${nodeId}[${label}]\n`;
     }
     syntax += '\n';
@@ -233,16 +236,24 @@ function getResourceTechnology(resourceType: string): string {
 }
 
 /**
- * Format resource label for diagram
+ * Format resource label for diagram.
+ * Fix #5: appends [$X/mo] when a cost is available in costMap.
  */
-function formatResourceLabel(resource: TerraformResource, showDetails: boolean): string {
+function formatResourceLabel(
+  resource: TerraformResource,
+  showDetails: boolean,
+  costMap: Record<string, number> = {}
+): string {
   const typeName = getResourceTechnology(resource.type);
-  
+  const costKey = `${resource.type}.${resource.name}`;
+  const cost = costMap[costKey];
+  const costTag = cost !== undefined && cost > 0 ? `<br/>[$${cost.toFixed(0)}/mo]` : '';
+
   if (showDetails) {
-    return `${typeName}<br/>${resource.name}`;
+    return `${typeName}<br/>${resource.name}${costTag}`;
   }
-  
-  return resource.name;
+
+  return `${resource.name}${costTag}`;
 }
 
 /**

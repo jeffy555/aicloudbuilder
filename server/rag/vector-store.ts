@@ -113,7 +113,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   // Check cache first
   const cached = await embeddingCache.get(cacheKey);
   if (cached) {
-    console.log(`   💾 Using cached embedding (hash: ${cacheKey.substring(0, 8)}...)`);
+    // cached hit — no log (too verbose);
     performanceLogger.end(perfId, true);
     return cached;
   }
@@ -268,7 +268,7 @@ export async function queryVectorStore(options: {
  */
 export function initializeVectorStore(): void {
   vectorStore.clear();
-  console.log('✅ Vector store initialized');
+  // vector store cleared — logged by caller
 }
 
 /**

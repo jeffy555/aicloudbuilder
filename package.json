@@ -11,6 +11,7 @@
     "db:push": "drizzle-kit push",
     "db:drop": "tsx server/drop-tables.ts",
     "db:migrate": "tsx server/migrations/add-user-fields.ts",
+    "db:migrate:rg-metrics": "tsx server/migrations/add-rg-metrics-fields.ts",
     "test:storage": "tsx server/test-postgres-storage.ts",
     "test": "vitest run",
     "test:watch": "vitest",

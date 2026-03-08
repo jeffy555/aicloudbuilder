@@ -194,32 +194,58 @@ export function generateClassDiagram(
 }
 
 /**
- * Generate mindmap for hierarchical organization
+ * Generate mindmap for hierarchical organization.
+ *
+ * @param maxDepth - Maximum depth below root (default 4). Nodes at a depth
+ *   beyond the limit are replaced with a single `(...)` ellipsis node to
+ *   keep the Mermaid syntax valid and prevent silent truncation.
+ *   depth 1 = branch labels, depth 2 = children, depth 3 = grandchildren.
  */
 export function generateMindmap(
   root: string,
   branches: Array<{
     label: string;
     children?: Array<{ label: string; children?: Array<{ label: string }> }>;
-  }>
+  }>,
+  maxDepth: number = 4
 ): string {
   let syntax = `mindmap\n`;
   syntax += `  root((${quoteLabel(root)}))\n`;
-  
-  branches.forEach(branch => {
+
+  for (const branch of branches) {
     syntax += `    ${quoteLabel(branch.label)}\n`;
-    if (branch.children) {
-      branch.children.forEach(child => {
-        syntax += `      ${quoteLabel(child.label)}\n`;
-        if (child.children) {
-          child.children.forEach(grandchild => {
-            syntax += `        ${quoteLabel(grandchild.label)}\n`;
-          });
-        }
-      });
+
+    if (maxDepth < 2) {
+      if (branch.children && branch.children.length > 0) {
+        syntax += `      "(...)\"\n`;
+      }
+      continue;
     }
-  });
-  
+
+    const children = branch.children || [];
+    for (const child of children) {
+      syntax += `      ${quoteLabel(child.label)}\n`;
+
+      if (maxDepth < 3) {
+        if (child.children && child.children.length > 0) {
+          syntax += `        "(...)\"\n`;
+        }
+        continue;
+      }
+
+      const grandchildren = child.children || [];
+      if (grandchildren.length > 0) {
+        if (maxDepth >= 3) {
+          for (const grandchild of grandchildren) {
+            syntax += `        ${quoteLabel(grandchild.label)}\n`;
+          }
+        } else {
+          syntax += `        "(...)\"\n`;
+        }
+      }
+    }
+  }
+
   return syntax;
 }
 

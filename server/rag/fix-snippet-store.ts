@@ -87,10 +87,10 @@ class FixSnippetStore {
       }
 
       this.isLoaded = true;
-      console.log(`📦 Loaded ${snippets.length} fix snippet(s) from disk`);
+      // loaded — caller reads stats via getStats()
     } catch (error: any) {
       if (error.code === 'ENOENT') {
-        console.log('📦 Fix snippet file not found, starting fresh.');
+        // no snippet file yet — starting fresh
         this.isLoaded = true;
       } else {
         console.error('❌ Failed to load fix snippets:', error.message);

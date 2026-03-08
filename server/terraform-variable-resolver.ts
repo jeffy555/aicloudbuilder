@@ -10,6 +10,21 @@
  * Tracks which variables remain unresolved for "needs_input" classification.
  */
 
+import { resolveAzureLocation as normalizeAzureLocation } from './azure-pricing-config.js';
+import { DEFAULT_AZURE_REGION } from './config/azure-catalog.js';
+import {
+  TERRAFORM_FILE_EXTENSIONS,
+  TFVARS_QUOTED_PATTERN,
+  TFVARS_UNQUOTED_PATTERN,
+  TFVARS_LIST_PATTERN,
+  TFVARS_MAP_PATTERN,
+} from './config/terraform-patterns.js';
+
+// Re-export module-level regex aliases so existing callers (routes/terraform.ts)
+// that import TFVARS_*_REGEX by name continue to work without changes.
+const TFVARS_LIST_REGEX = TFVARS_LIST_PATTERN;
+const TFVARS_MAP_REGEX  = TFVARS_MAP_PATTERN;
+
 export interface TerraformFile {
   fileName: string;
   content: string;
@@ -35,24 +50,24 @@ function parseTfvars(content: string): Record<string, string> {
     const trimmed = line.trim();
     if (trimmed.startsWith('#') || trimmed.startsWith('//') || !trimmed.includes('=')) continue;
 
-    // Simple key = "value" or key = value
-    const match = trimmed.match(/^(\w+)\s*=\s*"([^"]*)"$/);
+    // Simple key = "value" or key = value (allow inline comments after closing quote)
+    const match = trimmed.match(/^(\w+)\s*=\s*"([^"]*)"/);
     if (match) {
       vars[match[1]] = match[2];
       continue;
     }
 
-    // key = number or key = bool
-    const simpleMatch = trimmed.match(/^(\w+)\s*=\s*([^\s#]+)/);
+    // key = number or key = bool (exclude quote char to avoid partial quoted-string matches)
+    const simpleMatch = trimmed.match(/^(\w+)\s*=\s*([^\s#"]+)/);
     if (simpleMatch) {
       vars[simpleMatch[1]] = simpleMatch[2];
     }
   }
 
   // Also handle multi-line lists: var_name = ["a", "b", "c"]
-  const listRegex = /(\w+)\s*=\s*\[([^\]]+)\]/g;
+  TFVARS_LIST_REGEX.lastIndex = 0;
   let listMatch;
-  while ((listMatch = listRegex.exec(content)) !== null) {
+  while ((listMatch = TFVARS_LIST_REGEX.exec(content)) !== null) {
     const varName = listMatch[1];
     const items = listMatch[2].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
     vars[varName] = JSON.stringify(items);
@@ -61,9 +76,9 @@ function parseTfvars(content: string): Record<string, string> {
   }
 
   // Handle multi-line maps: var_name = { key = "value" ... }
-  const mapRegex = /(\w+)\s*=\s*\{([^}]+)\}/g;
+  TFVARS_MAP_REGEX.lastIndex = 0;
   let mapMatch;
-  while ((mapMatch = mapRegex.exec(content)) !== null) {
+  while ((mapMatch = TFVARS_MAP_REGEX.exec(content)) !== null) {
     const varName = mapMatch[1];
     const mapBody = mapMatch[2];
     const entries = mapBody.split('\n')
@@ -129,7 +144,7 @@ export function buildVariableMap(files: TerraformFile[]): Record<string, string>
 
   for (const file of files) {
     const name = file.fileName.toLowerCase();
-    if (name.endsWith('.tfvars')) {
+    if (name.endsWith(TERRAFORM_FILE_EXTENSIONS.TFVARS)) {
       Object.assign(tfvarsValues, parseTfvars(file.content));
     } else if (name === 'variables.tf' || name.includes('variables')) {
       Object.assign(defaultValues, parseVariableDefaults(file.content));
@@ -194,14 +209,14 @@ export function resolveResourceAttributes(
 export function resolveLocation(
   rawLocation: string,
   variableMap: Record<string, string>,
-  defaultLocation: string = 'eastus'
+  defaultLocation: string = DEFAULT_AZURE_REGION
 ): { location: string; resolved: boolean } {
   if (!rawLocation) return { location: defaultLocation, resolved: false };
 
   // Handle var.xxx
   if (rawLocation.startsWith('var.')) {
     const { value, resolved } = resolveValue(rawLocation, variableMap);
-    if (resolved) return { location: value, resolved: true };
+    if (resolved) return { location: normalizeAzureLocation(value), resolved: true };
     return { location: defaultLocation, resolved: false };
   }
 
@@ -210,7 +225,7 @@ export function resolveLocation(
     return { location: defaultLocation, resolved: false };
   }
 
-  return { location: rawLocation, resolved: true };
+  return { location: normalizeAzureLocation(rawLocation), resolved: true };
 }
 
 /**

@@ -252,7 +252,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
           </Button>
         )}
 
-        {/* Validate - Kubernetes only */}
+        {/* Best Approach - Kubernetes only */}
         {workflowType === 'kubernetes' && !isFixing && (
           <Button
             onClick={handleValidate}
@@ -264,12 +264,12 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             {isValidateRunning ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Validating...
+                Analysing...
               </>
             ) : (
               <>
                 <Wrench className="w-4 h-4 mr-2" />
-                Validate
+                Best Approach
               </>
             )}
           </Button>
@@ -287,7 +287,14 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             sessionId={sessionId}
             framework={checkovFramework || (workflowType === 'kubernetes' ? 'kubernetes' : workflowType === 'docker' ? 'docker' : 'terraform')}
             onScanComplete={(result) => {
-              handleActivityComplete('security');
+              // Only mark completed when we got a real result — null means the scan failed
+              // (e.g. no files found, network error). Keeping it "not completed" lets the
+              // user click the Security Scan button again to retry.
+              if (result != null) {
+                handleActivityComplete('security');
+              } else {
+                setRunningActivity(null); // clear spinner, but allow retry
+              }
               onScanComplete?.(result);
             }}
             onScanStart={() => {

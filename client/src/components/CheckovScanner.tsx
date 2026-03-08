@@ -301,19 +301,54 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
 
     setIsFixing(true);
     try {
+      // Capture pre-fix snapshot so we can build fallback diffs
+      // when backend does not return fileDiffs for some frameworks.
+      const beforeFilesRes = await apiRequest('GET', `/api/sessions/${sessionId}/files`);
+      const beforeFiles = await beforeFilesRes.json() as Array<{ fileName: string; content: string }>;
+      const beforeByName = new Map(beforeFiles.map((f) => [f.fileName, f.content]));
+
       const response = await apiRequest('POST', '/api/sessions/' + sessionId + '/fix-issues', {
         failedChecks: checksToFix,
         framework: framework // Pass framework to backend
       });
       
       const result = await response.json();
-      
-      // Store file diffs if available
-      if (result.fileDiffs && result.fileDiffs.length > 0) {
-        setFileDiffs(result.fileDiffs);
+
+      // Prefer backend-provided diffs; fallback to local snapshot comparison.
+      let resolvedDiffs: Array<{ fileName: string; originalContent: string; fixedContent: string }> =
+        Array.isArray(result.fileDiffs) ? result.fileDiffs : [];
+
+      if (resolvedDiffs.length === 0 && Array.isArray(result.fixedFiles) && result.fixedFiles.length > 0) {
+        try {
+          const afterFilesRes = await apiRequest('GET', `/api/sessions/${sessionId}/files`);
+          const afterFiles = await afterFilesRes.json() as Array<{ fileName: string; content: string }>;
+          const afterByName = new Map(afterFiles.map((f) => [f.fileName, f.content]));
+
+          resolvedDiffs = result.fixedFiles
+            .map((fileName: string) => {
+              const originalContent = beforeByName.get(fileName);
+              const fixedContent = afterByName.get(fileName);
+              if (originalContent == null || fixedContent == null || originalContent === fixedContent) {
+                return null;
+              }
+              return { fileName, originalContent, fixedContent };
+            })
+            .filter((d: any) => d !== null);
+        } catch (fallbackError) {
+          console.warn('Could not build fallback diffs after fix:', fallbackError);
+        }
+      }
+
+      if (resolvedDiffs.length > 0) {
+        setFileDiffs(resolvedDiffs);
         setHasUnapprovedFixes(true);
         setFixesApproved(false);
-        onFixesApplied?.(result.fileDiffs);
+        onFixesApplied?.(resolvedDiffs);
+      } else if (Array.isArray(result.fixedFiles) && result.fixedFiles.length > 0) {
+        toast({
+          title: "Fixes applied",
+          description: "Changes were applied, but no file diff preview is available for approval.",
+        });
       }
       
       // Show detailed results
@@ -763,6 +798,25 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
 
   return (
     <div className="w-full space-y-4">
+      {/* Empty state — shown before first scan and after a failed scan */}
+      {!isScanning && !scanResult && (
+        <Card className="p-6">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <Shield className="w-10 h-10 text-muted-foreground" />
+            <div>
+              <h3 className="font-semibold">Security Scan</h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                Click the <strong>Security Scan</strong> button above to run Checkov
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => runScan()}>
+              <Shield className="w-4 h-4 mr-2" />
+              Run Scan
+            </Button>
+          </div>
+        </Card>
+      )}
+
       {/* Loading State */}
       {isScanning && !scanResult && (
         <Card className="p-4">
@@ -805,6 +859,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                       <li>No Kubernetes YAML files (.yaml, .yml) were found</li>
                       <li>Files are empty or contain invalid Kubernetes syntax</li>
                       <li>Files were not generated or saved correctly</li>
+                      <li>Session contains Helm chart templates (use Kubernetes Manifests workflow for scanning)</li>
                     </ul>
                     <p className="mt-2 text-sm">
                       Please ensure you have generated Kubernetes YAML files before running the scan.

@@ -42,6 +42,8 @@ export const sessions = pgTable("sessions", {
   // Valuation module fields
   scannedResources: text("scanned_resources"), // JSON string of scanned Azure resources
   scanTimestamp: text("scan_timestamp"), // ISO timestamp of last resource scan
+  selectedResourceGroups: text("selected_resource_groups"), // JSON array of selected RG IDs
+  usageMetricsCache: text("usage_metrics_cache"), // JSON cache of Azure Monitor metrics
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -262,6 +264,11 @@ export const usageDimensionSchema = z.object({
 
 export type UsageDimensionInfo = z.infer<typeof usageDimensionSchema>;
 
+const reservedPricingTierSchema = z.object({
+  monthlyCost: z.number(),
+  savingsPercent: z.number(),
+});
+
 export const costResourceSchema = z.object({
   resourceName: z.string(),
   resourceType: z.string(),
@@ -278,6 +285,11 @@ export const costResourceSchema = z.object({
   providedUsage: z.record(z.string(), z.number()).optional(),
   unresolvedVariables: z.array(z.string()).optional(),
   details: z.any().optional(),
+  // Fix #4: Reserved instance pricing comparison for compute resources
+  reservedPricing: z.object({
+    oneYear: reservedPricingTierSchema.optional(),
+    threeYear: reservedPricingTierSchema.optional(),
+  }).optional(),
 });
 
 export type CostResource = z.infer<typeof costResourceSchema>;
@@ -298,6 +310,12 @@ export const costSummarySchema = z.object({
 
 export type CostSummary = z.infer<typeof costSummarySchema>;
 
+const envProfileEntrySchema = z.object({
+  monthlyTotal: z.number(),
+  yearlyTotal: z.number(),
+  description: z.string(),
+});
+
 export const costAnalysisResultSchema = z.object({
   success: z.boolean(),
   summary: costSummarySchema,
@@ -308,6 +326,13 @@ export const costAnalysisResultSchema = z.object({
     reason: z.string(),
   })).optional(),
   logs: z.array(z.string()).optional(),
+  // Fix #3: Multi-environment cost comparison
+  environmentComparison: z.object({
+    dev: envProfileEntrySchema,
+    test: envProfileEntrySchema,
+    prod: envProfileEntrySchema,
+    activeProfile: z.string(),
+  }).optional(),
 });
 
 export type CostAnalysisResult = z.infer<typeof costAnalysisResultSchema>;

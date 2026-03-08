@@ -19,6 +19,10 @@ import { registerScoreMeRoutes } from "./scoreme";
 import { registerMetricsRoutes } from "./metrics";
 import { registerUserFixPreferencesRoutes } from "./user-fix-preferences";
 import { registerHistoryRoutes } from "./history";
+import { registerTerraformGenerationRoutes } from "./terraform-generation";
+import { registerScanRoutes } from "./scan";
+import { registerFixesRoutes } from "./fixes";
+import { registerCostAnalysisRoutes } from "./cost-analysis";
 // Import legacy routes for routes not yet migrated
 import { registerLegacyRoutes } from "../routes-legacy";
 
@@ -61,14 +65,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerMetricsRoutes(app); // Phase 0: Performance monitoring
   registerUserFixPreferencesRoutes(app); // Phase 2: User fix preferences
   registerHistoryRoutes(app); // User history
+  registerTerraformGenerationRoutes(app); // POST /api/sessions/:id/generate-terraform
+  registerScanRoutes(app);               // POST /api/sessions/:id/scan
+  registerFixesRoutes(app);              // POST /api/sessions/:id/fix-issues
+  registerCostAnalysisRoutes(app);       // POST /api/sessions/:id/analyze-cost
 
-  // Register legacy routes for large/complex endpoints (deferred migration)
-  // These endpoints are fully functional and will be migrated incrementally in a future phase:
-  // - POST /api/sessions/:id/generate-terraform (~1,700 lines)
-  // - POST /api/sessions/:id/scan (~3,700 lines)
-  // - POST /api/sessions/:id/fix-issues (~1,000 lines)
-  // - POST /api/sessions/:id/analyze-cost (~1,500 lines)
-  // All other endpoints have been successfully migrated to modular route files above.
+  // Legacy routes stub — all endpoints have been migrated to modular route files above
   const server = await registerLegacyRoutes(app);
   
   return server;

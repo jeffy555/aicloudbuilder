@@ -8,6 +8,16 @@
 // Industry standard: 365 days / 12 months * 24 hours = 730 hours/month
 export const HOURS_PER_MONTH = 730;
 
+// ─── Cost Helpers ──────────────────────────────────────────────────────────────
+
+/** Compute monthly cost for an hourly-billed resource (e.g., VMs, App Service) */
+export const perHour = (item: any): number =>
+  (item?.retailPrice || 0) * HOURS_PER_MONTH;
+
+/** Compute monthly cost for a GB-per-month resource (e.g., Storage, Disks) */
+export const perGbMonth = (item: any, gb: number): number =>
+  (item?.retailPrice || 0) * gb;
+
 // ─── Cost Units ────────────────────────────────────────────────────────────────
 
 export type CostUnit =
@@ -185,79 +195,72 @@ function selectNonZeroItem(items: any[]): any {
   return items.find((item: any) => item.retailPrice > 0) || items[0] || null;
 }
 
+// ─── VM Pricing Factory ─────────────────────────────────────────────────────────
+
+/**
+ * Factory function for VM pricing entries.
+ * All three VM resource types share identical filter/cost logic — only the OS
+ * filter in selectItem differs. Using a factory eliminates the triplicated blocks
+ * so that a pricing logic change (e.g., SKU filter) is made in exactly one place.
+ *
+ * @param os - 'linux' filters to Linux products, 'windows' to Windows,
+ *             'any' prefers Linux but accepts any non-Windows as fallback.
+ */
+function createVMPricingConfig(os: 'linux' | 'windows' | 'any'): AzurePricingEntry {
+  return {
+    serviceName: 'Virtual Machines',
+    serviceFamily: 'Compute',
+    costUnit: 'per_hour',
+    defaults: { size: 'Standard_B2s', vm_size: 'Standard_B2s' },
+    attributeKeys: ['size', 'vm_size'],
+    usageAssumptions: { hoursPerMonth: HOURS_PER_MONTH },
+    buildFilter: (attrs, location) => {
+      const size = attrs.size || attrs.vm_size || 'Standard_B2s';
+      return `serviceName eq 'Virtual Machines' and armRegionName eq '${location}' and armSkuName eq '${size}' and priceType eq 'Consumption'`;
+    },
+    selectItem: (items) => {
+      // Exclude spot / low-priority pricing for all VM types
+      const nonSpot = items.filter((i: any) =>
+        !i.skuName?.toLowerCase().includes('spot') &&
+        !i.skuName?.toLowerCase().includes('low priority') &&
+        !i.meterName?.toLowerCase().includes('spot')
+      );
+      const pool = nonSpot.length > 0 ? nonSpot : items;
+
+      if (os === 'linux') {
+        const linux = pool.filter((i: any) =>
+          i.productName?.toLowerCase().includes('linux') ||
+          !i.productName?.toLowerCase().includes('windows')
+        );
+        const filtered = linux.length > 0 ? linux : pool;
+        return selectByUnit(filtered, 'hour') || filtered[0] || null;
+      }
+      if (os === 'windows') {
+        const windows = pool.filter((i: any) =>
+          i.productName?.toLowerCase().includes('windows')
+        );
+        const filtered = windows.length > 0 ? windows : pool;
+        return selectByUnit(filtered, 'hour') || filtered[0] || null;
+      }
+      // 'any': prefer Linux but fall through to any non-spot item
+      const linux = pool.filter((i: any) =>
+        i.productName?.toLowerCase().includes('linux') ||
+        !i.productName?.toLowerCase().includes('windows')
+      );
+      const filtered = linux.length > 0 ? linux : pool;
+      return selectByUnit(filtered, 'hour') || filtered[0] || null;
+    },
+    calculateCost: (item) => perHour(item),
+  };
+}
+
 // ─── Pricing Config ────────────────────────────────────────────────────────────
 
 export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
   // ═══ COMPUTE ═══
-  'azurerm_virtual_machine': {
-    serviceName: 'Virtual Machines',
-    serviceFamily: 'Compute',
-    costUnit: 'per_hour',
-    defaults: { vm_size: 'Standard_B2s' },
-    attributeKeys: ['vm_size', 'size'],
-    usageAssumptions: { hoursPerMonth: HOURS_PER_MONTH },
-    buildFilter: (attrs, location) => {
-      const size = attrs.vm_size || attrs.size || 'Standard_B2s';
-      return `serviceName eq 'Virtual Machines' and armRegionName eq '${location}' and armSkuName eq '${size}' and priceType eq 'Consumption'`;
-    },
-    selectItem: (items, attrs) => {
-      // Prefer Linux, non-spot, non-low-priority
-      const filtered = items.filter((i: any) =>
-        !i.skuName?.toLowerCase().includes('spot') &&
-        !i.skuName?.toLowerCase().includes('low priority') &&
-        !i.meterName?.toLowerCase().includes('spot') &&
-        (i.productName?.toLowerCase().includes('linux') || !i.productName?.toLowerCase().includes('windows'))
-      );
-      return selectByUnit(filtered.length > 0 ? filtered : items, 'hour') || items[0];
-    },
-    calculateCost: (item, attrs) => {
-      return (item.retailPrice || 0) * HOURS_PER_MONTH;
-    }
-  },
-
-  'azurerm_linux_virtual_machine': {
-    serviceName: 'Virtual Machines',
-    serviceFamily: 'Compute',
-    costUnit: 'per_hour',
-    defaults: { size: 'Standard_B2s' },
-    attributeKeys: ['size', 'vm_size'],
-    usageAssumptions: { hoursPerMonth: HOURS_PER_MONTH },
-    buildFilter: (attrs, location) => {
-      const size = attrs.size || attrs.vm_size || 'Standard_B2s';
-      return `serviceName eq 'Virtual Machines' and armRegionName eq '${location}' and armSkuName eq '${size}' and priceType eq 'Consumption'`;
-    },
-    selectItem: (items) => {
-      const linux = items.filter((i: any) =>
-        i.productName?.toLowerCase().includes('linux') &&
-        !i.skuName?.toLowerCase().includes('spot') &&
-        !i.skuName?.toLowerCase().includes('low priority')
-      );
-      return selectByUnit(linux.length > 0 ? linux : items, 'hour') || items[0];
-    },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
-  },
-
-  'azurerm_windows_virtual_machine': {
-    serviceName: 'Virtual Machines',
-    serviceFamily: 'Compute',
-    costUnit: 'per_hour',
-    defaults: { size: 'Standard_B2s' },
-    attributeKeys: ['size', 'vm_size'],
-    usageAssumptions: { hoursPerMonth: HOURS_PER_MONTH },
-    buildFilter: (attrs, location) => {
-      const size = attrs.size || attrs.vm_size || 'Standard_B2s';
-      return `serviceName eq 'Virtual Machines' and armRegionName eq '${location}' and armSkuName eq '${size}' and priceType eq 'Consumption'`;
-    },
-    selectItem: (items) => {
-      const windows = items.filter((i: any) =>
-        i.productName?.toLowerCase().includes('windows') &&
-        !i.skuName?.toLowerCase().includes('spot') &&
-        !i.skuName?.toLowerCase().includes('low priority')
-      );
-      return selectByUnit(windows.length > 0 ? windows : items, 'hour') || items[0];
-    },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
-  },
+  'azurerm_virtual_machine':         createVMPricingConfig('any'),
+  'azurerm_linux_virtual_machine':   createVMPricingConfig('linux'),
+  'azurerm_windows_virtual_machine': createVMPricingConfig('windows'),
 
   // ═══ APP SERVICE ═══
   'azurerm_service_plan': {
@@ -281,7 +284,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return compute[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   'azurerm_app_service_plan': {
@@ -309,7 +312,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return compute[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   'azurerm_linux_web_app': {
@@ -456,12 +459,12 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       // Sort by price ascending and find the first that fits
       monthlyItems.sort((a: any, b: any) => a.retailPrice - b.retailPrice);
       // P10 = 128GB, P15 = 256GB, etc. Try to match by meter name
-      if (diskSize <= 32) return monthlyItems.find((i: any) => i.meterName?.includes('E4') || i.meterName?.includes('S4') || i.meterName?.includes('P4')) || monthlyItems[0];
-      if (diskSize <= 64) return monthlyItems.find((i: any) => i.meterName?.includes('E6') || i.meterName?.includes('S6') || i.meterName?.includes('P6')) || monthlyItems[0];
-      if (diskSize <= 128) return monthlyItems.find((i: any) => i.meterName?.includes('E10') || i.meterName?.includes('S10') || i.meterName?.includes('P10')) || monthlyItems[0];
-      if (diskSize <= 256) return monthlyItems.find((i: any) => i.meterName?.includes('E15') || i.meterName?.includes('S15') || i.meterName?.includes('P15')) || monthlyItems[1];
-      if (diskSize <= 512) return monthlyItems.find((i: any) => i.meterName?.includes('E20') || i.meterName?.includes('S20') || i.meterName?.includes('P20')) || monthlyItems[2];
-      return monthlyItems.find((i: any) => i.meterName?.includes('E30') || i.meterName?.includes('S30') || i.meterName?.includes('P30')) || monthlyItems[3] || monthlyItems[0];
+      if (diskSize <= 32) return monthlyItems.find((i: any) => i.meterName?.includes('E4') || i.meterName?.includes('S4') || i.meterName?.includes('P4')) ?? monthlyItems[0] ?? null;
+      if (diskSize <= 64) return monthlyItems.find((i: any) => i.meterName?.includes('E6') || i.meterName?.includes('S6') || i.meterName?.includes('P6')) ?? monthlyItems[0] ?? null;
+      if (diskSize <= 128) return monthlyItems.find((i: any) => i.meterName?.includes('E10') || i.meterName?.includes('S10') || i.meterName?.includes('P10')) ?? monthlyItems[0] ?? null;
+      if (diskSize <= 256) return monthlyItems.find((i: any) => i.meterName?.includes('E15') || i.meterName?.includes('S15') || i.meterName?.includes('P15')) ?? monthlyItems[1] ?? monthlyItems[0] ?? null;
+      if (diskSize <= 512) return monthlyItems.find((i: any) => i.meterName?.includes('E20') || i.meterName?.includes('S20') || i.meterName?.includes('P20')) ?? monthlyItems[2] ?? monthlyItems[0] ?? null;
+      return monthlyItems.find((i: any) => i.meterName?.includes('E30') || i.meterName?.includes('S30') || i.meterName?.includes('P30')) ?? monthlyItems[3] ?? monthlyItems[0] ?? null;
     },
     calculateCost: (item) => item.retailPrice || 0 // Already monthly for managed disks
   },
@@ -518,7 +521,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
         return (item.retailPrice || 0) * 30; // Per-day pricing * 30 days
       }
       if (item.unitOfMeasure?.includes('Hour')) {
-        return (item.retailPrice || 0) * HOURS_PER_MONTH;
+        return perHour(item);
       }
       return item.retailPrice || 0;
     }
@@ -573,7 +576,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return compute[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   'azurerm_postgresql_flexible_server': {
@@ -597,7 +600,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return compute[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ NETWORKING ═══
@@ -624,7 +627,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
         (i.meterName || '').toLowerCase().includes('static ip')
       ) || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   'azurerm_application_gateway': {
@@ -647,7 +650,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       });
       return matched[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   'azurerm_firewall': {
@@ -668,7 +671,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       });
       return matched[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   'azurerm_nat_gateway': {
@@ -688,7 +691,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return natItems[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   'azurerm_lb': {
@@ -714,7 +717,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
     },
     calculateCost: (item) => {
       if (!item) return 0; // Basic LB is free
-      return (item.retailPrice || 0) * HOURS_PER_MONTH;
+      return perHour(item);
     }
   },
 
@@ -736,7 +739,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return matched[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   'azurerm_virtual_network_gateway': {
@@ -756,7 +759,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return matched[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ CONTAINERS ═══
@@ -815,7 +818,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
     },
     calculateCost: (item, attrs) => {
       const nodeCount = parseInt(attrs.default_node_pool_node_count || attrs.node_count || '3', 10);
-      return (item.retailPrice || 0) * HOURS_PER_MONTH * nodeCount;
+      return perHour(item) * nodeCount;
     }
   },
 
@@ -887,7 +890,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return envItems[0] || selectNonZeroItem(items);
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ SECURITY ═══
@@ -1046,7 +1049,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return skuMatch[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ AI / COGNITIVE ═══
@@ -1103,7 +1106,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       const hourly = items.filter((i: any) => i.unitOfMeasure?.includes('Hour'));
       return hourly[0] || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ MESSAGING ═══
@@ -1128,7 +1131,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
     },
     calculateCost: (item, attrs) => {
       const capacity = parseInt(attrs.capacity || '1', 10);
-      return (item.retailPrice || 0) * HOURS_PER_MONTH * capacity;
+      return perHour(item) * capacity;
     }
   },
 
@@ -1151,7 +1154,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return matched[0] || selectNonZeroItem(items);
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ MISC ═══
@@ -1280,7 +1283,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
     calculateCost: (item, attrs) => {
       const skuRaw = attrs.sku_name || 'Developer_1';
       const units = parseInt(skuRaw.split('_')[1] || '1', 10);
-      return (item.retailPrice || 0) * HOURS_PER_MONTH * units;
+      return perHour(item) * units;
     }
   },
 
@@ -1304,7 +1307,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return matched[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ PRIVATE ENDPOINT ═══
@@ -1326,7 +1329,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       );
       return endpoint[0] || selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ CDN ═══
@@ -1462,7 +1465,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
       if (item.unitOfMeasure?.includes('Day')) {
         return (item.retailPrice || 0) * 30 * capacity;
       }
-      return (item.retailPrice || 0) * HOURS_PER_MONTH * capacity;
+      return perHour(item) * capacity;
     }
   },
 
@@ -1635,7 +1638,7 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
     selectItem: (items) => {
       return selectByUnit(items, 'hour') || items[0];
     },
-    calculateCost: (item) => (item.retailPrice || 0) * HOURS_PER_MONTH
+    calculateCost: (item) => perHour(item)
   },
 
   // ═══ BATCH ═══
@@ -1801,15 +1804,20 @@ export function selectBestPricingItem(
 }
 
 /**
- * Calculate monthly cost from a pricing item
+ * Calculate monthly cost from a pricing item.
+ * Returns null when the pricing item exists but has no retail price
+ * (preview/region-limited resources) so callers can surface 'price_unavailable'.
  */
 export function calculateMonthlyCost(
   resourceType: string,
   item: any,
   attrs: Record<string, any>
-): number {
+): number | null {
   const config = AZURE_PRICING_CONFIG[resourceType];
   if (!config || !item) return 0;
+
+  // Null retailPrice = price data unavailable for this resource in this region
+  if (item.retailPrice === null || item.retailPrice === undefined) return null;
 
   const mergedAttrs = { ...config.defaults, ...attrs };
   return config.calculateCost(item, mergedAttrs);

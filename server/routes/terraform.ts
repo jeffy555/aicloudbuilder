@@ -14,6 +14,22 @@ import { generateArchitectureDiagram } from "../diagram/terraform-diagram-genera
 import { findMatchingBrace } from "../utils/route-helpers";
 import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
 import { bitwardenService, isBitwardenConfigured } from "../services/bitwarden-service";
+import { AZURE_PRICING_CONFIG } from "../azure-pricing-config.js";
+import {
+  TERRAFORM_DEFAULT_VERSION,
+  MIN_MEANINGFUL_VALUE_LENGTH,
+  MIN_RESOURCE_NAME_LENGTH,
+} from "../config/constants.js";
+import {
+  TERRAFORM_REFERENCE_PREFIXES,
+  PURE_NUMBER_PATTERN,
+  TERRAFORM_KEYWORD_PATTERN,
+  PROVIDER_TIER_LITERAL_PATTERN,
+} from "../config/terraform-patterns.js";
+
+// Module-level regex constants — compiled once at startup
+const TERRAFORM_VAR_USAGE_PATTERN = /var\.([a-zA-Z0-9_-]+)/g;
+const TERRAFORM_VAR_DECLARATION_PATTERN = /variable\s+"([^"]+)"/g;
 
 /**
  * Register Terraform-specific routes
@@ -459,7 +475,7 @@ export function registerTerraformRoutes(app: Express) {
           const providerTfContent = openaiService.generateProviderTf(session.cloudProvider || 'azure');
 
           // Fetch latest Terraform version from MCP server or API
-          let latestVersion = '1.9.0'; // Default fallback
+          let latestVersion = TERRAFORM_DEFAULT_VERSION; // See config/constants.ts
           try {
             latestVersion = await mcpClient.getLatestTerraformVersion();
             console.log(`Using Terraform version: ${latestVersion}`);
@@ -594,9 +610,9 @@ export function registerTerraformRoutes(app: Express) {
       // Extract all declared variables from variables.tf
       const declaredVariables = new Set<string>();
       if (variablesTf) {
-        const variablePattern = /variable\s+"([^"]+)"/g;
+        TERRAFORM_VAR_DECLARATION_PATTERN.lastIndex = 0;
         let match;
-        while ((match = variablePattern.exec(variablesTf.content)) !== null) {
+        while ((match = TERRAFORM_VAR_DECLARATION_PATTERN.exec(variablesTf.content)) !== null) {
           declaredVariables.add(match[1]);
         }
         console.log(`   Declared variables: ${Array.from(declaredVariables).join(', ')}`);
@@ -606,9 +622,9 @@ export function registerTerraformRoutes(app: Express) {
       const usedVariables = new Set<string>();
       if (mainTf) {
         // Match var.variable_name or ${var.variable_name}
-        const varPattern = /var\.([a-zA-Z0-9_-]+)/g;
+        TERRAFORM_VAR_USAGE_PATTERN.lastIndex = 0;
         let match;
-        while ((match = varPattern.exec(mainTf.content)) !== null) {
+        while ((match = TERRAFORM_VAR_USAGE_PATTERN.exec(mainTf.content)) !== null) {
           usedVariables.add(match[1]);
         }
         console.log(`   Used variables: ${Array.from(usedVariables).join(', ')}`);
@@ -681,7 +697,14 @@ export function registerTerraformRoutes(app: Express) {
           // Use AI to detect which attributes should be variables (not hardcoded)
           // For performance, we'll use a simplified approach: detect common configurable attributes
           // In a production system, this could be enhanced with AI-based detection
-          const configurableAttributes = ['name', 'location', 'region', 'resource_group_name', 'account_tier', 'account_replication_type', 'sku', 'instance_type', 'instance_class', 'size', 'tier', 'capacity', 'billing_mode', 'read_capacity', 'write_capacity'];
+          // Derive configurable attributes dynamically from all registered pricing configs.
+          // This list automatically grows as new Azure (or AWS/GCP) resource types are added.
+          const configurableAttributes = Array.from(new Set([
+            // Baseline attributes always worth flagging
+            'name', 'location', 'region', 'resource_group_name',
+            // Dynamically sourced from every registered pricing config
+            ...Object.values(AZURE_PRICING_CONFIG).flatMap(c => c.attributeKeys),
+          ]));
 
           configurableAttributes.forEach(attr => {
             // Match: attribute = "value" or attribute = value
@@ -691,14 +714,14 @@ export function registerTerraformRoutes(app: Express) {
             if (attrMatch) {
               const value = attrMatch[1];
               // Skip if it's a reference (data., resource., etc.)
-              if (!value.match(/^(data\.|resource\.|module\.|local\.|path\.|self\.|count\.|each\.)/) &&
-                  !value.match(/^[0-9]+$/) && // Skip pure numbers
+              if (!TERRAFORM_REFERENCE_PREFIXES.test(value) &&
+                  !PURE_NUMBER_PATTERN.test(value) &&
                   value.length > 1 &&
-                  !value.match(/^(true|false|null)$/i)) {
-                
-                // Check if this value looks configurable (not a built-in identifier)
-                if (!value.match(/^(azurerm_|aws_|google_|Standard|Premium|Basic)/i) &&
-                    value.length > 3) { // Only flag meaningful values
+                  !TERRAFORM_KEYWORD_PATTERN.test(value)) {
+
+                // Only flag values long enough to be meaningful non-tier literals
+                if (!PROVIDER_TIER_LITERAL_PATTERN.test(value) &&
+                    value.length > MIN_MEANINGFUL_VALUE_LENGTH) {
                   
                   issues.push({
                     file: 'main.tf',
@@ -721,7 +744,7 @@ export function registerTerraformRoutes(app: Express) {
             // If resource name is a hardcoded string and looks like a configurable name
             if (!resourceName.includes('var.') && 
                 !resourceName.includes('${') &&
-                resourceName.length > 5 && // Meaningful names
+                resourceName.length > MIN_RESOURCE_NAME_LENGTH &&
                 !resourceName.match(/^[a-z0-9-]+$/)) { // Not just a simple identifier
               // Suggest using variable for resource naming
               suggestions.push({
@@ -1189,13 +1212,12 @@ export function registerTerraformRoutes(app: Express) {
           const lines = newContent.split('\n');
           let modified = false;
           
-          // Use AI to detect configurable attributes for each resource type
-          // For now, use a common list, but this could be enhanced with AI per-resource
-          const configurableAttributes = [
-            'name', 'location', 'region', 'resource_group_name', 'account_tier',
-            'account_replication_type', 'sku', 'instance_type', 'instance_class',
-            'size', 'tier', 'capacity', 'billing_mode', 'read_capacity', 'write_capacity'
-          ];
+          // Derive configurable attributes dynamically from all registered pricing configs.
+          // This list auto-grows as new resource types are added to AZURE_PRICING_CONFIG.
+          const configurableAttributes = Array.from(new Set([
+            'name', 'location', 'region', 'resource_group_name',
+            ...Object.values(AZURE_PRICING_CONFIG).flatMap(c => c.attributeKeys),
+          ]));
 
           const newLines: string[] = [];
           const variablesToAdd: Array<{ name: string; value: string; attr: string }> = [];
@@ -1499,16 +1521,147 @@ export function registerTerraformRoutes(app: Express) {
         mermaidSyntax: result.mermaidSyntax,
         resources: result.resources,
         relationships: result.relationships,
-        metadata: result.metadata
+        metadata: result.metadata,
+        warnings: result.warnings,
       });
 
     } catch (error: any) {
       console.error('❌ Error generating architecture diagram:', error);
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Failed to generate architecture diagram',
         details: error.message,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
+    }
+  });
+
+  // ─── Policy Validation ─────────────────────────────────────────────────────
+
+  app.post("/api/terraform/validate-policy", async (req, res) => {
+    try {
+      const { files, enabledRules, requiredTags, approvedRegions } = req.body;
+
+      if (!files || !Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ error: 'files array is required' });
+      }
+
+      const { parseResources } = await import('../diagram/resource-relationship-parser.js');
+      const { runPolicyChecks } = await import('../terraform-policy-engine.js');
+
+      const resources = parseResources(files);
+      const result = runPolicyChecks(resources, { enabledRules, requiredTags, approvedRegions });
+
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error('❌ Error running policy validation:', error);
+      res.status(500).json({ error: 'Policy validation failed', details: error.message });
+    }
+  });
+
+  // ─── Terraform Plan Diff ───────────────────────────────────────────────────
+
+  // POST /api/sessions/:id/rightsizing-recommendations
+  // Reads the session's .tf files, applies static rightsizing rules, and
+  // returns per-resource recommendations with estimated savings.
+  app.post("/api/sessions/:id/rightsizing-recommendations", async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+      // costsByAddress is optional: { "azurerm_linux_virtual_machine.app": 150.00 }
+      // Populated by the frontend from a prior cost-analysis run so dollar
+      // savings can be shown alongside percent savings.
+      const { costsByAddress = {} } = req.body;
+
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      const sessionFiles = await storage.getFilesBySession(sessionId);
+      const tfFiles = sessionFiles.filter(f =>
+        f.fileName.endsWith('.tf') && !f.fileName.includes('backend')
+      );
+
+      if (tfFiles.length === 0) {
+        return res.status(400).json({
+          error: 'No Terraform files found in session',
+          details: 'Generate or upload Terraform files before running rightsizing analysis.',
+        });
+      }
+
+      const { generateRightsizingRecommendations } = await import('../terraform-rightsizing.js');
+      const combinedHcl = tfFiles.map(f => f.content).join('\n\n');
+      const costMap = new Map<string, number>(
+        Object.entries(costsByAddress).map(([k, v]) => [k, Number(v)])
+      );
+
+      const result = generateRightsizingRecommendations(combinedHcl, costMap);
+
+      console.log(
+        `\n⚖️  RIGHTSIZING: session=${sessionId} files=${tfFiles.length}` +
+        ` resources=${result.resourcesAnalysed} recs=${result.recommendations.length}`
+      );
+
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error('❌ Rightsizing analysis failed:', error);
+      res.status(500).json({ error: 'Rightsizing analysis failed', details: error.message });
+    }
+  });
+
+  app.post("/api/terraform/analyze-plan-diff", async (req, res) => {
+    try {
+      const { planJson } = req.body;
+
+      if (!planJson || typeof planJson !== 'string') {
+        return res.status(400).json({ error: 'planJson string is required (output of terraform show -json)' });
+      }
+
+      const { parseTerraformPlan, calculatePlanDiff } = await import('../terraform-plan-parser.js');
+      const { AZURE_PRICING_CONFIG: azConfig, isFreeResource } = await import('../azure-pricing-config.js');
+      const { getAwsPricingConfig, isFreeAwsResource } = await import('../aws-pricing-config.js');
+      const { getGcpPricingConfig, isFreeGcpResource, calculateGcpMonthlyCost } = await import('../gcp-pricing-config.js');
+
+      const changes = parseTerraformPlan(planJson);
+
+      const result = await calculatePlanDiff(changes, async (resourceType, attrs) => {
+        // Free resources → $0
+        if (isFreeResource(resourceType) || isFreeAwsResource(resourceType) || isFreeGcpResource(resourceType)) {
+          return 0;
+        }
+        const location = attrs.location || attrs.region || 'eastus';
+
+        // Azure
+        const azEntry = azConfig[resourceType];
+        if (azEntry) {
+          try {
+            const { fetchAzurePricing } = await import('../routes-legacy.js').catch(() => ({ fetchAzurePricing: null }));
+            if (fetchAzurePricing) {
+              const filter  = azEntry.buildFilter({ ...azEntry.defaults, ...attrs }, location);
+              const items   = await (fetchAzurePricing as any)(filter);
+              const best    = azEntry.selectItem(items, attrs);
+              return azEntry.calculateCost(best, { ...azEntry.defaults, ...attrs }) || 0;
+            }
+          } catch {/* fall through */}
+          return 0;
+        }
+
+        // GCP
+        const gcpEntry = getGcpPricingConfig(resourceType);
+        if (gcpEntry) {
+          return calculateGcpMonthlyCost(resourceType, attrs) ?? 0;
+        }
+
+        // AWS
+        const awsEntry = getAwsPricingConfig(resourceType);
+        if (awsEntry) {
+          return awsEntry.calculateCost(null, { ...awsEntry.defaults, ...attrs });
+        }
+
+        return 0; // unknown resource type
+      });
+
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error('❌ Error analyzing plan diff:', error);
+      res.status(500).json({ error: 'Plan diff analysis failed', details: error.message });
     }
   });
 }

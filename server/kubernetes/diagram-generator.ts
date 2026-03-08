@@ -11,6 +11,9 @@ export interface KubernetesResource {
   name: string;
   namespace?: string;
   file: string;
+  // Label selector fields for accurate relationship extraction
+  podTemplateLabels?: Record<string, string>;  // spec.template.metadata.labels
+  selectorLabels?: Record<string, string>;      // spec.selector or spec.selector.matchLabels
 }
 
 export interface KubernetesRelationship {
@@ -32,6 +35,165 @@ export interface DiagramResult {
   };
 }
 
+function cleanYamlScalar(value: string): string {
+  return value
+    .replace(/\s+#.*$/, "")
+    .trim()
+    .replace(/^['"]|['"]$/g, "");
+}
+
+function normalizeResourceName(rawName: string | undefined, fallback: string): string {
+  if (!rawName) return fallback;
+  let normalized = cleanYamlScalar(rawName);
+  if (normalized.includes("{{")) {
+    normalized = normalized.replace(/\{\{[\s\S]*?\}\}/g, "tmpl");
+  }
+  normalized = normalized
+    .replace(/[^a-zA-Z0-9-_.]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
+function extractTemplateResource(manifest: string, index: number): KubernetesResource | null {
+  const kindMatch = manifest.match(/^\s*kind:\s*([A-Za-z0-9]+)/m);
+  if (!kindMatch) return null;
+
+  const kind = kindMatch[1];
+  const kindFallback = `${kind.toLowerCase()}-${index}`;
+
+  const lines = manifest.split(/\r?\n/);
+  let inMetadata = false;
+  let metadataIndent = -1;
+  let nameRaw: string | undefined;
+  let namespaceRaw: string | undefined;
+
+  for (const line of lines) {
+    const indent = (line.match(/^\s*/) || [""])[0].length;
+    const trimmed = line.trim();
+
+    if (!inMetadata && /^metadata:\s*$/.test(trimmed)) {
+      inMetadata = true;
+      metadataIndent = indent;
+      continue;
+    }
+
+    if (inMetadata) {
+      if (trimmed.length === 0) continue;
+      if (indent <= metadataIndent && !trimmed.startsWith("#")) {
+        break;
+      }
+      const nameMatch = line.match(/^\s*name:\s*(.+)\s*$/);
+      if (nameMatch && !nameRaw) {
+        nameRaw = nameMatch[1];
+      }
+      const nsMatch = line.match(/^\s*namespace:\s*(.+)\s*$/);
+      if (nsMatch && !namespaceRaw) {
+        namespaceRaw = nsMatch[1];
+      }
+    }
+  }
+
+  return {
+    kind,
+    name: normalizeResourceName(nameRaw, kindFallback),
+    namespace: normalizeResourceName(namespaceRaw, "default"),
+    file: `resource-${index}.yaml`,
+    selectorLabels: {},
+    podTemplateLabels: {},
+  };
+}
+
+function findResourceByKind(
+  resources: KubernetesResource[],
+  kind: string,
+  preferredName?: string
+): KubernetesResource | undefined {
+  if (preferredName) {
+    const exact = resources.find((r) => r.kind === kind && r.name === preferredName);
+    if (exact) return exact;
+  }
+  return resources.find((r) => r.kind === kind);
+}
+
+function extractTemplateRelationships(
+  manifest: string,
+  currentResource: KubernetesResource,
+  resources: KubernetesResource[]
+): KubernetesRelationship[] {
+  const rels: KubernetesRelationship[] = [];
+  const kind = currentResource.kind;
+
+  // Deployment-like workload -> Pod(s)
+  if (kind === "Deployment") {
+    const replicasMatch = manifest.match(/^\s*replicas:\s*(\d+)\s*$/m);
+    const replicaCount = replicasMatch ? Math.max(1, Number(replicasMatch[1])) : 1;
+    for (let i = 1; i <= Math.min(replicaCount, 3); i++) {
+      rels.push({
+        from: `${currentResource.kind}:${currentResource.name}`,
+        to: `Pod:${currentResource.name}-pod-${i}`,
+        type: "manages",
+        description: `Manages ${replicaCount} pod(s)`,
+      });
+    }
+  }
+
+  // Service -> first known workload (best-effort for templated selectors/includes)
+  if (kind === "Service") {
+    const workload =
+      findResourceByKind(resources, "Deployment")
+      || findResourceByKind(resources, "StatefulSet")
+      || findResourceByKind(resources, "DaemonSet")
+      || findResourceByKind(resources, "Pod");
+    if (workload) {
+      rels.push({
+        from: `${currentResource.kind}:${currentResource.name}`,
+        to: `${workload.kind}:${workload.name}`,
+        type: "exposes",
+        description: "Exposes workload (templated selector)",
+      });
+    }
+  }
+
+  // HPA -> scale target
+  if (kind === "HorizontalPodAutoscaler") {
+    const refKindMatch = manifest.match(/scaleTargetRef:\s*[\s\S]*?^\s*kind:\s*([A-Za-z0-9]+)\s*$/m);
+    const refNameMatch = manifest.match(/scaleTargetRef:\s*[\s\S]*?^\s*name:\s*(.+)\s*$/m);
+    const refKind = refKindMatch?.[1];
+    const refName = refNameMatch ? normalizeResourceName(refNameMatch[1], "tmpl") : undefined;
+    const target =
+      (refKind ? findResourceByKind(resources, refKind, refName) : undefined)
+      || findResourceByKind(resources, "Deployment");
+    if (target) {
+      rels.push({
+        from: `${currentResource.kind}:${currentResource.name}`,
+        to: `${target.kind}:${target.name}`,
+        type: "scales",
+        description: "Autoscales workload",
+      });
+    }
+  }
+
+  // Ingress -> Service
+  if (kind === "Ingress") {
+    const svcNameMatch = manifest.match(/backend:\s*[\s\S]*?service:\s*[\s\S]*?^\s*name:\s*(.+)\s*$/m);
+    const preferredServiceName = svcNameMatch
+      ? normalizeResourceName(svcNameMatch[1], "tmpl")
+      : undefined;
+    const service = findResourceByKind(resources, "Service", preferredServiceName);
+    if (service) {
+      rels.push({
+        from: `${currentResource.kind}:${currentResource.name}`,
+        to: `${service.kind}:${service.name}`,
+        type: "routes-to",
+        description: "Routes traffic to service",
+      });
+    }
+  }
+
+  return rels;
+}
+
 /**
  * Parse Kubernetes YAML to extract resources
  */
@@ -42,15 +204,32 @@ function parseKubernetesResources(manifests: string[]): KubernetesResource[] {
     try {
       const parsed = yaml.load(manifest) as any;
       if (parsed && parsed.kind && parsed.metadata) {
+        // Capture selector labels for workloads (Deployment, StatefulSet, DaemonSet, etc.)
+        const selectorRaw = parsed.spec?.selector;
+        const selectorLabels: Record<string, string> =
+          selectorRaw?.matchLabels ?? (typeof selectorRaw === 'object' && !selectorRaw?.matchExpressions ? selectorRaw : {}) ?? {};
+
+        // Pod template labels for workloads
+        const podTemplateLabels: Record<string, string> =
+          parsed.spec?.template?.metadata?.labels ?? {};
+
         resources.push({
           kind: parsed.kind,
           name: parsed.metadata.name || `${parsed.kind.toLowerCase()}-${index}`,
           namespace: parsed.metadata.namespace || 'default',
           file: `resource-${index}.yaml`,
+          selectorLabels,
+          podTemplateLabels,
         });
       }
     } catch (error) {
-      console.warn(`⚠️  Failed to parse manifest ${index}:`, error);
+      const templated = extractTemplateResource(manifest, index);
+      if (templated) {
+        resources.push(templated);
+        console.log(`ℹ️  Parsed templated resource fallback: ${templated.kind}/${templated.name}`);
+      } else {
+        console.warn(`⚠️  Failed to parse manifest ${index}:`, error);
+      }
     }
   });
 
@@ -75,8 +254,15 @@ function extractRelationships(
       const parsed = yaml.load(manifest) as any;
       if (!parsed || !parsed.kind || !parsed.metadata) return;
 
-      const currentResource = resources[index];
-      if (!currentResource) return;
+      const currentResource =
+        resourceMap.get(`${parsed.kind}:${parsed.metadata.name}`) || {
+          kind: parsed.kind,
+          name: parsed.metadata.name,
+          namespace: parsed.metadata.namespace || "default",
+          file: `resource-${index}.yaml`,
+          selectorLabels: {},
+          podTemplateLabels: {},
+        };
 
       // Deployment -> Pods (via replicas)
       if (parsed.kind === 'Deployment' && parsed.spec?.replicas) {
@@ -91,21 +277,28 @@ function extractRelationships(
         }
       }
 
-      // Service -> Pods (via selectors)
+      // Service -> Workload (via label selectors — real K8s matching)
       if (parsed.kind === 'Service' && parsed.spec?.selector) {
-        const selector = parsed.spec.selector;
-        // Find matching deployments/pods
-        resources.forEach(resource => {
-          if (resource.kind === 'Deployment' || resource.kind === 'Pod') {
-            // Simple matching - in real scenario, would check labels
-            relationships.push({
-              from: `${currentResource.kind}:${currentResource.name}`,
-              to: `${resource.kind}:${resource.name}`,
-              type: 'exposes',
-              description: 'Exposes pods via selectors',
-            });
-          }
-        });
+        const svcSelector: Record<string, string> = parsed.spec.selector;
+        if (Object.keys(svcSelector).length > 0) {
+          const workloadKinds = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'Pod']);
+          resources.forEach(resource => {
+            if (!workloadKinds.has(resource.kind)) return;
+            // Match against pod template labels (for workloads) or resource labels
+            const targetLabels = resource.podTemplateLabels && Object.keys(resource.podTemplateLabels).length > 0
+              ? resource.podTemplateLabels
+              : resource.selectorLabels ?? {};
+            const matches = Object.entries(svcSelector).every(([k, v]) => targetLabels[k] === v);
+            if (matches) {
+              relationships.push({
+                from: `${currentResource.kind}:${currentResource.name}`,
+                to: `${resource.kind}:${resource.name}`,
+                type: 'exposes',
+                description: 'Exposes via label selector',
+              });
+            }
+          });
+        }
       }
 
       // Pod -> ConfigMap/Secret (via volume mounts)
@@ -138,19 +331,68 @@ function extractRelationships(
         });
       }
 
-      // Ingress -> Service
+      // HPA -> Workload (via scaleTargetRef)
+      if (parsed.kind === 'HorizontalPodAutoscaler' && parsed.spec?.scaleTargetRef) {
+        const ref = parsed.spec.scaleTargetRef;
+        const target = resources.find(r => r.kind === ref.kind && r.name === ref.name);
+        if (target) {
+          relationships.push({
+            from: `${currentResource.kind}:${currentResource.name}`,
+            to: `${target.kind}:${target.name}`,
+            type: 'scales',
+            description: 'Autoscales workload',
+          });
+        }
+      }
+
+      // Ingress -> Service (same namespace + cross-namespace via annotations)
       if (parsed.kind === 'Ingress' && parsed.spec?.rules) {
+        // Determine target namespace: annotation overrides, then metadata.namespace, then 'default'
+        const ingressNs: string = parsed.metadata?.namespace || 'default';
         parsed.spec.rules.forEach((rule: any) => {
           if (rule.http?.paths) {
             rule.http.paths.forEach((path: any) => {
-              const serviceName = path.backend?.service?.name;
-              const service = resources.find(r => r.kind === 'Service' && r.name === serviceName);
+              const serviceName: string | undefined = path.backend?.service?.name;
+              if (!serviceName) return;
+              // Target namespace from annotation (nginx: nginx.ingress.kubernetes.io/service-namespace)
+              const targetNs: string =
+                parsed.metadata?.annotations?.['nginx.ingress.kubernetes.io/service-namespace'] ||
+                path.backend?.service?.namespace ||
+                ingressNs;
+
+              const service = resources.find(r =>
+                r.kind === 'Service' &&
+                r.name === serviceName &&
+                (r.namespace === targetNs || r.namespace === ingressNs || targetNs === 'default')
+              );
               if (service) {
+                const crossNs = service.namespace !== ingressNs;
                 relationships.push({
                   from: `${currentResource.kind}:${currentResource.name}`,
                   to: `${service.kind}:${service.name}`,
                   type: 'routes-to',
-                  description: 'Routes traffic to service',
+                  description: crossNs
+                    ? `Cross-ns route → ${service.namespace}`
+                    : 'Routes traffic to service',
+                });
+              }
+            });
+          }
+        });
+      }
+
+      // NetworkPolicy namespaceSelector → cross-namespace relationship annotation
+      if (parsed.kind === 'NetworkPolicy' && parsed.spec?.ingress) {
+        parsed.spec.ingress.forEach((rule: any) => {
+          if (rule.from) {
+            rule.from.forEach((peer: any) => {
+              if (peer.namespaceSelector?.matchLabels) {
+                const nsLabel = JSON.stringify(peer.namespaceSelector.matchLabels);
+                relationships.push({
+                  from: `${currentResource.kind}:${currentResource.name}`,
+                  to: `NetworkPolicy:${currentResource.name}`,
+                  type: 'allows-from-ns',
+                  description: `Allows from namespaces: ${nsLabel}`,
                 });
               }
             });
@@ -158,38 +400,59 @@ function extractRelationships(
         });
       }
     } catch (error) {
-      console.warn(`⚠️  Failed to extract relationships from manifest ${index}:`, error);
+      const templateResource = resources[index] || extractTemplateResource(manifest, index);
+      if (templateResource && manifest.includes("{{")) {
+        const fallbackRels = extractTemplateRelationships(manifest, templateResource, resources);
+        if (fallbackRels.length > 0) {
+          relationships.push(...fallbackRels);
+          console.log(
+            `ℹ️  Extracted ${fallbackRels.length} templated relationship(s) for ${templateResource.kind}/${templateResource.name}`
+          );
+        } else {
+          console.warn(`⚠️  No templated relationships inferred for manifest ${index}`);
+        }
+      } else {
+        console.warn(`⚠️  Failed to extract relationships from manifest ${index}:`, error);
+      }
     }
   });
 
-  return relationships;
+  const dedupe = new Set<string>();
+  return relationships.filter((rel) => {
+    const key = `${rel.from}|${rel.to}|${rel.type}`;
+    if (dedupe.has(key)) return false;
+    dedupe.add(key);
+    return true;
+  });
 }
 
 /**
  * Sanitize namespace name for Mermaid (avoid reserved keywords)
  */
 function sanitizeNamespaceId(namespace: string): string {
-  // Mermaid reserved keywords that cannot be used as subgraph IDs
-  const reservedKeywords = new Set([
-    'default', 'graph', 'TB', 'TD', 'BT', 'RL', 'LR', 'end', 'subgraph',
-    'classDef', 'class', 'style', 'linkStyle', 'click'
-  ]);
-  
   // Replace non-alphanumeric with underscore
   let sanitized = namespace.replace(/[^a-zA-Z0-9]/g, '_');
-  
-  // If it's a reserved keyword, prefix with 'ns_'
-  if (reservedKeywords.has(sanitized.toLowerCase())) {
-    sanitized = 'ns_' + sanitized;
-  }
-  
+
   // Ensure it doesn't start with a number
   if (/^\d/.test(sanitized)) {
     sanitized = 'ns_' + sanitized;
   }
-  
+
+  // Prefix any ID that starts with a Mermaid v10+ reserved keyword (case-insensitive).
+  // Exact match AND prefix match — e.g. "namespace-system" → "namespace_system" → still matches.
+  const lower = sanitized.toLowerCase();
+  if (MERMAID_RESERVED_NODE_PREFIXES.some(kw => lower.startsWith(kw.toLowerCase()))) {
+    sanitized = 'ns_' + sanitized;
+  }
+
   return sanitized;
 }
+
+// Mermaid v10+ reserved keywords — cannot appear at the START of any node ID (case-insensitive)
+const MERMAID_RESERVED_NODE_PREFIXES = [
+  'namespace', 'graph', 'subgraph', 'end', 'class', 'classDef',
+  'style', 'linkStyle', 'click', 'default',
+];
 
 /**
  * Sanitize node ID for Mermaid (ensure valid identifier)
@@ -198,35 +461,67 @@ function sanitizeNodeId(id: string): string {
   if (!id || typeof id !== 'string') {
     return 'node';
   }
-  
+
   // Remove newlines, carriage returns, and other whitespace characters
   let sanitized = id.replace(/[\n\r\t\s]/g, '_');
-  
+
   // Replace all non-alphanumeric with underscore
   sanitized = sanitized.replace(/[^a-zA-Z0-9_]/g, '_');
-  
+
   // Remove leading/trailing underscores
   sanitized = sanitized.replace(/^_+|_+$/g, '');
-  
+
   // Replace multiple consecutive underscores with single underscore
   sanitized = sanitized.replace(/_+/g, '_');
-  
+
   // Ensure it doesn't start with a number
   if (/^\d/.test(sanitized)) {
     sanitized = 'node_' + sanitized;
   }
-  
+
   // Ensure it's not empty
   if (!sanitized || sanitized.length === 0) {
     sanitized = 'node';
   }
-  
+
+  // Prefix any ID that starts with a Mermaid v10+ reserved keyword (case-insensitive).
+  // e.g. "Namespace_prod" → "k8s_Namespace_prod" to avoid the tokenizer treating
+  // "namespace" as a grammar keyword and failing to parse the class/node statement.
+  const lower = sanitized.toLowerCase();
+  if (MERMAID_RESERVED_NODE_PREFIXES.some(kw => lower.startsWith(kw.toLowerCase()))) {
+    sanitized = 'k8s_' + sanitized;
+  }
+
   // Limit length to avoid issues
   if (sanitized.length > 50) {
     sanitized = sanitized.substring(0, 50);
   }
-  
+
   return sanitized;
+}
+
+/**
+ * Map a Kubernetes kind (lowercase) to a Mermaid classDef name
+ */
+function getStyleClass(kindLower: string): string {
+  if (kindLower === 'deployment') return 'deployment';
+  if (kindLower === 'statefulset') return 'statefulset';
+  if (kindLower === 'daemonset') return 'daemonset';
+  if (kindLower === 'job') return 'job';
+  if (kindLower === 'cronjob') return 'cronjob';
+  if (kindLower === 'service') return 'service';
+  if (kindLower === 'ingress') return 'ingress';
+  if (kindLower === 'pod') return 'pod';
+  if (kindLower === 'configmap') return 'configmap';
+  if (kindLower === 'secret') return 'secret';
+  if (kindLower === 'horizontalpodautoscaler') return 'hpa';
+  if (kindLower === 'persistentvolumeclaim') return 'pvc';
+  if (kindLower === 'persistentvolume') return 'pv';
+  if (kindLower === 'namespace') return 'nsresource';
+  if (kindLower === 'serviceaccount') return 'serviceaccount';
+  if (kindLower === 'networkpolicy') return 'networkpolicy';
+  if (kindLower === 'storageclass') return 'storageclass';
+  return '';
 }
 
 /**
@@ -318,6 +613,17 @@ function generateMermaidSyntax(
   syntax += `    classDef configmap fill:#9B59B6,stroke:#6C3483,stroke-width:2px,color:#fff\n`;
   syntax += `    classDef secret fill:#E74C3C,stroke:#A93226,stroke-width:2px,color:#fff\n`;
   syntax += `    classDef ingress fill:#3498DB,stroke:#21618C,stroke-width:2px,color:#fff\n`;
+  syntax += `    classDef statefulset fill:#8b5cf6,stroke:#7c3aed,stroke-width:2px,color:#fff\n`;
+  syntax += `    classDef daemonset fill:#f59e0b,stroke:#d97706,stroke-width:2px,color:#fff\n`;
+  syntax += `    classDef job fill:#14b8a6,stroke:#0d9488,stroke-width:2px,color:#fff\n`;
+  syntax += `    classDef cronjob fill:#06b6d4,stroke:#0891b2,stroke-width:2px,color:#fff\n`;
+  syntax += `    classDef hpa fill:#f43f5e,stroke:#e11d48,stroke-width:2px,color:#fff\n`;
+  syntax += `    classDef pvc fill:#a78bfa,stroke:#7c3aed,stroke-width:2px,color:#fff\n`;
+  syntax += `    classDef pv fill:#c4b5fd,stroke:#7c3aed,stroke-width:2px,color:#333\n`;
+  syntax += `    classDef nsresource fill:#d1fae5,stroke:#6ee7b7,stroke-width:2px,color:#333\n`;
+  syntax += `    classDef serviceaccount fill:#fde68a,stroke:#f59e0b,stroke-width:2px,color:#333\n`;
+  syntax += `    classDef networkpolicy fill:#fca5a5,stroke:#ef4444,stroke-width:2px,color:#333\n`;
+  syntax += `    classDef storageclass fill:#e5e7eb,stroke:#9ca3af,stroke-width:2px,color:#333\n`;
 
   // Apply styles (only to nodes that exist)
   const styledNodes = new Set<string>();
@@ -326,19 +632,7 @@ function generateMermaidSyntax(
     const kindLower = r.kind.toLowerCase();
     let styleClass = '';
     
-    if (kindLower.includes('deployment')) {
-      styleClass = 'deployment';
-    } else if (kindLower.includes('service')) {
-      styleClass = 'service';
-    } else if (kindLower.includes('pod')) {
-      styleClass = 'pod';
-    } else if (kindLower.includes('configmap')) {
-      styleClass = 'configmap';
-    } else if (kindLower.includes('secret')) {
-      styleClass = 'secret';
-    } else if (kindLower.includes('ingress')) {
-      styleClass = 'ingress';
-    }
+    styleClass = getStyleClass(kindLower);
     
     if (styleClass && !styledNodes.has(nodeId) && existingNodeIds.has(nodeId)) {
       // Ensure nodeId is sanitized and doesn't contain newlines or special characters
@@ -356,15 +650,8 @@ function generateMermaidSyntax(
     
     // Only style if not already styled and node exists
     if (!styledNodes.has(toId) && existingNodeIds.has(toId)) {
-      let styleClass = '';
-      if (kindLower.includes('pod')) {
-        styleClass = 'pod';
-      } else if (kindLower.includes('deployment')) {
-        styleClass = 'deployment';
-      } else if (kindLower.includes('service')) {
-        styleClass = 'service';
-      }
-      
+      const styleClass = getStyleClass(kindLower);
+
       if (styleClass) {
         // Ensure toId is sanitized and doesn't contain newlines or special characters
         const safeToId = sanitizeNodeId(toId);
@@ -496,7 +783,7 @@ Make it clearer and more visually appealing while keeping all resources and rela
 
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1',
+      model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }

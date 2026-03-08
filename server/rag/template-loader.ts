@@ -65,23 +65,16 @@ export async function loadTemplatesFromDirectory(
 
   // Recursively find all YAML files
   const yamlFiles = await findYamlFiles(basePath);
-  console.log(`📁 Found ${yamlFiles.length} remediation template file(s)`);
-
   for (const filePath of yamlFiles) {
     try {
       const fileContent = await fs.readFile(filePath, 'utf-8');
       const template = yaml.load(fileContent) as RemediationTemplate;
 
-      // Validate required fields
-      if (!template.check_id || !template.remediation_snippet) {
-        console.warn(`⚠️  Skipping invalid template: ${filePath}`);
-        continue;
-      }
+      if (!template.check_id || !template.remediation_snippet) continue;
 
       templates.push(template);
-      console.log(`   ✅ Loaded: ${template.check_id} (${path.basename(filePath)})`);
-    } catch (error: any) {
-      console.error(`❌ Failed to load template ${filePath}:`, error.message);
+    } catch {
+      // invalid template — skip silently
     }
   }
 

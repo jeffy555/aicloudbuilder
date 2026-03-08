@@ -169,8 +169,8 @@ export async function calculateResourceCost(
     };
   }
 
-  // Calculate monthly cost
-  const monthlyCost = calculateMonthlyCost(terraformType, pricingItem, attributes);
+  // Calculate monthly cost (null means price_unavailable, treat as 0)
+  const monthlyCost = calculateMonthlyCost(terraformType, pricingItem, attributes) ?? 0;
   const yearlyCost = monthlyCost * 12;
 
   return { monthlyCost, yearlyCost, pricingDetails: pricingItem };

@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { writeFile, unlink, mkdtemp, rmdir } from 'fs/promises';
-import { join } from 'path';
+import { writeFile, mkdir, mkdtemp, rm } from 'fs/promises';
+import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 
 const execAsync = promisify(exec);
@@ -249,10 +249,7 @@ export async function runCheckovKubernetes(
 
     // Cleanup
     try {
-      for (const filePath of filePaths) {
-        await unlink(filePath);
-      }
-      await rmdir(tempDir);
+      await rm(tempDir, { recursive: true, force: true });
     } catch (cleanupError) {
       console.warn(`⚠️  Failed to cleanup temp directory: ${tempDir}`);
     }
@@ -279,3 +276,83 @@ export async function runCheckovKubernetes(
   }
 }
 
+/**
+ * Run Checkov on a Helm chart using --framework helm.
+ * Files must include Chart.yaml and templates/ — directory structure is preserved.
+ */
+export async function runCheckovHelm(
+  helmFiles: Array<{ path: string; content: string }>
+): Promise<CheckovResult> {
+  const tempDir = await mkdtemp(join(tmpdir(), 'checkov-helm-'));
+  try {
+    // Write all files preserving their paths (Chart.yaml, values.yaml, templates/deployment.yaml, etc.)
+    for (const file of helmFiles) {
+      const fullPath = join(tempDir, file.path);
+      // Ensure subdirectory exists (e.g., templates/)
+      await mkdir(dirname(fullPath), { recursive: true });
+      await writeFile(fullPath, file.content, 'utf-8');
+    }
+
+    console.log(`\n⛵ Running Checkov (helm framework) on ${helmFiles.length} file(s)`);
+
+    const isWindows = process.platform === 'win32';
+    const checkovArgs = ['-d', tempDir, '--framework', 'helm', '--output', 'json', '--compact', '--quiet'];
+
+    const commands: [string, string[]][] = isWindows
+      ? [
+          ['checkov', checkovArgs],
+          ['py', ['-m', 'uv', 'run', 'checkov', ...checkovArgs]],
+          ['py', ['-m', 'checkov', ...checkovArgs]],
+        ]
+      : [
+          ['checkov', checkovArgs],
+          ['python3', ['-m', 'uv', 'run', 'checkov', ...checkovArgs]],
+          ['python3', ['-m', 'checkov', ...checkovArgs]],
+        ];
+
+    let checkovOutput = '';
+    let commandWorked = false;
+
+    for (const [cmd, args] of commands) {
+      try {
+        const { stdout, stderr } = await execAsync(`${cmd} ${args.join(' ')}`, {
+          timeout: 180000,
+          cwd: tempDir,
+        });
+        checkovOutput = stdout || stderr;
+        commandWorked = true;
+        break;
+      } catch (error: any) {
+        if (error.stdout || error.stderr) {
+          checkovOutput = error.stdout || error.stderr;
+          commandWorked = true;
+          break;
+        }
+        continue;
+      }
+    }
+
+    if (!commandWorked) {
+      throw new Error('All Checkov commands failed for Helm framework');
+    }
+
+    const result = parseCheckovOutput(checkovOutput);
+    console.log(`✅ Checkov (helm) completed: ${result.summary}`);
+    return result;
+
+  } catch (error: any) {
+    console.error(`❌ Checkov Helm scan failed:`, error.message);
+    return {
+      success: false,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+      checks: [],
+      summary: 'Checkov Helm scan failed',
+    };
+  } finally {
+    try {
+      await rm(tempDir, { recursive: true, force: true });
+    } catch { /* ignore cleanup errors */ }
+  }
+}

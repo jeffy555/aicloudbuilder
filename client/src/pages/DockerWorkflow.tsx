@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Package, Home, RefreshCw, Loader2, Shield, FileText, CheckCircle2, GitBranch, Search, FileCode, FolderTree } from "lucide-react";
+import { Package, Home, RefreshCw, Loader2, Shield, FileText, CheckCircle2, GitBranch, Search, FileCode, FolderTree, Layers, Cpu, HardDrive } from "lucide-react";
 import type { Session, Message, Repository, GeneratedFile } from "@shared/schema";
 
 interface ExistingDockerfile {
@@ -77,6 +77,10 @@ export default function DockerWorkflow() {
   const [scanError, setScanError] = useState<string | null>(null);
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
   const [existingDockerfile, setExistingDockerfile] = useState<ExistingDockerfile | null>(null);
+  const [generateProgressMsg, setGenerateProgressMsg] = useState<string>('');
+  const [imageEstimates, setImageEstimates] = useState<Array<{ image: string; stage: string; compressedMB: number; uncompressedMB: number; isEstimated: boolean }> | null>(null);
+  const [isGeneratingCompose, setIsGeneratingCompose] = useState<boolean>(false);
+  const [composeServices, setComposeServices] = useState<string[]>([]);
 
   // Fetch secrets configuration status
   const { data: config } = useSecretsConfig();
@@ -199,29 +203,54 @@ export default function DockerWorkflow() {
     refetchOnMount: true,
   });
 
+  const GENERATE_PROGRESS_STEPS = [
+    'Sending repository data to AI...',
+    'Analysing languages and frameworks...',
+    'Selecting base image and build strategy...',
+    'Writing Dockerfile instructions...',
+    'Adding security best practices...',
+    'Generating .dockerignore...',
+    'Finalising artifacts...',
+  ];
+
   // Generate Dockerfile mutation
   const generateDockerfileMutation = useMutation({
     mutationFn: async (payload: { description: string; existingDockerfile?: ExistingDockerfile | null }) => {
-      const res = await apiRequest('POST', `/api/sessions/${sessionId}/generate-dockerfile`, {
-        requirements: payload.description,
-        existingDockerfile: payload.existingDockerfile,
-      });
-      return res.json();
+      // Cycle progress messages while the API call runs
+      let stepIdx = 0;
+      setGenerateProgressMsg(GENERATE_PROGRESS_STEPS[0]);
+      const interval = setInterval(() => {
+        stepIdx = (stepIdx + 1) % GENERATE_PROGRESS_STEPS.length;
+        setGenerateProgressMsg(GENERATE_PROGRESS_STEPS[stepIdx]);
+      }, 3000);
+
+      try {
+        const res = await apiRequest('POST', `/api/sessions/${sessionId}/generate-dockerfile`, {
+          requirements: payload.description,
+          existingDockerfile: payload.existingDockerfile,
+        });
+        return res.json();
+      } finally {
+        clearInterval(interval);
+        setGenerateProgressMsg('');
+      }
     },
-    onSuccess: async (data) => {
+    onSuccess: async () => {
       setIsGenerating(false);
-      setCurrentStep(4); // Move to review step
-      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
-        currentStep: '4'
-      });
+      setCurrentStep(4);
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '4' });
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-      toast({
-        title: "Success",
-        description: "Dockerfile generated successfully!",
-      });
+      // Auto-fetch image size estimate
+      try {
+        const estRes = await apiRequest('POST', `/api/sessions/${sessionId}/image-size-estimate`, {});
+        const estData = await estRes.json();
+        if (estData.estimates) setImageEstimates(estData.estimates);
+      } catch { /* non-critical */ }
+      toast({ title: "Success", description: "Dockerfile generated successfully!" });
     },
     onError: (error: any) => {
       setIsGenerating(false);
+      setGenerateProgressMsg('');
       toast({
         title: "Generation Failed",
         description: error?.message || "Failed to generate Dockerfile. Please try again.",
@@ -252,6 +281,31 @@ export default function DockerWorkflow() {
         variant: "destructive"
       });
     }
+  });
+
+  // Generate Docker Compose mutation
+  const generateComposeMutation = useMutation({
+    mutationFn: async () => {
+      setIsGeneratingCompose(true);
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/generate-compose`, {
+        scanData: repoScanData ? {
+          languages: repoScanData.languages,
+          frameworks: repoScanData.frameworks,
+          entrypoint: repoScanData.entrypoint,
+        } : undefined,
+      });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setIsGeneratingCompose(false);
+      if (data.services) setComposeServices(data.services);
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+      toast({ title: "docker-compose.yml generated", description: `Services: ${(data.services || []).join(', ')}` });
+    },
+    onError: (error: any) => {
+      setIsGeneratingCompose(false);
+      toast({ title: "Compose generation failed", description: error?.message || "Please try again.", variant: "destructive" });
+    },
   });
 
   const handleProviderSelect = async (selectedProvider: Provider) => {
@@ -287,7 +341,7 @@ export default function DockerWorkflow() {
           : availableBranches[0] || "main";
 
       setDefaultBranchName(defaultBranch);
-      setSelectedBranch(null);
+      // Keep selectedBranch if already set; caller (handleRepoSelect) sets it via handleBranchChange
 
       try {
         await apiRequest("PATCH", `/api/sessions/${sessionId}`, {
@@ -502,7 +556,7 @@ export default function DockerWorkflow() {
     return `${base} Create a new Dockerfile based on the repository scan.`;
   };
 
-  const handleCreateRepo = async ({ name, description }: { name: string; description: string }) => {
+  const handleCreateRepo = async (name: string, description: string) => {
     try {
       await createRepoMutation.mutateAsync({ name, description });
       setSelectedRepo(name);
@@ -1153,14 +1207,31 @@ export default function DockerWorkflow() {
             </div>
           )}
 
-          {/* Step 3: Generate (shows loading) */}
+          {/* Step 3: Generate (shows loading with progress) */}
           {currentStep === 3 && (
-            <Card className="rounded-3xl border-dashed border-border/40 bg-white/80 p-6 text-center shadow-lg">
-              <div className="flex flex-col items-center gap-3">
-                <Loader2 className="w-6 h-6 animate-spin text-primary" />
+            <Card className="rounded-3xl border-dashed border-border/40 bg-white/80 p-8 text-center shadow-lg">
+              <div className="flex flex-col items-center gap-4">
+                <Loader2 className="w-8 h-8 animate-spin text-primary" />
                 <p className="text-lg font-semibold text-slate-900">Generating Dockerfile...</p>
-                <p className="text-sm text-muted-foreground">
-                  The AI is building the optimized Dockerfile, .dockerignore, and supporting recommendations. This usually completes in a few seconds.
+                {generateProgressMsg && (
+                  <p className="text-sm text-primary font-medium transition-all duration-500">{generateProgressMsg}</p>
+                )}
+                {/* Segmented progress bar */}
+                <div className="flex gap-1.5 mt-1">
+                  {GENERATE_PROGRESS_STEPS.map((step, i) => {
+                    const currentIdx = GENERATE_PROGRESS_STEPS.indexOf(generateProgressMsg);
+                    const done = currentIdx > i;
+                    const active = currentIdx === i;
+                    return (
+                      <div
+                        key={step}
+                        className={`h-1.5 w-8 rounded-full transition-colors duration-300 ${done ? 'bg-primary' : active ? 'bg-primary/50' : 'bg-muted'}`}
+                      />
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  This usually takes 10–20 seconds
                 </p>
               </div>
             </Card>
@@ -1223,6 +1294,81 @@ export default function DockerWorkflow() {
                 )}
               </Card>
 
+              {/* Image size estimate card */}
+              {imageEstimates && imageEstimates.length > 0 && (
+                <div className="rounded-2xl border border-border/50 bg-white p-4 shadow-sm space-y-3">
+                  <div className="flex items-center gap-2">
+                    <HardDrive className="w-4 h-4 text-primary" />
+                    <p className="text-sm font-semibold text-slate-900">Estimated Image Size</p>
+                    <span className="text-xs text-muted-foreground">(final stage)</span>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {imageEstimates.map((est) => (
+                      <div key={est.image} className="rounded-xl border border-border/30 bg-slate-50 p-3 text-xs space-y-1">
+                        <p className="font-mono font-semibold text-slate-800 truncate">{est.image}</p>
+                        <div className="flex gap-4 text-muted-foreground">
+                          <span><Cpu className="w-3 h-3 inline mr-1" />Pulled: <strong className="text-slate-700">{est.compressedMB} MB</strong></span>
+                          <span>On-disk: <strong className="text-slate-700">{est.uncompressedMB} MB</strong></span>
+                        </div>
+                        {est.isEstimated && <p className="text-amber-600">Estimated (image not in lookup table)</p>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ENV variables summary card */}
+              {(() => {
+                const envLines = generatedFiles
+                  .flatMap(f => f.fileName.toLowerCase().includes('dockerfile') ? f.content.split('\n') : [])
+                  .filter(l => l.trim().toUpperCase().startsWith('ENV'))
+                  .map(l => l.trim().replace(/^ENV\s+/i, ''))
+                  .filter(Boolean);
+                return envLines.length > 0 ? (
+                  <div className="rounded-2xl border border-border/50 bg-white p-4 shadow-sm space-y-2">
+                    <p className="text-sm font-semibold text-slate-900">Environment Variables</p>
+                    <div className="grid gap-1">
+                      {envLines.map((env, i) => (
+                        <p key={i} className="font-mono text-xs bg-slate-50 rounded px-2 py-1 text-slate-700">{env}</p>
+                      ))}
+                    </div>
+                  </div>
+                ) : null;
+              })()}
+
+              {/* Docker Compose section */}
+              <div className="rounded-2xl border border-border/50 bg-white p-4 shadow-sm space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Layers className="w-4 h-4 text-primary" />
+                    <p className="text-sm font-semibold text-slate-900">Docker Compose</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => generateComposeMutation.mutate()}
+                    disabled={isGeneratingCompose || generatedFiles.length === 0}
+                  >
+                    {isGeneratingCompose ? (
+                      <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Generating...</>
+                    ) : composeServices.length > 0 ? (
+                      <>Regenerate Compose</>
+                    ) : (
+                      <>Generate docker-compose.yml</>
+                    )}
+                  </Button>
+                </div>
+                {composeServices.length > 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Compose generated with services: <span className="font-semibold text-slate-700">{composeServices.join(', ')}</span>. It appears in the editor above.
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Auto-generate a docker-compose.yml with app and supporting services (database, cache) based on the scan.
+                  </p>
+                )}
+              </div>
+
               <div className="flex flex-wrap gap-4 justify-center">
                 <Button
                   variant="outline"
@@ -1233,7 +1379,7 @@ export default function DockerWorkflow() {
                 <Button
                   onClick={() => {
                     setCurrentStep(5);
-                    apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
+                    apiRequest('PATCH', `/api/sessions/${sessionId}`, {
                       currentStep: '5'
                     });
                   }}

@@ -103,7 +103,7 @@ class EmbeddingCache {
           this.cache.set(item.hash, item);
         }
 
-        console.log(`📦 Loaded ${this.cache.size} cached embedding(s) from disk`);
+        // loaded — stats available via getStats()
       } catch (error: any) {
         // File doesn't exist yet, that's okay
         if (error.code !== 'ENOENT') {

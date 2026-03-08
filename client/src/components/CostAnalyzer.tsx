@@ -24,10 +24,37 @@ import {
   RefreshCw,
   Info,
   Pencil,
+  TrendingDown,
+  ArrowRight,
+  ShieldAlert,
+  ShieldCheck,
+  ShieldX,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { CostAnalysisResult, CostResource, UsageProfile, UsageDimensionInfo } from "@shared/schema";
+
+interface RightsizingRecommendation {
+  address: string;
+  resourceType: string;
+  resourceName: string;
+  attribute: string;
+  currentValue: string;
+  suggestedValue: string;
+  currentLabel: string;
+  suggestedLabel: string;
+  estimatedSavingPercent: number;
+  estimatedMonthlySaving?: number;
+  rationale: string;
+  risk: 'low' | 'medium' | 'high';
+}
+
+interface RightsizingResult {
+  recommendations: RightsizingRecommendation[];
+  totalRecommendations: number;
+  totalEstimatedMonthlySaving: number;
+  resourcesAnalysed: number;
+}
 
 interface CostAnalyzerProps {
   sessionId: string;
@@ -66,7 +93,46 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
   const [customUsage, setCustomUsage] = useState<Record<string, Record<string, number>>>({});
   const [editingResource, setEditingResource] = useState<CostResource | null>(null);
   const [editValues, setEditValues] = useState<Record<string, string>>({});
+  const [rightsizingResult, setRightsizingResult] = useState<RightsizingResult | null>(null);
+  const [isRightsizing, setIsRightsizing] = useState(false);
   const { toast } = useToast();
+
+  const checkRightsizing = async () => {
+    setIsRightsizing(true);
+    try {
+      // Build an address → monthlyCost map from the current cost result so the
+      // backend can attach dollar-saving estimates to each recommendation.
+      const costsByAddress: Record<string, number> = {};
+      for (const r of costResult?.resources ?? []) {
+        costsByAddress[`${r.resourceType}.${r.resourceName}`] = r.monthlyCost ?? 0;
+      }
+      const response = await apiRequest(
+        'POST',
+        `/api/sessions/${sessionId}/rightsizing-recommendations`,
+        { costsByAddress },
+      );
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.details || err.error || 'Rightsizing analysis failed');
+      }
+      const data: RightsizingResult = await response.json();
+      setRightsizingResult(data);
+      if (data.totalRecommendations === 0) {
+        toast({ title: 'No rightsizing opportunities found', description: `${data.resourcesAnalysed} resource(s) analysed — all SKUs look appropriately sized.` });
+      } else {
+        toast({
+          title: `${data.totalRecommendations} rightsizing suggestion(s)`,
+          description: data.totalEstimatedMonthlySaving > 0
+            ? `Potential saving: $${data.totalEstimatedMonthlySaving.toFixed(2)}/month`
+            : `${data.resourcesAnalysed} resource(s) analysed`,
+        });
+      }
+    } catch (err: any) {
+      toast({ title: 'Rightsizing failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setIsRightsizing(false);
+    }
+  };
 
   const analyzeCost = useCallback(async (
     selectedProfile?: UsageProfile,
@@ -437,6 +503,143 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
                 </Alert>
               )}
 
+              {/* ── Rightsizing Recommendations ────────────────────────── */}
+              <div className="rounded-lg border border-dashed p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <TrendingDown className="w-4 h-4 text-emerald-600" />
+                    <span className="text-sm font-semibold">Rightsizing Recommendations</span>
+                    {rightsizingResult && (
+                      <Badge variant="secondary" className="text-xs">
+                        {rightsizingResult.totalRecommendations} found
+                      </Badge>
+                    )}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={checkRightsizing}
+                    disabled={isRightsizing}
+                    className="text-xs h-7"
+                  >
+                    {isRightsizing
+                      ? <><RefreshCw className="w-3 h-3 mr-1.5 animate-spin" />Analysing...</>
+                      : rightsizingResult
+                        ? <><RefreshCw className="w-3 h-3 mr-1.5" />Re-analyse</>
+                        : 'Analyse Rightsizing'
+                    }
+                  </Button>
+                </div>
+
+                {!rightsizingResult && !isRightsizing && (
+                  <p className="text-xs text-muted-foreground">
+                    Scans your Terraform files for over-provisioned SKUs and suggests cheaper alternatives with estimated savings.
+                  </p>
+                )}
+
+                {rightsizingResult && rightsizingResult.totalRecommendations === 0 && (
+                  <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400">
+                    <CheckCircle2 className="w-4 h-4" />
+                    All {rightsizingResult.resourcesAnalysed} resource(s) look appropriately sized — no suggestions.
+                  </div>
+                )}
+
+                {rightsizingResult && rightsizingResult.totalRecommendations > 0 && (
+                  <div className="space-y-3">
+                    {/* Summary banner */}
+                    {rightsizingResult.totalEstimatedMonthlySaving > 0 && (
+                      <div className="rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 p-3 flex items-center gap-3">
+                        <TrendingDown className="w-5 h-5 text-emerald-600 shrink-0" />
+                        <div>
+                          <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">
+                            Potential saving: ${rightsizingResult.totalEstimatedMonthlySaving.toFixed(2)}/month
+                            &nbsp;·&nbsp; ${(rightsizingResult.totalEstimatedMonthlySaving * 12).toFixed(0)}/year
+                          </p>
+                          <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                            {rightsizingResult.totalRecommendations} suggestion(s) across {rightsizingResult.resourcesAnalysed} resource(s) analysed
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Recommendations table */}
+                    <div className="border rounded-lg overflow-hidden">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Resource</TableHead>
+                            <TableHead>Current SKU</TableHead>
+                            <TableHead>Suggested SKU</TableHead>
+                            <TableHead className="text-right">Save</TableHead>
+                            <TableHead>Risk</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {rightsizingResult.recommendations.map((rec, i) => (
+                            <TableRow key={i}>
+                              <TableCell>
+                                <div>
+                                  <p className="font-medium text-sm">{rec.resourceName}</p>
+                                  <p className="text-xs text-muted-foreground font-mono">{rec.resourceType}</p>
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <p className="text-sm font-mono">{rec.currentValue}</p>
+                                <p className="text-xs text-muted-foreground">{rec.currentLabel}</p>
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex items-center gap-1">
+                                  <ArrowRight className="w-3 h-3 text-muted-foreground shrink-0" />
+                                  <div>
+                                    <p className="text-sm font-mono text-emerald-700 dark:text-emerald-400">{rec.suggestedValue}</p>
+                                    <p className="text-xs text-muted-foreground">{rec.suggestedLabel}</p>
+                                  </div>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <p className="text-sm font-semibold text-emerald-600">~{rec.estimatedSavingPercent}%</p>
+                                {rec.estimatedMonthlySaving !== undefined && (
+                                  <p className="text-xs text-muted-foreground">${rec.estimatedMonthlySaving.toFixed(2)}/mo</p>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Badge
+                                        className={`text-xs cursor-help gap-1 ${
+                                          rec.risk === 'low'
+                                            ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                                            : rec.risk === 'medium'
+                                              ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
+                                              : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
+                                        }`}
+                                      >
+                                        {rec.risk === 'low'
+                                          ? <ShieldCheck className="w-3 h-3" />
+                                          : rec.risk === 'medium'
+                                            ? <ShieldAlert className="w-3 h-3" />
+                                            : <ShieldX className="w-3 h-3" />
+                                        }
+                                        {rec.risk}
+                                      </Badge>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-xs">
+                                      <p className="text-xs">{rec.rationale}</p>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
+                )}
+              </div>
+              {/* ── end Rightsizing ───────────────────────────────────────── */}
+
               {/* Skipped resources warning */}
               {costResult.skippedResources && costResult.skippedResources.length > 0 && (
                 <Alert variant="destructive">
@@ -459,7 +662,7 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
               <AlertCircle className="w-4 h-4" />
               <AlertTitle>No Resources Found</AlertTitle>
               <AlertDescription>
-                No Azure resources were detected in the Terraform files. Make sure your files contain valid Azure resource definitions.
+                No cloud resources were detected in the Terraform files. Make sure your files contain valid resource definitions (e.g., azurerm_*, aws_*, google_*).
               </AlertDescription>
             </Alert>
           )}

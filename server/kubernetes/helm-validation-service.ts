@@ -2,6 +2,7 @@ import { lintHelmChart, renderHelmChart } from './helm-validator';
 import { validateKubernetesYAML } from './kubeval-validator';
 import { runCheckovKubernetes } from './checkov-validator';
 import { analyzeKubernetesBestPractices } from './best-practices-analyzer';
+import { deepAnalyzeHelmChart, type DeepAnalysisResult } from './helm-deep-analyzer';
 
 export interface ValidationIssue {
   severity: 'error' | 'warning' | 'info';
@@ -37,6 +38,7 @@ export interface ValidationResult {
     suggestion: string;
     priority: 'high' | 'medium' | 'low';
   }>;
+  deepAnalysis?: DeepAnalysisResult;
   summary: {
     totalIssues: number;
     errors: number;
@@ -50,6 +52,8 @@ export interface ValidationOptions {
   runKubeval?: boolean;
   runCheckov?: boolean;
   runBestPractices?: boolean;
+  runDeepAnalysis?: boolean;
+  helmFiles?: Array<{ path: string; content: string }>; // raw source files for deep analysis
 }
 
 /**
@@ -64,6 +68,8 @@ export async function validateHelmChart(
     runKubeval = true,
     runCheckov = true,
     runBestPractices = true,
+    runDeepAnalysis = true,
+    helmFiles = [],
   } = options;
 
   console.log('\n🔍 ========== HELM CHART VALIDATION ==========');
@@ -107,10 +113,11 @@ export async function validateHelmChart(
       });
     }
 
-    // 2. Render chart and validate with Kubeval and Checkov
-    if (runKubeval || runCheckov || runBestPractices) {
+    // 2. Render chart and validate with Kubeval, Checkov, and Deep Analysis
+    let renderedTemplates: string[] = [];
+    if (runKubeval || runCheckov || runBestPractices || runDeepAnalysis) {
       console.log('\n📦 Rendering Helm chart templates...');
-      const renderedTemplates = await renderHelmChart(chartPath);
+      renderedTemplates = await renderHelmChart(chartPath).catch(() => []);
 
       // 3. Kubeval
       if (runKubeval && renderedTemplates.length > 0) {
@@ -165,11 +172,11 @@ export async function validateHelmChart(
         });
       }
 
-      // 5. Best Practices (AI)
-      if (runBestPractices && renderedTemplates.length > 0) {
+      // 5. Best Practices (AI) — only run when deep analysis is disabled
+      if (runBestPractices && !runDeepAnalysis && renderedTemplates.length > 0) {
         console.log('\n🤖 Running AI best practices analysis...');
         const bestPracticesResult = await analyzeKubernetesBestPractices(renderedTemplates);
-        
+
         bestPracticesResult.issues.forEach(issue => {
           issues.push({
             severity: issue.priority === 'high' ? 'error' : issue.priority === 'medium' ? 'warning' : 'info',
@@ -180,6 +187,30 @@ export async function validateHelmChart(
             source: 'best-practices',
           });
         });
+      }
+    }
+
+    // 6. Deep Analysis — multi-pass specialist AI scoring
+    let deepAnalysis: DeepAnalysisResult | undefined;
+    if (runDeepAnalysis) {
+      console.log('\n🔬 Running deep multi-pass analysis...');
+      try {
+        deepAnalysis = await deepAnalyzeHelmChart(helmFiles, renderedTemplates);
+
+        // Surface critical/high deep issues into the main issues list too
+        deepAnalysis.issues
+          .filter(i => i.severity === 'critical' || i.severity === 'high')
+          .forEach(i => {
+            issues.push({
+              severity: i.severity === 'critical' ? 'error' : 'warning',
+              message: `[${i.category.toUpperCase()}] ${i.title}: ${i.description}`,
+              file: i.file || 'helm-chart',
+              suggestion: i.fixSnippet,
+              source: 'best-practices',
+            });
+          });
+      } catch (deepErr: any) {
+        console.warn(`   ⚠️  Deep analysis failed (non-fatal): ${deepErr.message}`);
       }
     }
 
@@ -200,6 +231,7 @@ export async function validateHelmChart(
           suggestion: i.suggestion || '',
           priority: i.severity === 'error' ? 'high' : i.severity === 'warning' ? 'medium' : 'low',
         })),
+      deepAnalysis,
       summary: {
         totalIssues: issues.length,
         errors,

@@ -4,6 +4,16 @@
  */
 
 import type { UsageMetrics } from '@shared/schema';
+import {
+  METRICS_DEFAULT_TIMESPAN,
+  METRICS_DEFAULT_INTERVAL,
+  METRICS_ANALYSIS_PERIOD_MS,
+  METRICS_BATCH_SIZE,
+  METRICS_BATCH_DELAY_MS,
+  VM_ASSUMED_MAX_MEMORY_GB,
+  APP_SERVICE_ASSUMED_MAX_MEMORY_GB,
+  BYTES_PER_GB,
+} from '../config/constants.js';
 
 // Metric definitions by Azure resource type
 const METRIC_DEFINITIONS: Record<string, string[]> = {
@@ -63,7 +73,7 @@ export async function fetchResourceMetrics(
   resourceId: string,
   resourceType: string,
   accessToken: string,
-  timespan: string = 'PT168H'
+  timespan: string = METRICS_DEFAULT_TIMESPAN
 ): Promise<UsageMetrics | null> {
 
   const metricNames = METRIC_DEFINITIONS[resourceType];
@@ -76,7 +86,7 @@ export async function fetchResourceMetrics(
   const params = new URLSearchParams({
     'api-version': '2023-10-01',
     'timespan': timespan,
-    'interval': 'PT1H', // 1-hour granularity
+    'interval': METRICS_DEFAULT_INTERVAL,
     'metricnames': metricNames.join(','),
     'aggregation': 'Average,Maximum'
   });
@@ -100,9 +110,9 @@ export async function fetchResourceMetrics(
     // Calculate statistics for recommendation engine
     const statistics = calculateMetricStatistics(data.value || [], resourceType);
 
-    // Calculate timespan
+    // Calculate timespan from the configured analysis period
     const now = new Date();
-    const startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); // 7 days ago
+    const startTime = new Date(now.getTime() - METRICS_ANALYSIS_PERIOD_MS);
 
     return {
       resourceId,
@@ -145,17 +155,19 @@ function calculateMetricStatistics(metrics: any[], resourceType: string): any {
       stats.avgCpuPercent = average(averages);
       stats.maxCpuPercent = maximums.length > 0 ? Math.max(...maximums) : stats.avgCpuPercent;
     } else if (metricName === 'Available Memory Bytes') {
-      // Convert to percentage (assume total memory based on available)
-      // If available memory is high, usage is low
+      // Convert available bytes → used percentage using the assumed VM max memory.
+      // If available memory is high, usage is low.
       const avgAvailable = average(averages);
-      // Conservative estimate: if avg available > 50% of assumed max, usage < 50%
-      stats.avgMemoryPercent = avgAvailable > 0 ? Math.min(100, 100 - (avgAvailable / (100 * 1024 * 1024 * 1024)) * 100) : 50;
+      const maxBytes = VM_ASSUMED_MAX_MEMORY_GB * BYTES_PER_GB;
+      stats.avgMemoryPercent = avgAvailable > 0
+        ? Math.min(100, 100 - (avgAvailable / maxBytes) * 100)
+        : 50;
     } else if (metricName === 'MemoryPercentage' || metricName === 'memory_percent') {
       stats.avgMemoryPercent = average(averages);
     } else if (metricName === 'MemoryWorkingSet') {
-      // Convert bytes to percentage (assume 2GB max for web apps)
+      // Convert working-set bytes → percentage using the assumed App Service max memory.
       const avgBytes = average(averages);
-      stats.avgMemoryPercent = (avgBytes / (2 * 1024 * 1024 * 1024)) * 100;
+      stats.avgMemoryPercent = (avgBytes / (APP_SERVICE_ASSUMED_MAX_MEMORY_GB * BYTES_PER_GB)) * 100;
     } else if (metricName === 'UsedCapacity') {
       stats.avgStorageUsedGB = average(averages) / (1024 * 1024 * 1024);
     } else if (metricName === 'dtu_consumption_percent') {
@@ -191,7 +203,7 @@ export async function fetchMetricsForResources(
   accessToken: string
 ): Promise<Map<string, UsageMetrics>> {
   const metricsMap = new Map<string, UsageMetrics>();
-  const batchSize = 5; // Avoid rate limiting (Azure Monitor allows ~60 req/min)
+  const batchSize = METRICS_BATCH_SIZE; // See config/constants.ts for rationale
 
   console.log(`\n📊 Fetching usage metrics for ${resources.length} resource(s)...`);
 
@@ -208,9 +220,9 @@ export async function fetchMetricsForResources(
 
     await Promise.all(batchPromises);
 
-    // Small delay between batches to avoid rate limiting
+    // Delay between batches to respect Azure Monitor rate limits
     if (i + batchSize < resources.length) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, METRICS_BATCH_DELAY_MS));
     }
   }
 

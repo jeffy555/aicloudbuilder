@@ -34,16 +34,9 @@ export class RemediationRAGService {
       return;
     }
 
-    console.log('🔍 Initializing Remediation RAG Service...');
-
     // Initialize embedding cache (load from disk)
     const { embeddingCache } = await import('./embedding-cache');
     await embeddingCache.loadFromDisk();
-    const cacheStats = embeddingCache.getStats();
-    if (cacheStats.total > 0) {
-      console.log(`💾 Embedding cache: ${cacheStats.total} cached embedding(s) loaded`);
-      console.log(`   Sources: ${JSON.stringify(cacheStats.bySource)}`);
-    }
 
     // Initialize vector store
     initializeVectorStore();
@@ -51,33 +44,27 @@ export class RemediationRAGService {
     // Load fix snippets from store
     await fixSnippetStore.loadFromDisk();
     const snippetStats = fixSnippetStore.getStats();
-    console.log(`📚 Loaded ${snippetStats.total} fix snippet(s)`);
-    console.log(`   Active: ${snippetStats.active}, Deprecated: ${snippetStats.deprecated}`);
-    console.log(`   By Source: ${JSON.stringify(snippetStats.bySource)}`);
 
-    // Phase 5: Conditional template loading — skip once verified fixes reach threshold
+    // Conditional template loading — skip once verified fixes reach threshold
     const deprecationThreshold = parseInt(process.env.TEMPLATE_DEPRECATION_THRESHOLD || '50', 10);
     const verifiedCount = fixSnippetStore.getVerifiedCount();
 
-    if (verifiedCount >= deprecationThreshold) {
-      console.log(`📚 Templates deprecated: ${verifiedCount} verified snippet(s) >= threshold (${deprecationThreshold}). Skipping template load.`);
-    } else {
+    if (verifiedCount < deprecationThreshold) {
       this.templates = await loadTemplatesFromDirectory();
-      if (this.templates.length > 0) {
-        console.log(`📚 Loaded ${this.templates.length} template(s) (${verifiedCount} verified snippets < threshold ${deprecationThreshold})`);
-      }
     }
 
-    // Index fix snippets in vector database
+    // Index fix snippets and templates in vector database
     await this.indexFixSnippets();
-
-    // Also index templates for backward compatibility
     if (this.templates.length > 0) {
       await this.indexTemplates();
     }
 
     this.initialized = true;
-    console.log('✅ Remediation RAG Service initialized');
+    const usingFallback = embeddingCache.getStats().bySource?.fallback > 0;
+    console.log(
+      `✅ RAG initialized — ${snippetStats.active} snippets, ${this.templates.length} templates` +
+      (usingFallback ? ' (fallback embeddings — add OpenAI credits for semantic search)' : '')
+    );
   }
 
   /**
@@ -85,43 +72,11 @@ export class RemediationRAGService {
    * Now uses caching to avoid redundant API calls
    */
   private async indexTemplates(): Promise<void> {
-    console.log('📇 Indexing templates in vector database...');
-
-    const { embeddingCache } = await import('./embedding-cache');
-    const initialCacheSize = embeddingCache.getStats().total;
-    
-    let indexed = 0;
-    let cachedCount = 0;
-    let newOpenaiCount = 0;
-    let fallbackCount = 0;
-    
     for (const template of this.templates) {
       try {
-        // Create embedding text from template
         const embeddingText = this.createEmbeddingText(template);
-
-        // Check if already cached before generating
-        const cacheKey = embeddingCache.generateHash(embeddingText, 'text-embedding-3-small');
-        const wasCached = await embeddingCache.get(cacheKey) !== null;
-        
-        if (wasCached) {
-          cachedCount++;
-        }
-
-        // Generate embedding (will use cache if available)
         const embedding = await generateEmbedding(embeddingText);
-        
-        // Check if we're using fallback (simple heuristic: check if embedding values are very small)
-        // Fallback embeddings have values around 0.1, OpenAI embeddings are typically larger
-        const isFallback = Math.max(...embedding.map(Math.abs)) < 0.5;
-        if (isFallback) {
-          fallbackCount++;
-        } else if (!wasCached) {
-          // New OpenAI embedding (not from cache)
-          newOpenaiCount++;
-        }
 
-        // Store in vector database
         await addToVectorStore({
           id: template.check_id,
           embedding,
@@ -134,40 +89,9 @@ export class RemediationRAGService {
             keywords: template.keywords,
           },
         });
-
-        indexed++;
       } catch (error: any) {
         console.error(`❌ Failed to index template ${template.check_id}:`, error.message);
       }
-    }
-
-    // Get final cache stats
-    const finalStats = embeddingCache.getStats();
-    const newCacheEntries = finalStats.total - initialCacheSize;
-
-    // Log results
-    if (cachedCount > 0) {
-      console.log(`✅ Indexed ${indexed}/${this.templates.length} template(s)`);
-      console.log(`   💾 Cache hits: ${cachedCount} (saved ${cachedCount} API calls!)`);
-      if (newOpenaiCount > 0) {
-        console.log(`   🆕 New OpenAI calls: ${newOpenaiCount}`);
-      }
-      if (newCacheEntries > 0) {
-        console.log(`   💾 Cached ${newCacheEntries} new embedding(s) for future use`);
-      }
-    } else {
-      console.log(`✅ Indexed ${indexed}/${this.templates.length} template(s)`);
-      if (newOpenaiCount > 0) {
-        console.log(`   🆕 Generated ${newOpenaiCount} new OpenAI embedding(s)`);
-      }
-      if (newCacheEntries > 0) {
-        console.log(`   💾 Cached ${newCacheEntries} embedding(s) for future use`);
-      }
-    }
-
-    if (fallbackCount > 0) {
-      console.log(`   ⚠️  ${fallbackCount} template(s) using fallback embeddings (OpenAI quota exceeded)`);
-      console.log('   💡 To use OpenAI embeddings: Add credits at https://platform.openai.com/account/billing');
     }
   }
 
@@ -450,43 +374,16 @@ export class RemediationRAGService {
     const snippets = await fixSnippetStore.getActive();
     
     if (snippets.length === 0) {
-      console.log('📇 No fix snippets to index');
       return;
     }
 
-    console.log(`📇 Indexing ${snippets.length} fix snippet(s) in vector database...`);
-
     const { embeddingCache } = await import('./embedding-cache');
-    let indexed = 0;
-    let cachedCount = 0;
-    let newOpenaiCount = 0;
-    let fallbackCount = 0;
 
     for (const snippet of snippets) {
       try {
-        // Create embedding text from snippet
         const embeddingText = this.createEmbeddingTextFromSnippet(snippet);
-
-        // Check if already cached
-        const cacheKey = embeddingCache.generateHash(embeddingText, 'text-embedding-3-small');
-        const wasCached = await embeddingCache.get(cacheKey) !== null;
-        
-        if (wasCached) {
-          cachedCount++;
-        }
-
-        // Generate embedding (will use cache if available)
         const embedding = await generateEmbedding(embeddingText);
-        
-        // Check if using fallback
-        const isFallback = Math.max(...embedding.map(Math.abs)) < 0.5;
-        if (isFallback) {
-          fallbackCount++;
-        } else if (!wasCached) {
-          newOpenaiCount++;
-        }
 
-        // Store in vector database
         await addToVectorStore({
           id: snippet.id,
           embedding,
@@ -500,22 +397,9 @@ export class RemediationRAGService {
             source: snippet.source,
           },
         });
-
-        indexed++;
       } catch (error: any) {
         console.error(`❌ Failed to index fix snippet ${snippet.id}:`, error.message);
       }
-    }
-
-    console.log(`✅ Indexed ${indexed}/${snippets.length} fix snippet(s)`);
-    if (cachedCount > 0) {
-      console.log(`   💾 Cache hits: ${cachedCount}`);
-    }
-    if (newOpenaiCount > 0) {
-      console.log(`   🆕 New OpenAI calls: ${newOpenaiCount}`);
-    }
-    if (fallbackCount > 0) {
-      console.log(`   ⚠️  ${fallbackCount} snippet(s) using fallback embeddings`);
     }
   }
 

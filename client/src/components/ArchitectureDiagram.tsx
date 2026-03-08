@@ -71,6 +71,19 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
   const [isViewerOpen, setIsViewerOpen] = useState(false);
   const [isDownloadingJpg, setIsDownloadingJpg] = useState(false);
 
+  const diagramTypeOptions: Array<{ value: DiagramType; label: string }> = [
+    { value: 'flowchart', label: 'Flowchart (Architecture)' },
+    { value: 'sequence', label: 'Sequence (Workflow)' },
+    { value: 'state', label: 'State (Lifecycle)' },
+    { value: 'pie', label: 'Pie Chart (Statistics)' },
+    { value: 'class', label: 'Class (Hierarchy)' },
+    { value: 'mindmap', label: 'Mindmap (Organization)' },
+    { value: 'gantt', label: 'Gantt (Timeline)' },
+    { value: 'erDiagram', label: 'ER Diagram (Entities)' },
+    { value: 'journey', label: 'Journey (Experience)' },
+    { value: 'gitGraph', label: 'Git Graph (Commits)' },
+  ];
+
   // Initialize Mermaid
   useEffect(() => {
     if (!mermaidInitialized.current) {
@@ -419,6 +432,42 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
         </Card>
       )}
 
+      {!isGenerating && !diagramResult && (
+        <Card className="p-4">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                Diagram Type:
+              </label>
+              <Select
+                value={diagramType}
+                onValueChange={(value) => setDiagramType(value as DiagramType)}
+              >
+                <SelectTrigger className="w-[220px]">
+                  <SelectValue placeholder="Select type" />
+                </SelectTrigger>
+                <SelectContent>
+                  {diagramTypeOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex gap-2 ml-auto">
+              <Button
+                variant="default"
+                size="sm"
+                onClick={generateDiagram}
+                disabled={isGenerating}
+              >
+                <Network className="w-4 h-4 mr-2" />
+                Generate Diagram
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {!isGenerating && diagramResult && (
         <div className="space-y-4">
           {/* Diagram Type Selector & Controls */}
@@ -439,16 +488,9 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
                     <SelectValue placeholder="Select type" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="flowchart">Flowchart (Architecture)</SelectItem>
-                    <SelectItem value="sequence">Sequence (Workflow)</SelectItem>
-                    <SelectItem value="state">State (Lifecycle)</SelectItem>
-                    <SelectItem value="pie">Pie Chart (Statistics)</SelectItem>
-                    <SelectItem value="class">Class (Hierarchy)</SelectItem>
-                    <SelectItem value="mindmap">Mindmap (Organization)</SelectItem>
-                    <SelectItem value="gantt">Gantt (Timeline)</SelectItem>
-                    <SelectItem value="erDiagram">ER Diagram (Entities)</SelectItem>
-                    <SelectItem value="journey">Journey (Experience)</SelectItem>
-                    <SelectItem value="gitGraph">Git Graph (Commits)</SelectItem>
+                    {diagramTypeOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -534,13 +576,16 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div>
                 <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                  {diagramResult.metadata.totalResources}
+                  {(diagramResult.metadata as any).totalResources
+                    || (diagramResult.metadata as any).totalComponents
+                    || diagramResult.resources?.length
+                    || 0}
                 </div>
                 <div className="text-xs text-gray-600 dark:text-gray-400">Resources</div>
               </div>
               <div>
                 <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                  {diagramResult.metadata.totalRelationships}
+                  {diagramResult.metadata.totalRelationships || diagramResult.relationships?.length || 0}
                 </div>
                 <div className="text-xs text-gray-600 dark:text-gray-400">Relationships</div>
               </div>
@@ -729,7 +774,7 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
           <AlertCircle className="w-4 h-4" />
           <AlertTitle>No Diagram Generated</AlertTitle>
           <AlertDescription>
-            Click the "Draw" button above to generate an architecture diagram from your Terraform code.
+            Select a diagram type and click "Generate Diagram" to build your architecture view.
           </AlertDescription>
         </Alert>
       )}

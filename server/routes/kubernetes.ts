@@ -3,17 +3,29 @@
  * Handles Kubernetes manifest generation, validation, scanning, and diagram generation
  */
 
-import type { Express } from "express";
+import type { Express, Response } from "express";
 import OpenAI from 'openai';
 import { storage } from "../storage";
 import { mcpClient, type MCPProvider } from "../mcp-client";
 import { openaiService } from "../openai-service";
+import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { resolveRepositoryCredentials } from "../utils/credentials";
 import { generateKubernetesManifests } from "../kubernetes/manifest-generator";
 import { validateHelmChart } from "../kubernetes/helm-validation-service";
 import { generateKubernetesDiagram } from "../kubernetes/diagram-generator";
-import { runCheckovKubernetes } from "../kubernetes/checkov-validator";
+import { runCheckovKubernetes, runCheckovHelm } from "../kubernetes/checkov-validator";
 import { analyzeKubernetesBestPractices } from "../kubernetes/best-practices-analyzer";
 import { validateKubernetesYAML } from "../kubernetes/kubeval-validator";
+import { buildKustomize } from "../kubernetes/kustomize-validator";
+import { scoreSecurityContexts } from "../kubernetes/security-scorer";
+import { checkPolicyHints } from "../kubernetes/policy-hints";
+import { createRequire } from "module";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+
+const _require = createRequire(import.meta.url);
+const formidable = _require("formidable");
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -23,6 +35,18 @@ const openai = new OpenAI({
  * Register Kubernetes-specific routes
  */
 export function registerKubernetesRoutes(app: Express) {
+  const ensureSessionOwnership = (
+    session: any,
+    req: AuthenticatedRequest,
+    res: Response
+  ): boolean => {
+    if (session?.userId && session.userId !== req.userId) {
+      res.status(403).json({ error: "Forbidden: session does not belong to the current user" });
+      return false;
+    }
+    return true;
+  };
+
   // Generate Kubernetes manifests
   app.post("/api/sessions/:id/generate-kubernetes-manifests", async (req, res) => {
     try {
@@ -210,28 +234,84 @@ export function registerKubernetesRoutes(app: Express) {
       console.log(`\n🔍 ========== KUBERNETES SECURITY SCAN ==========`);
       console.log(`Session ID: ${sessionId}`);
 
-      // Get Kubernetes YAML files from session storage
+      // Get all files from session storage
       const files = await storage.getFilesBySession(sessionId);
-      const yamlFiles = files.filter(f => 
-        f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml')
-      );
 
-      if (yamlFiles.length === 0) {
-        return res.status(400).json({ 
-          error: 'No Kubernetes files found',
-          details: 'No YAML files found in session storage'
+      if (files.length === 0) {
+        return res.status(400).json({
+          error: 'No files found',
+          details: 'No files found in session storage'
         });
       }
 
-      console.log(`📁 Found ${yamlFiles.length} Kubernetes file(s)`);
+      // Detect Helm chart: session has Chart.yaml or templates/ files
+      const isHelmChart = files.some(f =>
+        /^chart\.yaml$/i.test(f.fileName) ||
+        f.fileName.startsWith('templates/')
+      );
 
-      // Run Checkov
-      const yamlFilesForCheckov = yamlFiles.map(f => ({
-        path: f.fileName,
-        content: f.content
-      }));
+      let checkovResult;
 
-      const checkovResult = await runCheckovKubernetes(yamlFilesForCheckov);
+      if (isHelmChart) {
+        // ── Helm chart scan ────────────────────────────────────────────────
+        // Write chart files to a temp dir, render with `helm template`, then
+        // scan the rendered Kubernetes YAML with runCheckovKubernetes.
+        // This is more reliable than --framework helm which requires the helm plugin.
+        const { randomUUID } = await import('crypto');
+        const { renderHelmChart } = await import('../kubernetes/helm-validator');
+        const tempDir = path.join(os.tmpdir(), `helm-scan-${randomUUID()}`);
+        try {
+          for (const f of files) {
+            const fullPath = path.join(tempDir, f.fileName);
+            fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+            fs.writeFileSync(fullPath, f.content, 'utf-8');
+          }
+          console.log(`⛵ Helm chart detected — rendering ${files.length} file(s) then scanning with Checkov`);
+          const rendered = await renderHelmChart(tempDir).catch(() => [] as string[]);
+          if (rendered.length === 0) {
+            // Fall back to --framework helm if rendering fails (e.g. helm not installed)
+            console.warn('   helm template failed — falling back to --framework helm');
+            const helmFiles = files
+              .filter(f => f.fileName !== '.helmignore')
+              .map(f => ({ path: f.fileName, content: f.content }));
+            checkovResult = await runCheckovHelm(helmFiles);
+          } else {
+            // Preserve template source path so fix-issues can map checks back to
+            // real session files (templates/*.yaml) and show approval diffs.
+            const renderedYamlFiles = rendered.map((content, i) => {
+              const sourceMatch = content.match(/^\s*#\s*Source:\s*(.+)\s*$/m);
+              const sourcePath = sourceMatch?.[1]?.trim();
+              const normalizedSourcePath = sourcePath?.replace(/^[^/]+\/templates\//i, 'templates/');
+              const fallbackPath = `rendered-${i}.yaml`;
+              return {
+                path: normalizedSourcePath || sourcePath || fallbackPath,
+                content,
+              };
+            });
+            console.log(`   ✅ Rendered ${rendered.length} template(s) — scanning with Checkov`);
+            checkovResult = await runCheckovKubernetes(renderedYamlFiles);
+          }
+        } finally {
+          try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        }
+      } else {
+        // ── Plain Kubernetes manifests scan ───────────────────────────────
+        const yamlFiles = files.filter(f =>
+          f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml')
+        );
+
+        if (yamlFiles.length === 0) {
+          return res.status(400).json({
+            error: 'No Kubernetes files found',
+            details: 'No YAML files found in session storage'
+          });
+        }
+
+        console.log(`📁 Found ${yamlFiles.length} Kubernetes manifest file(s)`);
+        checkovResult = await runCheckovKubernetes(
+          yamlFiles.map(f => ({ path: f.fileName, content: f.content }))
+        );
+      }
 
       // Format response similar to Terraform scan - use same comprehensive parsing logic
       const failedChecks = checkovResult.checks.map(check => {
@@ -441,14 +521,14 @@ export function registerKubernetesRoutes(app: Express) {
         errors: combinedErrors.map(err => ({
           severity: err.severity,
           message: err.message,
-          file: err.file,
-          line: err.line,
+          file: (err as any).file,
+          line: (err as any).line,
         })),
         warnings: combinedWarnings.map(warn => ({
           severity: warn.severity,
           message: warn.message,
-          file: warn.file,
-          line: warn.line,
+          file: (warn as any).file,
+          line: (warn as any).line,
         })),
         summary: {
           schemaErrors: schemaValidationResult.errors.length,
@@ -500,130 +580,70 @@ export function registerKubernetesRoutes(app: Express) {
 
       console.log(`📁 Found ${yamlFiles.length} Kubernetes file(s) to fix`);
 
-      // Combine all YAML files with their filenames for context
-      const yamlWithFiles = yamlFiles.map(f => `# File: ${f.fileName}\n${f.content}`).join('\n---\n');
+      // Process each file independently — avoids token limits and improves fix coverage
+      const systemPrompt = `You are an expert Kubernetes engineer. Fix issues in the given Kubernetes YAML manifest.
 
-      // Use AI to fix the issues
-      const systemPrompt = `You are an expert Kubernetes engineer. Your task is to fix issues in Kubernetes YAML manifests based on validation findings.
+RULES:
+1. Fix ALL the listed issues while preserving resource names, labels, and selectors
+2. Apply best practices: resource limits/requests, liveness/readiness probes, security contexts
+   (runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false)
+3. Output ONLY raw valid YAML — no markdown fences, no explanations, no comments`;
 
-IMPORTANT RULES:
-1. Fix ALL the issues listed while preserving the original structure and functionality
-2. Apply Kubernetes best practices:
-   - Add resource limits and requests if missing
-   - Add liveness and readiness probes if missing
-   - Add security contexts (runAsNonRoot, readOnlyRootFilesystem, allowPrivilegeEscalation: false)
-   - Ensure proper labels and selectors
-   - Use appropriate container ports
-3. Keep the original resource names and configurations intact
-4. Output valid YAML only - no explanations
-5. Separate multiple resources with --- on its own line
-6. Keep the # File: comment before each resource to indicate which file it belongs to
-7. DO NOT add markdown code blocks - output raw YAML only`;
-
-      const issuesList = issues && issues.length > 0
-        ? issues.map((i: any) => `- ${i.message || i.issue}`).join('\n')
-        : 'Apply all Kubernetes best practices including: resource limits, probes, security contexts, and proper labels';
-
-      const userPrompt = `Fix the following issues in these Kubernetes manifests:
-
-ISSUES TO FIX:
-${issuesList}
-
-CURRENT YAML:
-${yamlWithFiles}
-
-Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. No explanations or code blocks.`;
-
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.2,
-        max_tokens: 8000
-      });
-
-      let fixedYaml = completion.choices[0]?.message?.content || '';
-
-      // Remove any markdown code blocks if AI added them
-      fixedYaml = fixedYaml.replace(/```yaml\n?/gi, '').replace(/```yml\n?/gi, '').replace(/```\n?/g, '').trim();
-
-      if (!fixedYaml) {
-        throw new Error('AI failed to generate fixed YAML');
-      }
-
-      console.log(`✅ AI generated fixed YAML (${fixedYaml.length} characters)`);
-
-      // Parse the fixed YAML into separate resources
-      const fixedResources = fixedYaml
-        .split(/^---\s*$/m)
-        .map(r => r.trim())
-        .filter(r => r.length > 0);
-
-      console.log(`📄 Parsed ${fixedResources.length} resource(s) from fixed YAML`);
-      console.log(`📋 Original files: ${yamlFiles.map(f => f.fileName).join(', ')}`);
-
-      // Import yaml parser
-      const yaml = await import('js-yaml');
-
-      // Update each file in storage
       const updatedFiles: Array<{ fileName: string; content: string }> = [];
       const errors: string[] = [];
 
-      for (let i = 0; i < fixedResources.length; i++) {
-        const resource = fixedResources[i];
+      for (const file of yamlFiles) {
         try {
-          // Extract file name from comment if present
-          const fileMatch = resource.match(/^#\s*File:\s*(.+)$/m);
-          let fileName: string | null = fileMatch ? fileMatch[1].trim() : null;
+          // Find issues relevant to this file (match by filename or apply all general issues)
+          const fileIssues = issues && issues.length > 0
+            ? issues.filter((i: any) => !i.file || i.file === file.fileName || i.file.includes(file.fileName))
+            : [];
 
-          console.log(`\n   Processing resource ${i + 1}/${fixedResources.length}`);
-          console.log(`   File comment found: ${fileName || 'none'}`);
+          const issuesList = fileIssues.length > 0
+            ? fileIssues.map((i: any) => `- ${i.message || i.issue}`).join('\n')
+            : issues && issues.length > 0
+              ? issues.map((i: any) => `- ${i.message || i.issue}`).join('\n')
+              : 'Apply all Kubernetes best practices: resource limits, probes, security contexts';
 
-          // Remove the file comment for the actual content
-          const cleanContent = resource.replace(/^#\s*File:\s*.+\n?/m, '').trim();
+          const userPrompt = `Fix the following issues in this Kubernetes manifest (${file.fileName}):
 
-          if (!cleanContent) {
-            console.warn(`   ⚠️  Resource ${i + 1} has no content after removing comments, skipping`);
+ISSUES:
+${issuesList}
+
+CURRENT YAML:
+${file.content}
+
+Return ONLY the fixed YAML. No explanations, no code blocks.`;
+
+          console.log(`   🔧 Fixing ${file.fileName} (${fileIssues.length} targeted issues)...`);
+
+          const completion = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt }
+            ],
+            temperature: 0.1,
+            max_tokens: 4000
+          });
+
+          let fixedContent = completion.choices[0]?.message?.content || '';
+          fixedContent = fixedContent
+            .replace(/^```ya?ml\s*\n?/i, '')
+            .replace(/^```\s*\n?/, '')
+            .replace(/\n?```\s*$/, '')
+            .trim();
+
+          if (!fixedContent) {
+            errors.push(`AI returned empty content for ${file.fileName}`);
             continue;
           }
 
-          const parsed = yaml.load(cleanContent) as any;
-          if (!parsed || !parsed.kind || !parsed.metadata?.name) {
-            const error = `Resource ${i + 1} is unparseable or missing kind/metadata.name`;
-            console.warn(`   ⚠️  ${error}`);
-            errors.push(error);
-            continue;
-          }
-
-          console.log(`   ✓ Parsed: ${parsed.kind}/${parsed.metadata.name}`);
-
-          // Generate filename if not extracted
-          if (!fileName) {
-            const sanitizedName = parsed.metadata.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-            fileName = `${sanitizedName}-${parsed.kind.toLowerCase()}.yaml`;
-            console.log(`   Generated filename: ${fileName}`);
-          }
-
-          // Find existing file
-          const existingFile = yamlFiles.find(f => f.fileName === fileName);
-
-          if (existingFile) {
-            await storage.updateFile(existingFile.id, cleanContent);
-            console.log(`   📝 Updated: ${fileName} (ID: ${existingFile.id})`);
-          } else {
-            const newFile = await storage.createFile({
-              sessionId,
-              fileName,
-              content: cleanContent
-            });
-            console.log(`   ✨ Created: ${fileName} (ID: ${newFile.id})`);
-          }
-
-          updatedFiles.push({ fileName, content: cleanContent });
-        } catch (parseError: any) {
-          const error = `Failed to parse resource ${i + 1}: ${parseError.message}`;
+          await storage.updateFile(file.id, fixedContent);
+          updatedFiles.push({ fileName: file.fileName, content: fixedContent });
+          console.log(`   ✅ Fixed: ${file.fileName}`);
+        } catch (fileError: any) {
+          const error = `Failed to fix ${file.fileName}: ${fileError.message}`;
           console.error(`   ❌ ${error}`);
           errors.push(error);
         }
@@ -670,38 +690,46 @@ Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. 
   });
 
   // Validate Helm chart
-  app.post("/api/sessions/:id/validate-helm-chart", async (req, res) => {
+  app.post("/api/sessions/:id/validate-helm-chart", optionalAuth, async (req: AuthenticatedRequest, res) => {
     try {
-      const { chartPath, options } = req.body;
+      const { options } = req.body;
       const sessionId = req.params.id;
-
-      if (!chartPath || typeof chartPath !== 'string') {
-        return res.status(400).json({ 
-          error: 'Missing required field',
-          details: 'chartPath is required and must be a string'
-        });
-      }
 
       // Verify session exists
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
+      if (!ensureSessionOwnership(session, req, res)) return;
+
+      const chartPath = (session as any).helmChartPath;
+      if (!chartPath || typeof chartPath !== "string") {
+        return res.status(400).json({
+          error: "No uploaded Helm chart found",
+          details: "Upload a Helm chart archive first, then run validation."
+        });
+      }
 
       console.log(`\n🔍 ========== HELM CHART VALIDATION ==========`);
       console.log(`Session ID: ${sessionId}`);
       console.log(`Chart Path: ${chartPath}`);
 
+      // Fetch session files to pass as raw helm source for deep analysis
+      const sessionFiles = await storage.getFilesBySession(sessionId);
+      const helmFiles = sessionFiles
+        .filter(f => f.content && f.content.trim().length > 0)
+        .map(f => ({ path: f.fileName, content: f.content }));
+
       // Validate Helm chart
-      const result = await validateHelmChart(chartPath, options || {
+      const result = await validateHelmChart(chartPath, {
         runHelmLint: true,
         runKubeval: true,
         runCheckov: true,
-        runBestPractices: true,
+        runBestPractices: false,   // replaced by deep analysis
+        runDeepAnalysis: true,
+        helmFiles,
+        ...(options || {}),
       });
-
-      // Store validation result in session (for later reference)
-      // We can add a field to session schema if needed
 
       console.log('==========================================\n');
 
@@ -710,14 +738,19 @@ Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. 
         issues: result.issues,
         lintResults: result.lintResults,
         bestPractices: result.bestPractices,
+        deepAnalysis: result.deepAnalysis,
         summary: result.summary,
       });
 
     } catch (error: any) {
       console.error('❌ Error validating Helm chart:', error);
-      res.status(500).json({ 
+      const message = typeof error?.message === "string" ? error.message : "Unknown validation error";
+      const normalizedMessage = message.includes("ENOENT")
+        ? "Uploaded Helm chart is no longer available. Please upload it again."
+        : message;
+      res.status(500).json({
         error: 'Failed to validate Helm chart',
-        details: error.message,
+        details: normalizedMessage,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
     }
@@ -746,8 +779,21 @@ Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. 
       // Get Kubernetes YAML files from session storage
       console.log(`📁 Fetching Kubernetes files from session storage...`);
       const sessionFiles = await storage.getFilesBySession(sessionId);
+
+      // Detect Helm chart sessions — Chart.yaml is the indicator
+      const isHelmSession = sessionFiles.some(f => f.fileName === 'Chart.yaml');
+
       const yamlFiles = sessionFiles
-        .filter(f => f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml'))
+        .filter(f => {
+          if (!f.fileName.endsWith('.yaml') && !f.fileName.endsWith('.yml')) return false;
+          if (isHelmSession) {
+            // Exclude Helm metadata files — they aren't K8s manifests
+            const base = f.fileName.split('/').pop() || '';
+            if (base === 'Chart.yaml') return false;
+            if (base.startsWith('values')) return false; // values.yaml, values-dev.yaml, values-prod.yaml
+          }
+          return true;
+        })
         .map(f => f.content);
 
       console.log(`✅ Found ${yamlFiles.length} Kubernetes file(s)`);
@@ -1030,6 +1076,316 @@ Return ONLY the fixed YAML with all issues resolved. Keep the # File: comments. 
         details: error.message,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
+    }
+  });
+
+  // ─── Scan selected repo + auto-analyse for Helm chart generation ──────────
+  app.post("/api/sessions/:id/scan-repo-for-helm", optionalAuth, async (req: AuthenticatedRequest, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+      if (!ensureSessionOwnership(session, req, res)) return;
+
+      const { provider, repoName, branch = 'main' } = req.body as {
+        provider?: string;
+        repoName?: string;
+        branch?: string;
+      };
+
+      if (!provider || !repoName) {
+        return res.status(400).json({ error: 'provider and repoName are required' });
+      }
+
+      console.log(`\n🔍 Scanning repo "${repoName}" (${provider}) for Helm analysis...`);
+
+      const { credentials } = await resolveRepositoryCredentials(provider as MCPProvider, req.userId);
+      const appFiles = await mcpClient.scanRepositoryAppFiles(
+        provider as MCPProvider,
+        repoName,
+        branch,
+        credentials
+      );
+
+      if (appFiles.length === 0) {
+        // Empty / brand-new repo — return a signal so frontend shows "new project" form
+        return res.json({ isEmpty: true, analysis: null });
+      }
+
+      console.log(`   Found ${appFiles.length} app file(s): ${appFiles.map(f => f.name).join(', ')}`);
+
+      const { analyzeRepositoryForHelm } = await import('../kubernetes/helm-generator');
+      const analysis = await analyzeRepositoryForHelm(
+        appFiles.map(f => ({ name: f.name, content: f.content }))
+      );
+
+      console.log(`✅ Helm repo analysis: framework=${analysis.framework}, port=${analysis.suggestedPort}`);
+      res.json({ isEmpty: false, analysis, scannedFiles: appFiles.map(f => f.name) });
+    } catch (error: any) {
+      console.error('❌ scan-repo-for-helm error:', error);
+      res.status(500).json({ error: 'Failed to scan repository', details: error.message });
+    }
+  });
+
+  // ─── Analyse repository files for Helm chart generation ───────────────────
+  app.post("/api/sessions/:id/analyze-repo", optionalAuth, async (req: AuthenticatedRequest, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+      if (!ensureSessionOwnership(session, req, res)) return;
+
+      const { files } = req.body as {
+        files?: Array<{ name: string; content: string }>;
+      };
+
+      if (!files || !Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ error: 'files array is required' });
+      }
+
+      const { analyzeRepositoryForHelm } = await import('../kubernetes/helm-generator');
+      const result = await analyzeRepositoryForHelm(files);
+
+      console.log(`✅ Repo analysis complete: framework=${result.framework}, port=${result.suggestedPort}`);
+      res.json(result);
+    } catch (error: any) {
+      console.error('❌ analyze-repo error:', error);
+      res.status(500).json({ error: 'Failed to analyse repository', details: error.message });
+    }
+  });
+
+  // ─── Helm Chart Generator ──────────────────────────────────────────────────
+  app.post("/api/sessions/:id/generate-helm-chart", optionalAuth, async (req: AuthenticatedRequest, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+      if (!ensureSessionOwnership(session, req, res)) return;
+
+      const { description, options = {}, appContext } = req.body as {
+        description?: string;
+        appContext?: string;
+        options?: {
+          framework?: string;
+          includeHPA?: boolean;
+          includeIngress?: boolean;
+          generateEnvOverlays?: boolean;
+          replicas?: number;
+          port?: number;
+        };
+      };
+
+      if (!description || typeof description !== 'string' || !description.trim()) {
+        return res.status(400).json({ error: 'description is required' });
+      }
+
+      console.log(`\n⛵ ========== HELM CHART GENERATE REQUEST ==========`);
+      console.log(`Session: ${sessionId}`);
+
+      // Clean up any previous helm-generator files in this session
+      const helmGenPattern = /^(Chart\.yaml$|values[^/]*\.yaml$|templates\/|\.helmignore$)/i;
+      const existingFiles = await storage.getFilesBySession(sessionId);
+      for (const f of existingFiles) {
+        if (helmGenPattern.test(f.fileName)) {
+          await storage.deleteFile(f.id);
+        }
+      }
+
+      // Generate
+      const { generateHelmChart } = await import('../kubernetes/helm-generator');
+      const result = await generateHelmChart(description.trim(), { ...options, appContext });
+
+      // Persist each file
+      const savedFiles = [];
+      for (const file of result.files) {
+        const saved = await storage.createFile({
+          sessionId,
+          fileName: file.path,
+          content: file.content,
+        });
+        savedFiles.push(saved);
+      }
+
+      await storage.updateSession(sessionId, {
+        workflowStep: 'helm_generation',
+        activeModule: 'kubernetes',
+        currentStep: '5',
+      });
+
+      console.log(`✅ Helm chart saved: ${savedFiles.length} file(s)`);
+
+      res.json({
+        success: true,
+        chartName: result.chartName,
+        files: savedFiles,
+        lintResult: result.lintResult ?? null,
+      });
+    } catch (error: any) {
+      console.error('❌ Helm chart generation failed:', error);
+      res.status(500).json({ error: 'Helm chart generation failed', details: error.message });
+    }
+  });
+
+  // ─── D1: Upload Helm Chart ─────────────────────────────────────────────────
+  app.post("/api/sessions/:id/upload-helm-chart", optionalAuth, async (req: AuthenticatedRequest, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+      if (!ensureSessionOwnership(session, req, res)) return;
+
+      const form = new formidable.IncomingForm({
+        uploadDir: os.tmpdir(),
+        keepExtensions: true,
+        maxFileSize: 50 * 1024 * 1024, // 50 MB
+      });
+
+      const [, files] = await form.parse(req);
+      const chartFile = Array.isArray(files.chart) ? files.chart[0] : files.chart;
+      if (!chartFile) {
+        return res.status(400).json({ error: 'No chart file uploaded. Use field name "chart".' });
+      }
+      const originalName = (chartFile.originalFilename ?? '').toLowerCase();
+      const isSupportedArchive = originalName.endsWith('.tgz') || originalName.endsWith('.tar.gz');
+      if (!isSupportedArchive) {
+        return res.status(400).json({
+          error: "Invalid chart format",
+          details: "Only packaged Helm chart archives are supported (.tgz or .tar.gz)."
+        });
+      }
+
+      const uploadedPath = chartFile.filepath ?? (chartFile as any).path;
+      console.log(`📦 Helm chart uploaded: ${chartFile.originalFilename ?? 'unknown'} → ${uploadedPath}`);
+
+      // Validate the uploaded chart
+      const { validateHelmChart } = await import('../kubernetes/helm-validation-service');
+      const result = await validateHelmChart(uploadedPath, {
+        runHelmLint: true,
+        runKubeval: false,  // skip kubeval for raw archive — helm lint is sufficient
+        runCheckov: false,
+        runBestPractices: false,
+      });
+
+      // Store the chart path in session for subsequent validation
+      await storage.updateSession(sessionId, { helmChartPath: uploadedPath } as any);
+
+      res.json({
+        success: true,
+        fileName: chartFile.originalFilename,
+        chartPath: uploadedPath,
+        validation: result,
+      });
+    } catch (error: any) {
+      console.error('❌ Helm chart upload failed:', error);
+      res.status(500).json({ error: 'Failed to upload Helm chart', details: error.message });
+    }
+  });
+
+  // ─── D4: Build Kustomize Overlay ──────────────────────────────────────────
+  app.post("/api/sessions/:id/build-kustomize", async (req, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      const { kustomizationDir } = req.body;
+      if (!kustomizationDir || typeof kustomizationDir !== 'string') {
+        return res.status(400).json({ error: 'kustomizationDir is required' });
+      }
+
+      const result = await buildKustomize(kustomizationDir);
+
+      // Persist rendered manifests as session files
+      if (result.success && result.manifests.length > 0) {
+        for (let i = 0; i < result.manifests.length; i++) {
+          const manifestYAML = result.manifests[i];
+          try {
+            const yaml = await import('js-yaml');
+            const parsed = yaml.load(manifestYAML) as any;
+            const kind = parsed?.kind ?? 'resource';
+            const name = parsed?.metadata?.name ?? i;
+            await storage.createFile({
+              sessionId,
+              fileName: `${kind.toLowerCase()}-${name}.yaml`,
+              content: manifestYAML,
+            });
+          } catch {
+            await storage.createFile({
+              sessionId,
+              fileName: `resource-${i}.yaml`,
+              content: manifestYAML,
+            });
+          }
+        }
+      }
+
+      res.json(result);
+    } catch (error: any) {
+      console.error('❌ Kustomize build failed:', error);
+      res.status(500).json({ error: 'Failed to build Kustomize overlay', details: error.message });
+    }
+  });
+
+  // ─── E1: Security Context Score ──────────────────────────────────────────
+  app.post("/api/sessions/:id/security-score", async (req, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      const files = await storage.getFilesBySession(sessionId);
+      const yamlFiles = files.filter(f =>
+        f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml')
+      );
+
+      if (yamlFiles.length === 0) {
+        return res.status(400).json({ error: 'No YAML files found in session' });
+      }
+
+      const manifests = yamlFiles.map(f => f.content);
+      const score = scoreSecurityContexts(manifests);
+
+      // Also run policy hints
+      const policyResults = checkPolicyHints(manifests);
+
+      res.json({ success: true, score, policyResults });
+    } catch (error: any) {
+      console.error('❌ Security scoring failed:', error);
+      res.status(500).json({ error: 'Failed to calculate security score', details: error.message });
+    }
+  });
+
+  // ─── E3: Policy Hints (list static library) ──────────────────────────────
+  app.get("/api/kubernetes/policy-hints", async (_req, res) => {
+    try {
+      const { POLICY_HINTS } = await import('../kubernetes/policy-hints');
+      res.json({ success: true, hints: POLICY_HINTS });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to load policy hints', details: error.message });
+    }
+  });
+
+  // ─── E3: Check policy hints against session files ─────────────────────────
+  app.post("/api/sessions/:id/policy-check", async (req, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      const files = await storage.getFilesBySession(sessionId);
+      const manifests = files
+        .filter(f => f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml'))
+        .map(f => f.content);
+
+      if (manifests.length === 0) {
+        return res.status(400).json({ error: 'No YAML files found in session' });
+      }
+
+      const results = checkPolicyHints(manifests);
+      res.json({ success: true, totalViolations: results.reduce((s, r) => s + r.violations.length, 0), results });
+    } catch (error: any) {
+      console.error('❌ Policy check failed:', error);
+      res.status(500).json({ error: 'Failed to run policy check', details: error.message });
     }
   });
 }
