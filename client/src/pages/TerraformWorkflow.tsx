@@ -4,8 +4,6 @@ import { useLocation } from "wouter";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useSecretsConfig } from "@/hooks/useSecretsConfig";
 import Header from "@/components/Header";
-import AIMessage from "@/components/AIMessage";
-import UserMessage from "@/components/UserMessage";
 import ChatInput from "@/components/ChatInput";
 import ProviderCard from "@/components/ProviderCard";
 import RepositoryList from "@/components/RepositoryList";
@@ -15,16 +13,68 @@ import StepIndicator from "@/components/StepIndicator";
 import ActionButtons from "@/components/ActionButtons";
 import ActivityPanel from "@/components/ActivityPanel";
 import { CodeIcon } from "@radix-ui/react-icons";
-import { Cloud, CloudCog, Package, Home, FileText, X, RefreshCw, Loader2, Box, Layers, Network, FileCode } from "lucide-react";
+import { Cloud, CloudCog, Package, Home, FileText, X, RefreshCw, Loader2, Box, Layers, Network, FileCode, CheckCircle2, Clock3, PlayCircle, BarChart3, Hash, FolderOpen, ChevronRight, Cpu, Database, Globe, Shield, Lock, Activity } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import type { Session, Message, GeneratedFile, Repository, RepositoryScanResult } from "@shared/schema";
+import type { Session, GeneratedFile, Repository, RepositoryScanResult } from "@shared/schema";
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+
+// ── Terraform resource type → friendly label ─────────────────────────────────
+const TF_RESOURCE_LABELS: Record<string, { label: string; icon: any }> = {
+  azurerm_linux_virtual_machine:      { label: 'Linux VM',           icon: Cpu },
+  azurerm_windows_virtual_machine:    { label: 'Windows VM',         icon: Cpu },
+  azurerm_virtual_machine:            { label: 'Virtual Machine',    icon: Cpu },
+  azurerm_app_service:                { label: 'App Service',        icon: Globe },
+  azurerm_app_service_plan:           { label: 'App Service Plan',   icon: Globe },
+  azurerm_linux_web_app:              { label: 'Linux Web App',      icon: Globe },
+  azurerm_windows_web_app:            { label: 'Windows Web App',    icon: Globe },
+  azurerm_sql_server:                 { label: 'SQL Server',         icon: Database },
+  azurerm_sql_database:               { label: 'SQL Database',       icon: Database },
+  azurerm_postgresql_server:          { label: 'PostgreSQL Server',  icon: Database },
+  azurerm_postgresql_flexible_server: { label: 'PostgreSQL Flex',    icon: Database },
+  azurerm_mysql_server:               { label: 'MySQL Server',       icon: Database },
+  azurerm_cosmosdb_account:           { label: 'Cosmos DB',          icon: Database },
+  azurerm_storage_account:            { label: 'Storage Account',    icon: FolderOpen },
+  azurerm_resource_group:             { label: 'Resource Group',     icon: FolderOpen },
+  azurerm_virtual_network:            { label: 'Virtual Network',    icon: Network },
+  azurerm_subnet:                     { label: 'Subnet',             icon: Network },
+  azurerm_network_security_group:     { label: 'NSG',                icon: Shield },
+  azurerm_public_ip:                  { label: 'Public IP',          icon: Globe },
+  azurerm_load_balancer:              { label: 'Load Balancer',      icon: Activity },
+  azurerm_application_gateway:        { label: 'App Gateway',        icon: Activity },
+  azurerm_redis_cache:                { label: 'Redis Cache',        icon: Database },
+  azurerm_kubernetes_cluster:         { label: 'AKS Cluster',        icon: Box },
+  azurerm_container_registry:         { label: 'Container Registry', icon: Box },
+  azurerm_key_vault:                  { label: 'Key Vault',          icon: Lock },
+  azurerm_log_analytics_workspace:    { label: 'Log Analytics',      icon: BarChart3 },
+  azurerm_monitor_action_group:       { label: 'Monitor Action',     icon: Activity },
+  azurerm_eventhub_namespace:         { label: 'Event Hub NS',       icon: Activity },
+  azurerm_servicebus_namespace:       { label: 'Service Bus',        icon: Activity },
+  azurerm_cdn_profile:                { label: 'CDN Profile',        icon: Globe },
+  aws_instance:                       { label: 'EC2 Instance',       icon: Cpu },
+  aws_db_instance:                    { label: 'RDS Instance',       icon: Database },
+  aws_s3_bucket:                      { label: 'S3 Bucket',          icon: FolderOpen },
+  aws_vpc:                            { label: 'VPC',                icon: Network },
+  aws_subnet:                         { label: 'Subnet',             icon: Network },
+  aws_security_group:                 { label: 'Security Group',     icon: Shield },
+  aws_iam_role:                       { label: 'IAM Role',           icon: Lock },
+  aws_lambda_function:                { label: 'Lambda',             icon: Activity },
+  aws_eks_cluster:                    { label: 'EKS Cluster',        icon: Box },
+  aws_elasticache_cluster:            { label: 'ElastiCache',        icon: Database },
+  google_compute_instance:            { label: 'GCE Instance',       icon: Cpu },
+  google_sql_database_instance:       { label: 'Cloud SQL',          icon: Database },
+  google_storage_bucket:              { label: 'GCS Bucket',         icon: FolderOpen },
+  google_container_cluster:           { label: 'GKE Cluster',        icon: Box },
+  google_vpc_network:                 { label: 'VPC Network',        icon: Network },
+};
+function tfResourceLabel(type: string): { label: string; icon: any } {
+  return TF_RESOURCE_LABELS[type] ?? { label: type.replace(/^(azurerm_|aws_|google_)/, '').replace(/_/g, ' '), icon: Box };
+}
 type Provider = 'github' | 'azure' | null;
 type CloudProvider = 'azure' | 'aws' | 'gcp' | null;
 type ModuleApproach = 'child-module' | 'standalone-root' | 'aggregated-root' | null;
@@ -46,6 +96,8 @@ export default function TerraformWorkflow() {
   const [moduleApproach, setModuleApproach] = useState<ModuleApproach>(null);
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
   const [scanCompleted, setScanCompleted] = useState<boolean>(false);
+  const [buildId, setBuildId] = useState<string | null>(null);
+  const [activityViewMode, setActivityViewMode] = useState<'overview' | 'build' | 'code'>('overview');
   const [repositoryScanResult, setRepositoryScanResult] = useState<RepositoryScanResult | null>(null);
   const [backendConfigured, setBackendConfigured] = useState<boolean>(false);
   // Azure backend fields
@@ -60,6 +112,11 @@ export default function TerraformWorkflow() {
   const [existingFiles, setExistingFiles] = useState<Array<{ path: string; content: string }>>([]);
   const [selectedFileToReview, setSelectedFileToReview] = useState<string | null>(null);
   const [filesBeforeGeneration, setFilesBeforeGeneration] = useState<Map<string, string>>(new Map()); // fileName -> fileId
+  const [backendGeneratedArtifacts, setBackendGeneratedArtifacts] = useState<string[]>([]);
+  const isDedicatedBuildWorkspace =
+    moduleApproach === 'aggregated-root'
+      ? Number(currentStep) >= 9
+      : Number(currentStep) >= 8;
 
   // Dynamic steps based on module approach
   // Corrected Flow: Provider → Repository → Cloud Provider → Module → (for Aggregated: Child Repo → Root Repo → Backend → Resources) → Generate → Review → Activities
@@ -81,8 +138,8 @@ export default function TerraformWorkflow() {
     { number: 4, title: 'Module' },
     { number: 5, title: 'Backend' },
     { number: 6, title: 'Generate' },
-    { number: 7, title: 'Review' },
-    { number: 8, title: 'Activities' },
+    { number: 8, title: 'Build' },
+    { number: 9, title: 'Commit' },
   ];
 
   // Create or restore session on mount
@@ -132,7 +189,7 @@ export default function TerraformWorkflow() {
 
       // Create initial welcome message without AI chat
       await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, {
-        message: 'Welcome! Let\'s start by selecting your repository provider. Choose GitHub or Azure DevOps.'
+        message: 'Welcome to Terraform Workflow. Select your repository provider: GitHub or Azure DevOps.'
       });
     };
     initializeSession();
@@ -140,13 +197,6 @@ export default function TerraformWorkflow() {
 
   // Fetch secrets configuration status
   const { data: config } = useSecretsConfig();
-
-  // Fetch messages
-  const { data: messages = [] } = useQuery<Message[]>({
-    queryKey: ['/api/sessions', sessionId, 'messages'],
-    enabled: !!sessionId,
-    refetchInterval: 2000, // Poll for new messages
-  });
 
   // Fetch session
   const { data: session } = useQuery<Session>({
@@ -240,12 +290,33 @@ export default function TerraformWorkflow() {
   // Fetch generated files
   const { data: generatedFiles = [], refetch: refetchFiles } = useQuery<GeneratedFile[]>({
     queryKey: ['/api/sessions', sessionId, 'files'],
-    enabled: !!sessionId && (currentStep === 7 || currentStep === 8 || currentStep === 9 || currentStep === 10),
+    enabled: !!sessionId && currentStep >= 6,
     refetchOnMount: true,
     refetchOnWindowFocus: false,
-    staleTime: 0, // Always refetch to get latest files
-    refetchOnReconnect: false, // Don't refetch on reconnect to prevent reload appearance
+    staleTime: 0,
+    refetchOnReconnect: false,
   });
+
+  // Step 7 was removed from the frontend (build workspace is now step 8).
+  // If session was saved with currentStep=7, advance to 8 automatically.
+  useEffect(() => {
+    if (currentStep === 7 && moduleApproach !== 'aggregated-root' && sessionId) {
+      setCurrentStep(8);
+      apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '8' }).catch(() => {});
+    }
+  }, [currentStep, moduleApproach, sessionId]);
+
+  // Reset to Overview tab whenever the user arrives at the Build Workspace step
+  useEffect(() => {
+    const isBuildStep = (currentStep === 8 && moduleApproach !== 'aggregated-root') ||
+                        (currentStep === 9 && moduleApproach === 'aggregated-root');
+    if (isBuildStep) {
+      setActivityViewMode('overview');
+      setScanCompleted(false);
+      setBuildId(null);
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+    }
+  }, [currentStep]);
 
   // Debug: Log files when they change
   useEffect(() => {
@@ -256,6 +327,51 @@ export default function TerraformWorkflow() {
       });
     }
   }, [generatedFiles]);
+
+  const selectedRepoName =
+    repositories.find((repo) => repo.id === selectedRepo)?.name ||
+    session?.repositoryName ||
+    selectedRepo ||
+    null;
+
+  const workflowSummaryItems = [
+    { label: 'Repository Provider', value: provider === 'github' ? 'GitHub' : provider === 'azure' ? 'Azure DevOps' : 'Not selected' },
+    { label: 'Repository', value: selectedRepoName || 'Not selected' },
+    { label: 'Cloud Provider', value: cloudProvider ? cloudProvider.toUpperCase() : 'Not selected' },
+    {
+      label: 'Module Approach',
+      value:
+        moduleApproach === 'child-module'
+          ? 'Child Module'
+          : moduleApproach === 'standalone-root'
+            ? 'Standalone Root'
+            : moduleApproach === 'aggregated-root'
+              ? 'Aggregated Root'
+              : 'Not selected',
+    },
+    { label: 'Backend Status', value: backendConfigured ? 'Configured' : 'Pending' },
+  ];
+
+  const workflowBackendArtifacts = Array.from(
+    new Set([
+      ...backendGeneratedArtifacts,
+      ...generatedFiles
+        .map((file) => file.fileName)
+        .filter((fileName) => fileName === 'backend.tf' || fileName === 'provider.tf' || fileName === 'terraform.tf'),
+    ]),
+  );
+
+  const getNextActionLabel = () => {
+    if (currentStep === 1) return 'Select repository provider';
+    if (currentStep === 2) return 'Select or create repository';
+    if (currentStep === 3) return 'Select target cloud provider';
+    if (currentStep === 4) return moduleApproach === 'aggregated-root' ? 'Select child module repository' : 'Select module approach';
+    if (currentStep === 5) return moduleApproach === 'aggregated-root' ? 'Select root module repository' : 'Configure Terraform backend';
+    if (currentStep === 6) return moduleApproach === 'aggregated-root' ? 'Configure Terraform backend' : 'Describe infrastructure requirements';
+    if (currentStep === 7) return moduleApproach === 'aggregated-root' ? 'Describe infrastructure requirements' : 'Review generated code';
+    if (currentStep === 8) return moduleApproach === 'aggregated-root' ? 'Review generated code' : 'Proceed to build stages';
+    return 'Proceed to commit and finalize';
+  };
 
   // Send chat message mutation
   const chatMutation = useMutation({
@@ -640,6 +756,7 @@ export default function TerraformWorkflow() {
       setBackendBucket('');
       setBackendDynamodbTable('terraform-state-lock');
       setBackendRegion('us-east-1');
+      setBackendGeneratedArtifacts([]);
       setExistingFilesReviewed(false);
       setExistingFiles([]);
       setSelectedFileToReview(null);
@@ -657,7 +774,7 @@ export default function TerraformWorkflow() {
       await apiRequest('PATCH', `/api/sessions/${session.id}`, { activeModule: 'terraform' });
 
       await apiRequest('POST', `/api/sessions/${session.id}/messages/system`, {
-        message: 'Welcome! Let\'s start by selecting your repository provider. Choose GitHub or Azure DevOps.'
+        message: 'Welcome to Terraform Workflow. Select your repository provider: GitHub or Azure DevOps.'
       });
 
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', session.id, 'messages'] });
@@ -728,7 +845,7 @@ export default function TerraformWorkflow() {
 
     // Single consolidated message
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-      message: `Using ${providerName} - Select or create a repository.`
+      message: `Provider selected: ${providerName}. Select an existing repository or create a new one.`
     });
 
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
@@ -788,7 +905,7 @@ export default function TerraformWorkflow() {
 
           // Single consolidated message for existing repo
           await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-            message: `Selected "${repo?.name}" - Found existing ${moduleTypeText}${providerText} with ${scanResult.terraformFiles.length} Terraform files.`
+            message: `Repository selected: "${repo?.name}". Detected existing ${moduleTypeText}${providerText} with ${scanResult.terraformFiles.length} Terraform files.`
           });
 
           if (scanResult.cloudProvider && !cloudProvider) {
@@ -805,7 +922,7 @@ export default function TerraformWorkflow() {
           queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
 
           await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-            message: `Selected "${repo?.name}" - New repository. Choose your target cloud provider.`
+            message: `Repository selected: "${repo?.name}" (new/empty). Select the target cloud provider.`
           });
         }
       } catch (error: any) {
@@ -837,7 +954,7 @@ export default function TerraformWorkflow() {
         queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
 
         await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-          message: `Selected "${repo?.name}" - Unable to scan. Choose your target cloud provider.`
+          message: `Repository selected: "${repo?.name}". Repository scan was not completed. Continue by selecting the target cloud provider.`
         });
       }
 
@@ -1126,7 +1243,7 @@ export default function TerraformWorkflow() {
 
     // Single consolidated message
     await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-      message: `Selected ${cloudName}${mcpStatus} - Choose your module approach.`
+      message: `Cloud provider selected: ${cloudName}${mcpStatus}. Choose the module approach to continue.`
     });
 
     queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
@@ -1154,7 +1271,7 @@ export default function TerraformWorkflow() {
 
       // Single consolidated message
       await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-        message: `Selected ${approachName} - Describe the infrastructure components you want to create.`
+        message: `Module approach selected: ${approachName}. Describe the infrastructure components to generate.`
       });
     } else if (selectedApproach === 'aggregated-root') {
       // Reset repository selection state for child module selection
@@ -1171,7 +1288,7 @@ export default function TerraformWorkflow() {
 
       // Single consolidated message
       await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-        message: `Selected ${approachName} - Select the child module repository.`
+        message: `Module approach selected: ${approachName}. Select the child-module repository.`
       });
     } else {
       // Standalone-root modules - check if backend already exists
@@ -1188,7 +1305,7 @@ export default function TerraformWorkflow() {
         setCurrentStep(6);
 
         await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-          message: `Selected ${approachName} - Backend exists. Describe the infrastructure you want to create.`
+          message: `Module approach selected: ${approachName}. Existing backend configuration detected. Describe the infrastructure to generate.`
         });
       } else {
         // Backend doesn't exist - show backend configuration form
@@ -1199,7 +1316,7 @@ export default function TerraformWorkflow() {
         setCurrentStep(5);
 
         await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
-          message: `Selected ${approachName} - Configure the Terraform backend below.`
+          message: `Module approach selected: ${approachName}. Configure Terraform backend settings to proceed.`
         });
       }
     }
@@ -1222,14 +1339,15 @@ export default function TerraformWorkflow() {
       
       // If files were generated, show them
       if (result.details?.filesGenerated && result.details.filesGenerated.length > 0) {
+        setBackendGeneratedArtifacts(result.details.filesGenerated);
         await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-          message: `Generated files: ${result.details.filesGenerated.join(', ')}` 
+        message: `Artifacts generated: ${result.details.filesGenerated.join(', ')}` 
         });
       }
       
       // System guidance for next step
       await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: 'Perfect! Now describe the infrastructure resources you want to create. Be specific about resources, configurations, and requirements (e.g., "Create a resource group, storage account, and app service").' 
+        message: 'Backend setup is complete. Provide the infrastructure requirements to generate Terraform code (for example: resource group, storage account, and app service).' 
       });
       
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'messages'] });
@@ -1441,15 +1559,45 @@ export default function TerraformWorkflow() {
 
         <ScrollArea className="flex-1 px-4 sm:px-6 lg:px-8 mt-6">
           <div className="max-w-6xl mx-auto pb-8 space-y-6">
-            {/* Messages */}
-            <div className="mb-8">
-              {messages.map((msg) => (
-                msg.type === 'ai' || msg.type === 'system' ? (
-                  <AIMessage key={msg.id} message={msg.content} />
-                ) : (
-                  <UserMessage key={msg.id} message={msg.content} />
-                )
-              ))}
+            <div className="rounded-xl border bg-card p-5 sm:p-6">
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold">Workflow Progress</h2>
+                    <p className="text-sm text-muted-foreground">Structured setup summary for the current Terraform session</p>
+                  </div>
+                  <div className="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs">
+                    {backendConfigured ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    ) : (
+                      <Clock3 className="w-4 h-4 text-amber-600" />
+                    )}
+                    <span className="font-medium">Next Action: {getNextActionLabel()}</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+                  {workflowSummaryItems.map((item) => (
+                    <div key={item.label} className="rounded-lg border bg-muted/30 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{item.label}</p>
+                      <p className="mt-1 text-sm font-medium break-words">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {workflowBackendArtifacts.length > 0 && (
+                  <div className="rounded-lg border border-blue-200 dark:border-blue-900 bg-blue-50/70 dark:bg-blue-950/30 p-3">
+                    <p className="text-xs font-semibold text-blue-900 dark:text-blue-100 mb-2">Provisioned Artifacts</p>
+                    <div className="flex flex-wrap gap-2">
+                      {workflowBackendArtifacts.map((artifact) => (
+                        <span key={artifact} className="inline-flex items-center rounded-md border border-blue-300 dark:border-blue-800 px-2 py-1 text-xs font-mono text-blue-800 dark:text-blue-200 bg-white/90 dark:bg-blue-950/50">
+                          {artifact}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Step 1: Provider Selection */}
@@ -2487,151 +2635,254 @@ export default function TerraformWorkflow() {
               </div>
             )}
 
-            {/* Step 7: Review & Edit (for non-aggregated-root) or Step 8: Review & Edit (for aggregated-root) */}
-            {((currentStep === 7 && moduleApproach !== 'aggregated-root') || (currentStep === 8 && moduleApproach === 'aggregated-root')) && (
-              <div className="space-y-6">
-                <div className="text-center">
-                  <h2 className="text-2xl font-bold mb-2">Review & Edit</h2>
-                  <p className="text-muted-foreground">
-                    Review and edit your generated Terraform configuration files
-                  </p>
-                </div>
+            {/* Step 8: Build workspace (non-aggregated-root) or Step 9: Build workspace (aggregated-root) */}
+            {((currentStep === 8 && moduleApproach !== 'aggregated-root') || (currentStep === 9 && moduleApproach === 'aggregated-root')) && (() => {
+              // Derived stats for Overview tab
+              const allContent = (generatedFiles ?? []).map(f => f.content ?? '').join('\n');
+              const totalLines = allContent ? allContent.split('\n').length : 0;
+              const resourceMatches = allContent.match(/^resource\s+"[^"]+"/gm) ?? [];
+              const uniqueResourceTypes = Array.from(new Set(
+                (allContent.match(/^resource\s+"([^"]+)"/gm) ?? []).map(m => m.replace(/^resource\s+"/, '').replace(/"$/, ''))
+              ));
+              const varCount = (allContent.match(/^variable\s+"/gm) ?? []).length;
+              const outputCount = (allContent.match(/^output\s+"/gm) ?? []).length;
 
-                {generatedFiles && Array.isArray(generatedFiles) && generatedFiles.length > 0 ? (
-                  <div className="space-y-6">
-                    <CodeEditor
-                      files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))}
-                      onFileChange={handleFileChange}
+              return (
+                <div className="space-y-6">
+                  {/* ── Header ── */}
+                  <div>
+                    <h2 className="text-2xl font-bold tracking-tight">Build Workspace</h2>
+                    <p className="text-sm text-muted-foreground mt-0.5">
+                      {(generatedFiles ?? []).length > 0
+                        ? `${generatedFiles.length} files generated · ${cloudProvider?.toUpperCase() ?? 'Cloud'} infrastructure ready`
+                        : 'Your infrastructure is being prepared…'}
+                    </p>
+                  </div>
+
+
+                  {/* ── Tab bar ── */}
+                  <div className="flex gap-1 border-b">
+                    {(['overview', 'build', 'code'] as const).map(mode => (
+                      <button
+                        key={mode}
+                        onClick={() => setActivityViewMode(mode)}
+                        className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors -mb-px ${
+                          activityViewMode === mode
+                            ? 'border-primary text-primary'
+                            : 'border-transparent text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {mode === 'build' ? 'Build Pipeline' : mode.charAt(0).toUpperCase() + mode.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* ══════════════════════════════════════════════
+                       OVERVIEW TAB
+                  ══════════════════════════════════════════════ */}
+                  {activityViewMode === 'overview' && (
+                    <div className="space-y-6">
+
+                      {/* KPI cards */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        {[
+                          { label: 'Files',       value: (generatedFiles ?? []).length, sub: 'generated', icon: FileCode,  color: 'text-blue-500',   bg: 'bg-blue-50 dark:bg-blue-950/30' },
+                          { label: 'Lines',        value: totalLines.toLocaleString(),   sub: 'of HCL',   icon: Hash,      color: 'text-violet-500', bg: 'bg-violet-50 dark:bg-violet-950/30' },
+                          { label: 'Resources',   value: resourceMatches.length,         sub: 'declared', icon: Box,       color: 'text-emerald-500',bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
+                          { label: 'Cloud',       value: cloudProvider?.toUpperCase() ?? '—', sub: 'provider', icon: Cloud, color: 'text-orange-500', bg: 'bg-orange-50 dark:bg-orange-950/30' },
+                        ].map(({ label, value, sub, icon: Icon, color, bg }) => (
+                          <div key={label} className={`rounded-2xl border p-4 flex items-center gap-4 ${bg}`}>
+                            <div className={`rounded-xl p-2.5 ${bg}`}>
+                              <Icon className={`w-5 h-5 ${color}`} />
+                            </div>
+                            <div>
+                              <p className="text-xl font-bold leading-tight">{value}</p>
+                              <p className="text-xs text-muted-foreground">{label} <span className="opacity-60">{sub}</span></p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Variables / Outputs badge row */}
+                      {(varCount > 0 || outputCount > 0) && (
+                        <div className="flex flex-wrap gap-2">
+                          {varCount > 0 && (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
+                              <Hash className="w-3 h-3" /> {varCount} variable{varCount !== 1 ? 's' : ''}
+                            </span>
+                          )}
+                          {outputCount > 0 && (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
+                              <ChevronRight className="w-3 h-3" /> {outputCount} output{outputCount !== 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Resource type chips */}
+                      {uniqueResourceTypes.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
+                            Infrastructure Components
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {uniqueResourceTypes.map(rt => {
+                              const { label, icon: Icon } = tfResourceLabel(rt);
+                              return (
+                                <span
+                                  key={rt}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border bg-card hover:bg-muted/60 transition-colors"
+                                >
+                                  <Icon className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                                  {label}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* File cards grid */}
+                      {(generatedFiles ?? []).length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
+                            Generated Files
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {generatedFiles.map(f => {
+                              const lines = (f.content ?? '').split('\n').length;
+                              const resCount = ((f.content ?? '').match(/^resource\s+"/gm) ?? []).length;
+                              const isMain = f.fileName.includes('main');
+                              const isVars = f.fileName.includes('variable');
+                              const isOut  = f.fileName.includes('output');
+                              const isBknd = f.fileName.includes('backend') || f.fileName.includes('provider');
+                              return (
+                                <button
+                                  key={f.fileName}
+                                  onClick={() => setActivityViewMode('code')}
+                                  className="group text-left rounded-2xl border bg-card p-4 hover:border-primary/40 hover:shadow-sm transition-all space-y-2"
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <FileCode className={`w-4 h-4 shrink-0 ${isMain ? 'text-blue-500' : isVars ? 'text-violet-500' : isOut ? 'text-emerald-500' : isBknd ? 'text-orange-500' : 'text-muted-foreground'}`} />
+                                      <span className="text-xs font-mono font-semibold truncate">{f.fileName}</span>
+                                    </div>
+                                    <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5" />
+                                  </div>
+                                  <div className="flex gap-3 text-xs text-muted-foreground">
+                                    <span>{lines} lines</span>
+                                    {resCount > 0 && <span className="text-emerald-600 dark:text-emerald-400">{resCount} resource{resCount !== 1 ? 's' : ''}</span>}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                    </div>
+                  )}
+
+                  {/* ══════════════════════════════════════════════
+                       BUILD TAB
+                  ══════════════════════════════════════════════ */}
+                  {activityViewMode === 'build' && (
+                    <ActivityPanel
+                      sessionId={sessionId}
+                      workflowType="terraform"
+                      moduleApproach={moduleApproach}
+                      onScanComplete={() => {
+                        setScanCompleted(true);
+                        refetchFiles();
+                        // Generate unique build ID: BUILD-YYYYMMDD-HHmmss
+                        const now = new Date();
+                        const pad = (n: number) => String(n).padStart(2, '0');
+                        const id = `BUILD-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+                        setBuildId(id);
+                        toast({ title: "Build Complete", description: `${id} — ready to commit.` });
+                      }}
+                      onFixesApproved={() => {
+                        refetchFiles();
+                        toast({ title: "Fixes Applied", description: "Security fixes applied. Files updated." });
+                      }}
                     />
-                    <div className="flex gap-4 justify-center">
+                  )}
+
+                  {/* ══════════════════════════════════════════════
+                       CODE TAB
+                  ══════════════════════════════════════════════ */}
+                  {activityViewMode === 'code' && (
+                    <div className="space-y-3">
+                      <div className="rounded-2xl border bg-card overflow-hidden">
+                        {(generatedFiles ?? []).length > 0 ? (
+                          <CodeEditor
+                            files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))}
+                            onFileChange={handleFileChange}
+                          />
+                        ) : (
+                          <div className="p-10 text-center text-muted-foreground space-y-2">
+                            <FileCode className="w-8 h-8 mx-auto opacity-40" />
+                            <p className="text-sm">No files generated yet</p>
+                            {generateTerraformMutation.isPending && (
+                              <p className="text-xs flex items-center justify-center gap-1.5">
+                                <Loader2 className="w-3 h-3 animate-spin" /> Generating…
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── Navigation ── */}
+                  <div className="space-y-3 pt-2">
+                    {/* Build ID badge — shown once build completes */}
+                    {buildId && (
+                      <div className="flex justify-center">
+                        <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-mono font-semibold bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          {buildId}
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex gap-3 justify-center">
                       <Button
                         variant="outline"
-                        onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 7 : 6)}
+                        onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 8 : 6)}
                       >
                         ← Back
                       </Button>
                       <Button
+                        disabled={!scanCompleted}
+                        title={!scanCompleted ? 'Run the Build pipeline first to continue' : undefined}
                         onClick={async () => {
-                          const nextStep = moduleApproach === 'aggregated-root' ? 9 : 8;
-                          setCurrentStep(nextStep);
-                          // Update session step
-                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
-                            currentStep: nextStep.toString()
-                          });
+                          const nextStep = moduleApproach === 'aggregated-root' ? 10 : 9;
+                          setCurrentStep(nextStep as Step);
+                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: nextStep.toString() });
                         }}
                       >
-                        Continue to Activities →
+                        {!scanCompleted ? (
+                          <>
+                            <Clock3 className="w-4 h-4 mr-1.5 opacity-50" />
+                            Awaiting Build…
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="w-4 h-4 mr-1.5" />
+                            Continue to Commit →
+                          </>
+                        )}
                       </Button>
                     </div>
-                  </div>
-                ) : (
-                  <div className="space-y-4 p-6 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950">
-                    <div className="flex items-center gap-3">
-                      <Loader2 className="w-5 h-5 animate-spin text-blue-600 dark:text-blue-400" />
-                      <div>
-                        <p className="text-sm font-semibold text-blue-900 dark:text-blue-100">
-                          {generateTerraformMutation.isPending ? 'Generating Code...' : 'Loading generated files...'}
-                        </p>
-                        <p className="text-xs text-blue-700 dark:text-blue-300">
-                          {generateTerraformMutation.isPending 
-                            ? 'Please wait while we generate your Terraform files.'
-                            : 'Please wait while we fetch your generated Terraform files.'}
-                        </p>
-                      </div>
-                    </div>
-                    {!generateTerraformMutation.isPending && (
-                      <Button
-                        variant="outline"
-                        onClick={async () => {
-                          console.log('🔄 Manually refetching files...');
-                          await refetchFiles();
-                        }}
-                      >
-                        <RefreshCw className="w-4 h-4 mr-2" />
-                        Refresh Files
-                      </Button>
+                    {!scanCompleted && (
+                      <p className="text-center text-xs text-muted-foreground">
+                        Switch to the <button className="underline underline-offset-2 hover:text-foreground" onClick={() => setActivityViewMode('build')}>Build tab</button> and run the pipeline to unlock commit.
+                      </p>
                     )}
                   </div>
-                )}
-              </div>
-            )}
-
-            {/* Step 8: Activities (non-aggregated-root) or Step 9: Activities (aggregated-root) */}
-            {((currentStep === 8 && moduleApproach !== 'aggregated-root') || (currentStep === 9 && moduleApproach === 'aggregated-root')) && (
-              <div className="space-y-6">
-                <div className="text-center">
-                  <h2 className="text-2xl font-bold mb-2">Activities</h2>
-                  <p className="text-muted-foreground">
-                    Run security scans, validate best practices, analyze costs, and generate architecture diagrams
-                  </p>
                 </div>
-
-                {/* Code Editor - On top (like Kubernetes) */}
-                <div className="rounded-lg border bg-card">
-                  <div className="px-4 py-3 border-b bg-muted/50">
-                    <h3 className="text-sm font-medium flex items-center gap-2">
-                      <FileCode className="w-4 h-4" />
-                      Generated Code
-                    </h3>
-                  </div>
-                  {generatedFiles && Array.isArray(generatedFiles) && generatedFiles.length > 0 ? (
-                    <CodeEditor
-                      files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))}
-                      onFileChange={handleFileChange}
-                    />
-                  ) : (
-                    <div className="p-8 text-center text-muted-foreground">
-                      <FileCode className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                      <p>No files generated yet</p>
-                    </div>
-                  )}
-                </div>
-
-                {/* Activity Panel - Below code editor */}
-                <ActivityPanel
-                  sessionId={sessionId}
-                  workflowType="terraform"
-                  moduleApproach={moduleApproach}
-                  onScanComplete={() => {
-                    setScanCompleted(true);
-                    // Refresh files after scan/fix to show updated code
-                    refetchFiles();
-                    toast({
-                      title: "Activity Complete",
-                      description: "Activity completed successfully.",
-                    });
-                  }}
-                  onFixesApproved={() => {
-                    // Refresh files after security fixes are approved
-                    refetchFiles();
-                    toast({
-                      title: "Fixes Applied",
-                      description: "Security fixes have been applied. Code editor updated.",
-                    });
-                  }}
-                />
-
-                <div className="flex gap-4 justify-center">
-                  <Button
-                    variant="outline"
-                    onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 8 : 7)}
-                  >
-                    ← Back
-                  </Button>
-                  <Button
-                    onClick={async () => {
-                      const nextStep = moduleApproach === 'aggregated-root' ? 10 : 9;
-                      setCurrentStep(nextStep);
-                      await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
-                        currentStep: nextStep.toString()
-                      });
-                    }}
-                  >
-                    Continue to Commit →
-                  </Button>
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Step 9: Commit (non-aggregated-root) or Step 10: Commit (aggregated-root) */}
             {((currentStep === 9 && moduleApproach !== 'aggregated-root') || (currentStep === 10 && moduleApproach === 'aggregated-root')) && (

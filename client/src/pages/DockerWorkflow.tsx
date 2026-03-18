@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Package, Home, RefreshCw, Loader2, Shield, FileText, CheckCircle2, GitBranch, Search, FileCode, FolderTree, Layers, Cpu, HardDrive } from "lucide-react";
+import { Package, Home, RefreshCw, Loader2, Shield, FileText, CheckCircle2, GitBranch, Search, FileCode, FolderTree, Layers, Cpu, HardDrive, Clock3 } from "lucide-react";
 import type { Session, Message, Repository, GeneratedFile } from "@shared/schema";
 
 interface ExistingDockerfile {
@@ -81,6 +81,10 @@ export default function DockerWorkflow() {
   const [imageEstimates, setImageEstimates] = useState<Array<{ image: string; stage: string; compressedMB: number; uncompressedMB: number; isEstimated: boolean }> | null>(null);
   const [isGeneratingCompose, setIsGeneratingCompose] = useState<boolean>(false);
   const [composeServices, setComposeServices] = useState<string[]>([]);
+  const [dockerfileSource, setDockerfileSource] = useState<'generated' | 'existing' | null>(null);
+  const [activityViewMode, setActivityViewMode] = useState<'overview' | 'build' | 'code'>('overview');
+  const [buildId, setBuildId] = useState<string | null>(null);
+  const [buildAutoRun, setBuildAutoRun] = useState(false);
 
   // Fetch secrets configuration status
   const { data: config } = useSecretsConfig();
@@ -237,6 +241,7 @@ export default function DockerWorkflow() {
     },
     onSuccess: async () => {
       setIsGenerating(false);
+      setDockerfileSource('generated');
       setCurrentStep(4);
       await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '4' });
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
@@ -307,6 +312,52 @@ export default function DockerWorkflow() {
       toast({ title: "Compose generation failed", description: error?.message || "Please try again.", variant: "destructive" });
     },
   });
+
+  // ── Workflow Progress panel ─────────────────────────────────────────────
+  const workflowSummaryItems = [
+    { label: 'Repo Provider',   value: provider === 'github' ? 'GitHub' : provider === 'azure' ? 'Azure DevOps' : 'Not selected' },
+    { label: 'Repository',      value: selectedRepo || 'Not selected' },
+    { label: 'Branch',          value: selectedBranch || defaultBranchName || 'Not selected' },
+    { label: 'Dockerfile',      value: dockerfileSource === 'existing' ? 'Detected (existing)' : dockerfileSource === 'generated' ? 'AI Generated' : existingDockerfile ? 'Detected' : generatedFiles.length > 0 ? `${generatedFiles.length} file${generatedFiles.length !== 1 ? 's' : ''}` : 'Pending' },
+    { label: 'Build Status',    value: scanCompleted ? 'Complete' : currentStep >= 5 ? 'Ready' : currentStep >= 4 ? 'Review files' : currentStep >= 2 ? 'Analysing' : 'Pending' },
+  ];
+
+  const getNextActionLabel = () => {
+    if (!provider) return 'Select repository provider';
+    if (!selectedRepo) return 'Select or create a repository';
+    if (currentStep === 1 && !scanCompleted) return 'Select a branch to run analysis';
+    if (currentStep === 2) return existingDockerfile ? 'Skip generation — use existing Dockerfile' : 'Generate Dockerfile from analysis';
+    if (currentStep === 3) return 'Generating Dockerfile…';
+    if (currentStep === 4) return 'Review files then run Activities';
+    if (currentStep === 5 && !scanCompleted) return 'Run security scan & best practices';
+    if (currentStep === 5 && scanCompleted) return 'Proceed to commit';
+    if (currentStep === 6) return isCommitted ? 'Done!' : 'Commit Docker artifacts';
+    return 'Continue';
+  };
+
+  const handleUseExistingDockerfile = async () => {
+    if (!existingDockerfile || !sessionId) return;
+    try {
+      // Save the existing Dockerfile to session files directly (no AI generation)
+      await apiRequest('POST', `/api/sessions/${sessionId}/files`, {
+        fileName: existingDockerfile.path.split('/').pop() || 'Dockerfile',
+        content: existingDockerfile.content,
+      });
+      setDockerfileSource('existing');
+      setCurrentStep(4);
+      await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '4' });
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+      // Auto-fetch image size estimate
+      try {
+        const estRes = await apiRequest('POST', `/api/sessions/${sessionId}/image-size-estimate`, {});
+        const estData = await estRes.json();
+        if (estData.estimates) setImageEstimates(estData.estimates);
+      } catch { /* non-critical */ }
+      toast({ title: 'Existing Dockerfile loaded', description: `Loaded ${existingDockerfile.path} — ready for review and scanning.` });
+    } catch (err: any) {
+      toast({ title: 'Failed to load Dockerfile', description: err?.message || 'Please try again.', variant: 'destructive' });
+    }
+  };
 
   const handleProviderSelect = async (selectedProvider: Provider) => {
     setProvider(selectedProvider);
@@ -426,10 +477,29 @@ export default function DockerWorkflow() {
         throw new Error(`Issue with the repo scanned – missing ${missing.join(", ")}`);
       }
       setAnalysisFeedback(null);
-      if (currentStep === 1) {
+      setScanCompleted(true);
+      // If Dockerfile already exists in the repo, skip AI generation entirely
+      if (data.existingDockerfile) {
+        // Auto-load existing Dockerfile and jump to review step
+        try {
+          await apiRequest('POST', `/api/sessions/${sessionId}/files`, {
+            fileName: data.existingDockerfile.path.split('/').pop() || 'Dockerfile',
+            content: data.existingDockerfile.content,
+          });
+          setDockerfileSource('existing');
+          setCurrentStep(4);
+          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '4' });
+          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+          try {
+            const estRes = await apiRequest('POST', `/api/sessions/${sessionId}/image-size-estimate`, {});
+            const estData = await estRes.json();
+            if (estData.estimates) setImageEstimates(estData.estimates);
+          } catch { /* non-critical */ }
+          toast({ title: 'Existing Dockerfile detected', description: `Loaded ${data.existingDockerfile.path} — skipping generation, ready for review.` });
+        } catch { /* fall back to step 2 */ setCurrentStep(2); }
+      } else if (currentStep === 1) {
         setCurrentStep(2);
       }
-      setScanCompleted(true);
     } catch (error: any) {
       const isTimeout = error?.name === 'AbortError';
       const message = isTimeout
@@ -653,6 +723,9 @@ export default function DockerWorkflow() {
     setDefaultBranchName(null);
     setAnalysisFeedback(null);
     setExistingDockerfile(null);
+    setActivityViewMode('overview');
+    setBuildId(null);
+    setBuildAutoRun(false);
   };
 
   const handleRefresh = async () => {
@@ -812,14 +885,42 @@ export default function DockerWorkflow() {
 
       <main className="container mx-auto px-6 py-8 max-w-7xl">
         <StepIndicator steps={steps} currentStep={currentStep} />
-        <Card className="mb-6 border border-dashed border-border/60 bg-slate-50/80 p-4 shadow-sm text-sm text-muted-foreground">
-          <p className="font-semibold text-slate-900">Docker module scope</p>
-          <p>
-            This workflow only generates Dockerfiles (and related Docker artifacts). Repository selection,
-            branch analysis, and automated Dockerfile creation are the only supported steps—no Terraform, AutomationScripts,
-            ScoreMe, or unrelated content (e.g., weather) is accepted here.
-          </p>
-        </Card>
+
+        {/* Workflow Progress Panel */}
+        <div className="rounded-xl border bg-card p-5 sm:p-6 mt-6">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">Workflow Progress</h2>
+                <p className="text-sm text-muted-foreground">Structured setup summary for the current Docker session</p>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs">
+                {scanCompleted ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                ) : (
+                  <Clock3 className="w-4 h-4 text-amber-600" />
+                )}
+                <span className="font-medium">Next Action: {getNextActionLabel()}</span>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+              {workflowSummaryItems.map((item) => (
+                <div key={item.label} className="rounded-lg border bg-muted/30 p-3">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{item.label}</p>
+                  <p className="mt-1 text-sm font-medium break-words">{item.value}</p>
+                </div>
+              ))}
+            </div>
+            {dockerfileSource === 'existing' && (
+              <div className="rounded-lg border border-emerald-200 dark:border-emerald-900 bg-emerald-50/70 dark:bg-emerald-950/30 p-3">
+                <p className="text-xs font-semibold text-emerald-900 dark:text-emerald-100">Existing Dockerfile detected</p>
+                <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
+                  Skipped AI generation — your repository Dockerfile was loaded directly for review and scanning.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
 
         <div className="mt-8">
           {/* Step 1: Repository Selection */}
@@ -1179,12 +1280,22 @@ export default function DockerWorkflow() {
                   </p>
                 )}
               </Card>
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-3">
+                {existingDockerfile && (
+                  <Button
+                    variant="default"
+                    onClick={handleUseExistingDockerfile}
+                    disabled={isGenerating}
+                  >
+                    Use Existing Dockerfile →
+                  </Button>
+                )}
                 <Button
+                  variant={existingDockerfile ? "outline" : "default"}
                   onClick={handleProceedToGenerate}
                   disabled={!scanCompleted || !scanHasResults || isGenerating}
                 >
-                  {isGenerating ? "Generating..." : "Next → Generate"}
+                  {isGenerating ? "Generating..." : existingDockerfile ? "Regenerate with AI" : "Next → Generate"}
                 </Button>
               </div>
                 </div>
@@ -1241,9 +1352,13 @@ export default function DockerWorkflow() {
           {currentStep === 4 && (
             <div className="space-y-6">
               <div className="text-center">
-                <h2 className="text-2xl font-bold mb-2">Generated Dockerfile</h2>
+                <h2 className="text-2xl font-bold mb-2">
+                  {dockerfileSource === 'existing' ? 'Existing Dockerfile' : 'Generated Dockerfile'}
+                </h2>
                 <p className="text-muted-foreground">
-                  Review and edit the AI-generated artifacts before scanning or committing.
+                  {dockerfileSource === 'existing'
+                    ? 'Your repository already has a Dockerfile — review it and run security & best practices checks.'
+                    : 'Review and edit the AI-generated artifacts before scanning or committing.'}
                 </p>
               </div>
 
@@ -1390,63 +1505,216 @@ export default function DockerWorkflow() {
             </div>
           )}
 
-          {/* Step 5: Activities */}
-          {currentStep === 5 && (
-            <div className="space-y-6">
-              <div className="text-center">
-                <h2 className="text-2xl font-bold mb-2">Activities</h2>
-                <p className="text-muted-foreground">
-                  Run security scans and other activities on your Dockerfile
-                </p>
-              </div>
+          {/* Step 5: Build Workspace */}
+          {currentStep === 5 && (() => {
+            const dockerfileFile = generatedFiles.find(f => f.fileName.toLowerCase().includes('dockerfile'));
+            const dockerfileLines = dockerfileFile ? dockerfileFile.content.split('\n').length : 0;
+            const fromLines = dockerfileFile ? (dockerfileFile.content.match(/^FROM\s+\S+/gim) ?? []) : [];
+            const baseImages = Array.from(new Set(fromLines.map(l => l.replace(/^FROM\s+/i, '').split(' ')[0])));
+            const isMultiStage = fromLines.length > 1;
 
-              <ActivityPanel 
-                sessionId={sessionId}
-                workflowType="docker"
-                onScanComplete={(result) => {
-                  setScanCompleted(true);
-                  // Only mark as having results if scan was successful and has resources
-                  if (result && result.success && result.summary && result.summary.total > 0) {
-                    setScanHasResults(true);
-                  } else {
-                    setScanHasResults(false);
-                  }
-                }}
-              />
-
-              <div className="flex flex-col gap-4 items-center">
-                <div className="flex gap-4 justify-center">
-                  <Button
-                    variant="outline"
-                    onClick={() => setCurrentStep(4)}
-                  >
-                    ← Back
-                  </Button>
-                  <Button
-                    onClick={() => {
-                      setCurrentStep(6);
-                      apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
-                        currentStep: '6'
-                      });
-                    }}
-                    disabled={!scanHasResults}
-                  >
-                    Continue to Commit →
-                  </Button>
+            return (
+              <div className="space-y-6">
+                {/* Header + tab bar */}
+                <div>
+                  <h2 className="text-2xl font-bold tracking-tight">Build Workspace</h2>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    {generatedFiles.length > 0
+                      ? `${generatedFiles.length} file${generatedFiles.length !== 1 ? 's' : ''} · ${dockerfileSource === 'existing' ? 'Existing Dockerfile' : 'AI-generated Dockerfile'}`
+                      : 'Your Dockerfile is being prepared…'}
+                  </p>
                 </div>
-                {!scanHasResults && scanCompleted && (
-                  <p className="text-sm text-muted-foreground text-center">
-                    Please run a successful security scan (with results) before committing
-                  </p>
+
+                {/* Tab navigation */}
+                <div className="flex gap-1 border-b pb-0">
+                  {(['overview', 'build', 'code'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      onClick={() => setActivityViewMode(mode)}
+                      className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors -mb-px ${
+                        activityViewMode === mode
+                          ? 'border-primary text-primary'
+                          : 'border-transparent text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {mode === 'build' ? 'Build Pipeline' : mode.charAt(0).toUpperCase() + mode.slice(1)}
+                    </button>
+                  ))}
+                </div>
+
+                {/* ── OVERVIEW TAB ── */}
+                {activityViewMode === 'overview' && (
+                  <div className="space-y-6">
+                    {/* KPI cards */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      {[
+                        { label: 'Files',       value: generatedFiles.length,          sub: 'generated',    icon: FileText,    color: 'text-blue-500',    bg: 'bg-blue-50' },
+                        { label: 'Lines',       value: dockerfileLines,                sub: 'in Dockerfile', icon: FileCode,    color: 'text-violet-500',  bg: 'bg-violet-50' },
+                        { label: 'Base Images', value: baseImages.length || '—',       sub: 'detected',     icon: Layers,      color: 'text-emerald-500', bg: 'bg-emerald-50' },
+                        { label: 'Multi-stage', value: isMultiStage ? 'Yes' : 'No',    sub: 'build',        icon: Shield,      color: 'text-orange-500',  bg: 'bg-orange-50' },
+                      ].map(({ label, value, sub, icon: Icon, color, bg }) => (
+                        <div key={label} className={`rounded-2xl border p-4 flex items-center gap-4 ${bg}`}>
+                          <div className={`rounded-xl p-2.5 ${bg}`}>
+                            <Icon className={`w-5 h-5 ${color}`} />
+                          </div>
+                          <div>
+                            <p className="text-xl font-bold leading-tight">{value}</p>
+                            <p className="text-xs text-muted-foreground">{label} <span className="opacity-60">{sub}</span></p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Base images detected */}
+                    {baseImages.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {baseImages.map(img => (
+                          <span key={img} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium bg-muted border">
+                            {img}
+                          </span>
+                        ))}
+                        {isMultiStage && (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-50 border border-emerald-200 text-emerald-700">
+                            Multi-stage build
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Image size estimates */}
+                    {imageEstimates && imageEstimates.length > 0 && (
+                      <div className="rounded-2xl border border-border/50 bg-white p-4 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <HardDrive className="w-4 h-4 text-primary" />
+                          <p className="text-sm font-semibold">Estimated Image Sizes</p>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {imageEstimates.map((est) => (
+                            <div key={est.image} className="rounded-xl border border-border/30 bg-slate-50 p-3 text-xs space-y-1">
+                              <p className="font-mono font-semibold text-slate-800 truncate">{est.image}</p>
+                              <div className="flex gap-4 text-muted-foreground">
+                                <span><Cpu className="w-3 h-3 inline mr-1" />Pulled: <strong className="text-slate-700">{est.compressedMB} MB</strong></span>
+                                <span>On-disk: <strong className="text-slate-700">{est.uncompressedMB} MB</strong></span>
+                              </div>
+                              {est.isEstimated && <p className="text-amber-600">Estimated</p>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* File cards */}
+                    {generatedFiles.length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">Generated Files</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                          {generatedFiles.map(f => (
+                            <button key={f.fileName}
+                              onClick={() => setActivityViewMode('code')}
+                              className="group text-left rounded-2xl border bg-card p-4 hover:border-primary/40 hover:shadow-sm transition-all space-y-2"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <FileCode className="w-4 h-4 shrink-0 text-blue-500" />
+                                  <span className="text-xs font-mono font-semibold truncate">{f.fileName}</span>
+                                </div>
+                              </div>
+                              <p className="text-xs text-muted-foreground">{f.content.split('\n').length} lines</p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Build complete summary */}
+                    {buildId && (
+                      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 flex items-center gap-3">
+                        <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                        <div>
+                          <p className="text-sm font-semibold text-emerald-900">Build Complete — {buildId}</p>
+                          <p className="text-xs text-emerald-700 mt-0.5">All pipeline stages passed. Proceed to Commit.</p>
+                        </div>
+                      </div>
+                    )}
+
+                  </div>
                 )}
-                {!scanCompleted && (
-                  <p className="text-sm text-muted-foreground text-center">
-                    Please run a security scan before committing
-                  </p>
+
+                {/* ── BUILD TAB ── */}
+                {activityViewMode === 'build' && (
+                  <div className="space-y-4">
+                    <ActivityPanel
+                      sessionId={sessionId}
+                      workflowType="docker"
+                      pipelineLayout="sidebar"
+                      autoRun={buildAutoRun}
+                      onRequestRunPipeline={() => { setBuildAutoRun(false); }}
+                      onScanComplete={(result) => {
+                        if (result && result.success && result.summary && result.summary.total > 0) {
+                          setScanHasResults(true);
+                        }
+                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                      }}
+                      onFixesApproved={() => {
+                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                        toast({ title: 'Fixes Applied', description: 'Best-practice fixes applied. Files updated.' });
+                      }}
+                      onPipelineComplete={async () => {
+                        setBuildAutoRun(false);
+                        setScanCompleted(true);
+                        setScanHasResults(true);
+                        const now = new Date();
+                        const pad = (n: number) => String(n).padStart(2, '0');
+                        const id = `DOCKER-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+                        setBuildId(id);
+                        toast({ title: 'Build Complete', description: `${id} — ready to commit.` });
+                        setActivityViewMode('overview');
+                      }}
+                    />
+                  </div>
                 )}
+
+                {/* ── CODE TAB ── */}
+                {activityViewMode === 'code' && (
+                  <div className="space-y-3">
+                    <div className="rounded-2xl border bg-card overflow-hidden">
+                      {generatedFiles.length > 0 ? (
+                        <CodeEditor
+                          files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))}
+                          onFileChange={handleFileChange}
+                        />
+                      ) : (
+                        <div className="p-10 text-center text-muted-foreground space-y-2">
+                          <FileCode className="w-8 h-8 mx-auto opacity-40" />
+                          <p className="text-sm">No files generated yet</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Navigation footer */}
+                <div className="flex flex-col gap-3 items-center pt-2 border-t">
+                  <div className="flex gap-4 justify-center">
+                    <Button variant="outline" onClick={() => setCurrentStep(4)}>← Back</Button>
+                    <Button
+                      onClick={() => {
+                        setCurrentStep(6);
+                        apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
+                      }}
+                      disabled={!scanCompleted}
+                      title={!scanCompleted ? 'Run the Build pipeline first to continue' : undefined}
+                    >
+                      Continue to Commit →
+                    </Button>
+                  </div>
+                  {!scanCompleted && (
+                    <p className="text-xs text-muted-foreground">Run the Build pipeline to unlock commit</p>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Step 6: Commit */}
           {currentStep === 6 && (

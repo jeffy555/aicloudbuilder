@@ -61,6 +61,12 @@ interface CheckovScannerProps {
   framework?: 'terraform' | 'kubernetes' | 'docker'; // Add framework prop
   onFixesApplied?: (diffs: Array<{ fileName: string; fixedContent: string }>) => void;
   onFixesApproved?: (diffs: Array<{ fileName: string; fixedContent: string }>) => void;
+  onFixResult?: (payload: {
+    fixed: number;
+    failed: number;
+    skipped: number;
+    failureDetails: Array<{ checkId: string; checkName: string; resource: string; file: string; reason: string }>;
+  }) => void;
   showDiffView?: boolean;
 }
 
@@ -79,6 +85,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
     framework = 'terraform',
     onFixesApplied,
     onFixesApproved,
+    onFixResult,
     showDiffView = true,
   }, ref) => {
   const [isScanning, setIsScanning] = useState(false);
@@ -90,6 +97,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
   const [fileDiffs, setFileDiffs] = useState<Array<{ fileName: string; originalContent: string; fixedContent: string }>>([]);
   const [fixesApproved, setFixesApproved] = useState(false);
   const [hasUnapprovedFixes, setHasUnapprovedFixes] = useState(false);
+  const [latestFixFailures, setLatestFixFailures] = useState<Array<{ checkId: string; checkName: string; resource: string; file: string; reason: string }>>([]);
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [expandedModules, setExpandedModules] = useState<Set<string>>(new Set());
@@ -365,6 +373,20 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
         if (failed > 0 || skipped > 0) {
           // Show detailed error for failed/skipped checks
           const failedChecks = details.filter((d: any) => d.status === 'failed' || d.status === 'skipped');
+          const failureDetails = failedChecks.map((d: any) => ({
+            checkId: d.checkId || 'unknown',
+            checkName: d.checkName || d.checkId || 'Unknown check',
+            resource: d.resource || 'unknown',
+            file: d.file || 'unknown',
+            reason: d.reason || 'No reason provided',
+          }));
+          setLatestFixFailures(failureDetails);
+          onFixResult?.({
+            fixed,
+            failed,
+            skipped,
+            failureDetails,
+          });
           const failedDetails = failedChecks.map((d: any) => 
             d.checkId + ": " + d.reason
           ).join('\n');
@@ -378,12 +400,20 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
           // Also log to console for debugging
           console.warn('Some checks were not fixed:', failedDetails);
         } else {
+          setLatestFixFailures([]);
+          onFixResult?.({
+            fixed,
+            failed,
+            skipped,
+            failureDetails: [],
+          });
           toast({
             title: "Issues fixed",
             description: message,
           });
         }
       } else {
+        setLatestFixFailures([]);
         toast({
           title: "Issues fixed",
           description: "Successfully fixed " + (result.fixedFiles?.length || 0) + " file(s)",
@@ -1264,6 +1294,31 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                         )}
                   </Card>
                 </div>
+              )}
+
+              {/* Explicit reasons for failed/skipped fixes */}
+              {latestFixFailures.length > 0 && (
+                <Card className="p-4 border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30">
+                  <h3 className="font-semibold text-sm mb-2">Fixes Requiring Manual Review</h3>
+                  <p className="text-xs text-muted-foreground mb-3">
+                    Some checks were not auto-fixed. Reasons are listed below.
+                  </p>
+                  <div className="space-y-2">
+                    {latestFixFailures.map((item, idx) => (
+                      <div key={`${item.checkId}-${idx}`} className="rounded border border-red-200 dark:border-red-800 p-2 bg-background">
+                        <div className="text-xs font-medium">
+                          {item.checkId} - {item.checkName}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {item.file} • {item.resource}
+                        </div>
+                        <div className="text-xs mt-1 text-red-700 dark:text-red-300">
+                          {item.reason}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
               )}
 
               {/* Passed Checks Sample */}

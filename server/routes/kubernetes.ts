@@ -13,12 +13,14 @@ import { resolveRepositoryCredentials } from "../utils/credentials";
 import { generateKubernetesManifests } from "../kubernetes/manifest-generator";
 import { validateHelmChart } from "../kubernetes/helm-validation-service";
 import { generateKubernetesDiagram } from "../kubernetes/diagram-generator";
-import { runCheckovKubernetes, runCheckovHelm } from "../kubernetes/checkov-validator";
+import { runCheckovKubernetes, runCheckovHelm, runKubernetesSecurityScanFallback } from "../kubernetes/checkov-validator";
 import { analyzeKubernetesBestPractices } from "../kubernetes/best-practices-analyzer";
 import { validateKubernetesYAML } from "../kubernetes/kubeval-validator";
 import { buildKustomize } from "../kubernetes/kustomize-validator";
 import { scoreSecurityContexts } from "../kubernetes/security-scorer";
 import { checkPolicyHints } from "../kubernetes/policy-hints";
+import { estimateKubernetesCost } from "../kubernetes/cost-estimator";
+import { generateK8sRightsizingRecommendations } from "../kubernetes/resource-rightsizing";
 import { createRequire } from "module";
 import * as fs from "fs";
 import * as path from "path";
@@ -251,6 +253,8 @@ export function registerKubernetesRoutes(app: Express) {
       );
 
       let checkovResult;
+      // Holds plain-YAML files the TS fallback scanner can parse (used if Checkov returns 0)
+      let fallbackScanFiles: Array<{ path: string; content: string }> = [];
 
       if (isHelmChart) {
         // ── Helm chart scan ────────────────────────────────────────────────
@@ -275,6 +279,25 @@ export function registerKubernetesRoutes(app: Express) {
               .filter(f => f.fileName !== '.helmignore')
               .map(f => ({ path: f.fileName, content: f.content }));
             checkovResult = await runCheckovHelm(helmFiles);
+            // Populate fallback by stripping Go template syntax so TS scanner can parse them
+            fallbackScanFiles = files
+              .filter(f => f.fileName.startsWith('templates/') && (f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml')))
+              .map(f => ({
+                path: f.fileName,
+                content: f.content.split('\n').map(line => {
+                  if (!line.includes('{{')) return line;
+                  // Pure template line (only whitespace + {{ ... }}) — drop it
+                  if (/^\s*\{\{[^}]*\}\}\s*$/.test(line)) return '';
+                  // Inline: replace "{{ ... }}" (quoted) with "placeholder"
+                  let out = line
+                    .replace(/"[^"]*\{\{[^"]*"/g, '"placeholder"')
+                    .replace(/'[^']*\{\{[^']*'/g, "'placeholder'");
+                  // Replace any remaining unquoted {{ ... }} with placeholder
+                  out = out.replace(/\{\{[^}]*\}\}/g, 'placeholder');
+                  return out;
+                }).join('\n'),
+              }));
+            console.log(`   TS fallback: stripped ${fallbackScanFiles.length} template file(s) for security scan`);
           } else {
             // Preserve template source path so fix-issues can map checks back to
             // real session files (templates/*.yaml) and show approval diffs.
@@ -289,6 +312,8 @@ export function registerKubernetesRoutes(app: Express) {
               };
             });
             console.log(`   ✅ Rendered ${rendered.length} template(s) — scanning with Checkov`);
+            // Save rendered files so the TS fallback can scan them if Checkov returns 0
+            fallbackScanFiles = renderedYamlFiles;
             checkovResult = await runCheckovKubernetes(renderedYamlFiles);
           }
         } finally {
@@ -368,23 +393,34 @@ export function registerKubernetesRoutes(app: Express) {
       console.log(`   Using normalized counts: actualPassed=${actualPassed}, actualFailed=${actualFailed}`);
       console.log(`   Total: ${total}, Pass Rate: ${passPercentage}%`);
       
-      // Warn if all values are 0 (likely means no files were scanned)
-      if (total === 0 && actualPassed === 0 && actualFailed === 0) {
-        console.error(`\n❌ WARNING: All scan results are 0!`);
-        console.error(`   This indicates Checkov did not find any Kubernetes resources to scan.`);
-        console.error(`   Possible causes:`);
-        console.error(`   1. No Kubernetes YAML files were written to temp directory`);
-        console.error(`   2. Files were written but Checkov cannot parse them`);
-        console.error(`   3. Files are empty or invalid`);
-        console.error(`   Check the file writing logs above for details.`);
+      // Safety net: if Checkov returned 0 results for any reason, use the pure TS scanner
+      if (total === 0) {
+        console.warn(`\n⚠️  Checkov returned 0 results — activating TypeScript security scanner fallback`);
+        // Prefer rendered YAML / stripped templates (no Go syntax) over raw session files
+        const plainFiles = fallbackScanFiles.length > 0
+          ? fallbackScanFiles
+          : files
+              .filter(f => f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml'))
+              .map(f => ({ path: f.fileName, content: f.content }));
+        const fallback = runKubernetesSecurityScanFallback(plainFiles);
+        const fbTotal = fallback.passed + fallback.failed;
+        console.log(`   TS fallback: passed=${fallback.passed}, failed=${fallback.failed}, total=${fbTotal}`);
+        if (fbTotal > 0) {
+          const fbPct = fbTotal > 0 ? Math.round((fallback.passed / fbTotal) * 100) : 0;
+          return res.json({
+            success: true,
+            summary: { passed: fallback.passed, failed: fallback.failed, skipped: 0, total: fbTotal, passPercentage: fbPct },
+            failedChecks: fallback.checks.map(c => ({
+              checkId: c.checkId, checkName: c.checkName, resource: c.resource,
+              file: c.file, guideline: c.guideline, reason: c.message,
+            })),
+            passedChecks: [],
+          });
+        }
       }
-      
+
       console.log(`==========================================\n`);
-      
-      // Prepare response (same structure as Terraform)
-      console.log(`\n📤 Preparing Kubernetes API response:`);
-      console.log(`   Response summary: passed=${actualPassed}, failed=${actualFailed}, skipped=${actualSkipped}, total=${total}, passPercentage=${passPercentage}`);
-      
+
       const summary = {
         passed: actualPassed,
         failed: actualFailed,
@@ -1386,6 +1422,52 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
     } catch (error: any) {
       console.error('❌ Policy check failed:', error);
       res.status(500).json({ error: 'Failed to run policy check', details: error.message });
+    }
+  });
+
+  // K8s resource rightsizing
+  app.post("/api/sessions/:id/rightsize-kubernetes", optionalAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const sessionId = req.params.id;
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      const files = await storage.getFilesBySession(sessionId);
+      const yamlFiles = files
+        .filter(f => f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml'))
+        .map(f => ({ fileName: f.fileName, content: f.content }));
+
+      if (yamlFiles.length === 0) {
+        return res.json({ success: true, result: { recommendations: [], totalContainersAnalysed: 0, totalWorkloadsAnalysed: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 } });
+      }
+
+      const result = generateK8sRightsizingRecommendations(yamlFiles);
+      res.json({ success: true, result });
+    } catch (error: any) {
+      console.error('K8s rightsizing error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // K8s cost estimation
+  app.post("/api/sessions/:id/estimate-k8s-cost", optionalAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const sessionId = req.params.id;
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      const files = await storage.getFilesBySession(sessionId);
+      if (files.length === 0) return res.json({ success: true, result: { breakdown: [], totalMonthlyCost: 0, totalYearlyCost: 0, currency: 'USD', totalContainers: 0, totalWorkloads: 0, recommendations: [] } });
+
+      const yamlFiles = files
+        .filter(f => f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml'))
+        .map(f => ({ fileName: f.fileName, content: f.content }));
+
+      const result = estimateKubernetesCost(yamlFiles);
+      res.json({ success: true, result });
+    } catch (error: any) {
+      console.error('K8s cost estimation error:', error);
+      res.status(500).json({ error: error.message });
     }
   });
 }

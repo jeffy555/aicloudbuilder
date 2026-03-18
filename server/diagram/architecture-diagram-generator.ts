@@ -629,11 +629,27 @@ function extractMermaidSyntax(candidate: string, fallback: string): string {
   const lower = candidate.toLowerCase();
   const graphIndex = lower.indexOf('graph ');
   const flowchartIndex = lower.indexOf('flowchart ');
-  const sequenceIndex = lower.indexOf('sequence ');
+  const sequenceIndex = lower.indexOf('sequencediagram');
+  const stateIndex = lower.indexOf('statediagram');
+  const pieIndex = lower.indexOf('pie ');
+  const classIndex = lower.indexOf('classdiagram');
+  const mindmapIndex = lower.indexOf('mindmap');
+  const ganttIndex = lower.indexOf('gantt');
+  const erIndex = lower.indexOf('erdiagram');
+  const journeyIndex = lower.indexOf('journey');
+  const gitGraphIndex = lower.indexOf('gitgraph');
   const diagramKeywordIndex = Math.min(
     graphIndex === -1 ? Infinity : graphIndex,
     flowchartIndex === -1 ? Infinity : flowchartIndex,
-    sequenceIndex === -1 ? Infinity : sequenceIndex
+    sequenceIndex === -1 ? Infinity : sequenceIndex,
+    stateIndex === -1 ? Infinity : stateIndex,
+    pieIndex === -1 ? Infinity : pieIndex,
+    classIndex === -1 ? Infinity : classIndex,
+    mindmapIndex === -1 ? Infinity : mindmapIndex,
+    ganttIndex === -1 ? Infinity : ganttIndex,
+    erIndex === -1 ? Infinity : erIndex,
+    journeyIndex === -1 ? Infinity : journeyIndex,
+    gitGraphIndex === -1 ? Infinity : gitGraphIndex
   );
 
   if (diagramKeywordIndex === Infinity) {

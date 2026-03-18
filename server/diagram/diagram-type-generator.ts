@@ -217,7 +217,7 @@ export function generateMindmap(
 
     if (maxDepth < 2) {
       if (branch.children && branch.children.length > 0) {
-        syntax += `      "(...)\"\n`;
+        syntax += `      "(...)"\n`;
       }
       continue;
     }
@@ -228,7 +228,7 @@ export function generateMindmap(
 
       if (maxDepth < 3) {
         if (child.children && child.children.length > 0) {
-          syntax += `        "(...)\"\n`;
+          syntax += `        "(...)"\n`;
         }
         continue;
       }
@@ -240,7 +240,7 @@ export function generateMindmap(
             syntax += `        ${quoteLabel(grandchild.label)}\n`;
           }
         } else {
-          syntax += `        "(...)\"\n`;
+          syntax += `        "(...)"\n`;
         }
       }
     }
@@ -284,8 +284,7 @@ export function generateErDiagram(
   let syntax = 'erDiagram\n';
   entities.slice(0, 6).forEach(entity => {
     const entityId = sanitizeId(entity.name);
-    const entityLabel = sanitizeLabel(entity.name);
-    syntax += `    ${entityId} as "${entityLabel}" {\n`;
+    syntax += `    ${entityId} {\n`;
     (entity.fields || ['id']).forEach(field => {
       const fieldId = sanitizeId(field);
       syntax += `        string ${fieldId}\n`;
@@ -311,7 +310,10 @@ export function generateJourneyDiagram(
   let syntax = 'journey\n  title Architecture journey\n';
   syntax += '  section Flow\n';
   steps.slice(0, 6).forEach(step => {
-    syntax += `    ${quoteLabel(step.actor)} : ${escapeText(step.action)} → ${quoteLabel(step.target)}\n`;
+    const task = `${escapeText(step.action || 'process')} ${sanitizeLabel(step.target || 'resource')}`.trim();
+    const actor = sanitizeLabel(step.actor || 'System') || 'System';
+    // Mermaid journey format: Task: score: Actor
+    syntax += `    ${task}: 3: ${actor}\n`;
   });
   return syntax;
 }

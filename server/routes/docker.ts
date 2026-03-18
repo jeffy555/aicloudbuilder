@@ -1358,11 +1358,87 @@ Return ONLY the fixed Dockerfile content.`,
       });
     } catch (error: any) {
       console.error('❌ Error committing Dockerfile:', error);
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Failed to commit Dockerfile',
         details: error.message,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
+    }
+  });
+
+  // Generate architecture diagram for Docker session (Dockerfile → Mermaid)
+  app.post("/api/sessions/:id/generate-docker-diagram", async (req, res) => {
+    const sessionId = req.params.id;
+    try {
+      const session = await storage.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+
+      const files = await storage.getFilesBySession(sessionId);
+      const dockerFiles = files.filter(f =>
+        f.fileName.toLowerCase().includes('dockerfile') ||
+        f.fileName.toLowerCase().includes('docker-compose') ||
+        f.fileName.toLowerCase().endsWith('.yml') ||
+        f.fileName.toLowerCase().endsWith('.yaml')
+      );
+
+      if (dockerFiles.length === 0) {
+        return res.status(400).json({ error: 'No Dockerfile found', details: 'Generate a Dockerfile first' });
+      }
+
+      const filesContent = dockerFiles.map(f => `=== ${f.fileName} ===\n${f.content}`).join('\n\n');
+
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: `You generate Mermaid flowchart diagrams for Docker architectures.
+Given Dockerfile and optional docker-compose.yml content, produce a clear Mermaid graph TD diagram showing:
+- Build stages (multi-stage builds as separate nodes)
+- Base images as top-level nodes
+- Services from docker-compose (if present) as separate nodes
+- Port exposures and volume mounts as annotations
+- Service dependencies (depends_on) as arrows
+
+Rules:
+- Use graph TD direction
+- Node IDs must be alphanumeric with no spaces
+- Labels in square brackets [ ]
+- Use --> for relationships
+- Do NOT include subgraph blocks (not supported)
+- Return ONLY the raw Mermaid syntax starting with "graph TD", no markdown fences`
+          },
+          {
+            role: 'user',
+            content: `Generate a Mermaid architecture diagram for this Docker setup:\n\n${filesContent}`
+          }
+        ],
+        max_tokens: 1000,
+        temperature: 0.2,
+      });
+
+      let mermaidSyntax = response.choices[0]?.message?.content?.trim() || '';
+      // Strip markdown fences if present
+      mermaidSyntax = mermaidSyntax.replace(/^```(?:mermaid)?\n?/i, '').replace(/\n?```$/i, '').trim();
+
+      if (!mermaidSyntax.startsWith('graph')) {
+        mermaidSyntax = `graph TD\n  Dockerfile["📦 Dockerfile"]\n  Image["🐳 Docker Image"]\n  Dockerfile --> Image`;
+      }
+
+      res.json({
+        success: true,
+        mermaidSyntax,
+        metadata: {
+          totalResources: dockerFiles.length,
+          totalRelationships: 0,
+          categories: ['Docker'],
+          diagramType: 'flowchart',
+        },
+      });
+    } catch (error: any) {
+      console.error('❌ Error generating Docker diagram:', error);
+      res.status(500).json({ error: 'Failed to generate Docker diagram', details: error.message });
     }
   });
 }

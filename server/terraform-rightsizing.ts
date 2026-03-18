@@ -223,7 +223,7 @@ const RULES: RightsizingRule[] = [
   // ── App Service Plans ─────────────────────────────────────────────────────
   {
     resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku'],
+    attributes: ['sku_name', 'sku', 'size'],
     pattern: /^P3v3$/i,
     currentLabel: 'Premium v3 P3 (4 vCPUs)',
     suggestedValue: 'P2v3',
@@ -234,7 +234,7 @@ const RULES: RightsizingRule[] = [
   },
   {
     resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku'],
+    attributes: ['sku_name', 'sku', 'size'],
     pattern: /^P2v3$/i,
     currentLabel: 'Premium v3 P2 (2 vCPUs)',
     suggestedValue: 'P1v3',
@@ -245,7 +245,7 @@ const RULES: RightsizingRule[] = [
   },
   {
     resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku'],
+    attributes: ['sku_name', 'sku', 'size'],
     pattern: /^S3$/i,
     currentLabel: 'Standard S3 (4 vCPUs)',
     suggestedValue: 'S2',
@@ -256,7 +256,7 @@ const RULES: RightsizingRule[] = [
   },
   {
     resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku'],
+    attributes: ['sku_name', 'sku', 'size'],
     pattern: /^S2$/i,
     currentLabel: 'Standard S2 (2 vCPUs)',
     suggestedValue: 'S1',
@@ -267,7 +267,7 @@ const RULES: RightsizingRule[] = [
   },
   {
     resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku'],
+    attributes: ['sku_name', 'sku', 'size'],
     pattern: /^P2v2$/i,
     currentLabel: 'Premium v2 P2 (older generation)',
     suggestedValue: 'P1v3',
@@ -275,6 +275,28 @@ const RULES: RightsizingRule[] = [
     savingPercent: 20,
     rationale: 'Premium v3 delivers better performance per dollar than Premium v2. P1v3 ≈ P2v2 in throughput.',
     risk: 'low',
+  },
+  {
+    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
+    attributes: ['sku_name', 'sku', 'size'],
+    pattern: /^P1v3$/i,
+    currentLabel: 'Premium v3 P1 (entry premium tier)',
+    suggestedValue: 'S1',
+    suggestedLabel: 'Standard S1 (lower-cost shared feature tier)',
+    savingPercent: 30,
+    rationale: 'If Premium-only capabilities are not required (e.g., advanced networking/isolation needs), S1 can reduce cost significantly.',
+    risk: 'high',
+  },
+  {
+    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
+    attributes: ['sku_name', 'sku', 'size'],
+    pattern: /^P1v2$/i,
+    currentLabel: 'Premium v2 P1',
+    suggestedValue: 'S1',
+    suggestedLabel: 'Standard S1',
+    savingPercent: 25,
+    rationale: 'For non-critical workloads that do not depend on Premium tier features, Standard S1 is typically more cost-efficient.',
+    risk: 'high',
   },
 
   // ── Azure SQL Database ────────────────────────────────────────────────────
@@ -416,6 +438,160 @@ interface ParsedResource {
   attributes: Record<string, string>;
 }
 
+function createRecommendation(
+  resource: ParsedResource,
+  attribute: string,
+  currentValue: string,
+  suggestedValue: string,
+  currentLabel: string,
+  suggestedLabel: string,
+  savingPercent: number,
+  rationale: string,
+  risk: 'low' | 'medium' | 'high',
+  costsByAddr: Map<string, number>,
+): RightsizingRecommendation {
+  const address = `${resource.resourceType}.${resource.resourceName}`;
+  const monthlyCost = costsByAddr.get(address) ?? 0;
+  const estimatedMonthlySaving = monthlyCost > 0
+    ? Math.round(monthlyCost * savingPercent / 100 * 100) / 100
+    : undefined;
+
+  return {
+    address,
+    resourceType: resource.resourceType,
+    resourceName: resource.resourceName,
+    attribute,
+    currentValue,
+    suggestedValue,
+    currentLabel,
+    suggestedLabel,
+    estimatedSavingPercent: savingPercent,
+    estimatedMonthlySaving,
+    rationale,
+    risk,
+  };
+}
+
+/**
+ * Generic Azure fallback heuristics so rightsizing can still provide
+ * recommendations for azurerm resources not yet covered by explicit rules.
+ */
+function generateGenericAzureRecommendation(
+  resource: ParsedResource,
+  costsByAddr: Map<string, number>,
+): RightsizingRecommendation | null {
+  if (!resource.resourceType.startsWith('azurerm_')) return null;
+
+  const candidates = ['sku_name', 'size', 'vm_size', 'storage_account_type', 'sku', 'sku_tier', 'tier'];
+  const attribute = candidates.find((attr) => !!resource.attributes[attr]);
+  if (!attribute) return null;
+
+  const currentValue = resource.attributes[attribute];
+  if (!currentValue) return null;
+
+  // Premium -> Standard fallback
+  if (/premium/i.test(currentValue)) {
+    const suggestedValue = currentValue.replace(/premium/gi, 'Standard');
+    if (suggestedValue !== currentValue) {
+      return createRecommendation(
+        resource,
+        attribute,
+        currentValue,
+        suggestedValue,
+        `${currentValue} (premium/high-cost tier)`,
+        `${suggestedValue} (standard tier)`,
+        25,
+        'Premium tier detected. If premium-only features are not required, Standard is typically more cost-efficient.',
+        'high',
+        costsByAddr,
+      );
+    }
+  }
+
+  // Geo-redundant storage -> local redundancy
+  if (/(RAGRS|GRS)$/i.test(currentValue)) {
+    const suggestedValue = currentValue.replace(/RAGRS$/i, 'LRS').replace(/GRS$/i, 'LRS');
+    if (suggestedValue !== currentValue) {
+      return createRecommendation(
+        resource,
+        attribute,
+        currentValue,
+        suggestedValue,
+        `${currentValue} (geo-redundant replication)`,
+        `${suggestedValue} (local redundancy)`,
+        40,
+        'Geo-redundant storage has significantly higher cost. Use LRS when cross-region DR is not required.',
+        'high',
+        costsByAddr,
+      );
+    }
+  }
+
+  // Azure VM-style Standard_D* downsizing
+  const vmMatch = currentValue.match(/^Standard_D(\d+)(.*)$/i);
+  if (vmMatch) {
+    const currentSize = Number(vmMatch[1]);
+    if (Number.isFinite(currentSize) && currentSize >= 4) {
+      const nextSize = Math.max(2, Math.floor(currentSize / 2));
+      const suggestedValue = `Standard_D${nextSize}${vmMatch[2]}`;
+      return createRecommendation(
+        resource,
+        attribute,
+        currentValue,
+        suggestedValue,
+        `${currentValue} (current compute size)`,
+        `${suggestedValue} (downsized compute)`,
+        30,
+        'A larger D-series size was detected. Step-down sizing is a common rightsizing move for underutilized workloads.',
+        'medium',
+        costsByAddr,
+      );
+    }
+  }
+
+  // PostgreSQL/MySQL style GP_Standard_D* downsizing
+  const dbMatch = currentValue.match(/^GP_Standard_D(\d+)(.*)$/i);
+  if (dbMatch) {
+    const currentSize = Number(dbMatch[1]);
+    if (Number.isFinite(currentSize) && currentSize >= 4) {
+      const nextSize = Math.max(2, Math.floor(currentSize / 2));
+      const suggestedValue = `GP_Standard_D${nextSize}${dbMatch[2]}`;
+      return createRecommendation(
+        resource,
+        attribute,
+        currentValue,
+        suggestedValue,
+        `${currentValue} (current database compute tier)`,
+        `${suggestedValue} (downsized database compute tier)`,
+        35,
+        'Database compute tier appears over-provisioned. A lower GP size can reduce cost if workload headroom is available.',
+        'medium',
+        costsByAddr,
+      );
+    }
+  }
+
+  // Standard S* -> Basic B* heuristic for non-critical workloads
+  const stdMatch = currentValue.match(/^S(\d+)$/i);
+  if (stdMatch) {
+    const suggestedValue = `B${stdMatch[1]}`;
+    return createRecommendation(
+      resource,
+      attribute,
+      currentValue,
+      suggestedValue,
+      `${currentValue} (standard tier)`,
+      `${suggestedValue} (basic tier)`,
+      20,
+      'Standard tier detected. For dev/test or low-traffic workloads, Basic can reduce spend.',
+      'high',
+      costsByAddr,
+    );
+  }
+
+  return null;
+}
+
 /**
  * Extracts `resource "type" "name" { ... }` blocks from HCL and collects
  * every `key = "value"` assignment found inside the body (including inside
@@ -472,6 +648,8 @@ export function generateRightsizingRecommendations(
   const recommendations: RightsizingRecommendation[] = [];
 
   for (const resource of resources) {
+    let matchedExplicitRule = false;
+
     for (const rule of RULES) {
       if (!rule.resourceTypes.includes(resource.resourceType)) continue;
 
@@ -491,28 +669,31 @@ export function generateRightsizingRecommendations(
           ? rule.suggestedLabel.replace(/\$(\d+)/g, (_, n) => match[Number(n)] ?? '')
           : rule.suggestedLabel;
 
-        const address = `${resource.resourceType}.${resource.resourceName}`;
-        const monthlyCost = costsByAddr.get(address) ?? 0;
-        const estimatedMonthlySaving = monthlyCost > 0
-          ? Math.round(monthlyCost * rule.savingPercent / 100 * 100) / 100
-          : undefined;
-
-        recommendations.push({
-          address,
-          resourceType: resource.resourceType,
-          resourceName: resource.resourceName,
-          attribute: attr,
-          currentValue: value,
+        recommendations.push(createRecommendation(
+          resource,
+          attr,
+          value,
           suggestedValue,
-          currentLabel: rule.currentLabel,
+          rule.currentLabel,
           suggestedLabel,
-          estimatedSavingPercent: rule.savingPercent,
-          estimatedMonthlySaving,
-          rationale: rule.rationale,
-          risk: rule.risk,
-        });
+          rule.savingPercent,
+          rule.rationale,
+          rule.risk,
+          costsByAddr,
+        ));
 
-        break; // One recommendation per resource — first matching rule wins
+        matchedExplicitRule = true;
+        break; // attr loop
+      }
+
+      if (matchedExplicitRule) break; // rules loop
+    }
+
+    // Fallback: generic Azure heuristics for resource types not covered by specific rules
+    if (!matchedExplicitRule) {
+      const genericRecommendation = generateGenericAzureRecommendation(resource, costsByAddr);
+      if (genericRecommendation) {
+        recommendations.push(genericRecommendation);
       }
     }
   }

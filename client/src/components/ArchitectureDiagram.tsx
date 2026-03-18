@@ -46,9 +46,9 @@ interface DiagramResult {
 interface ArchitectureDiagramProps {
   sessionId: string;
   onDiagramStart?: () => void;
-  onDiagramComplete?: () => void;
+  onDiagramComplete?: (result?: DiagramResult) => void;
   useArchMeEndpoint?: boolean; // If true, use generate-architecture-diagram endpoint
-  workflowType?: 'terraform' | 'kubernetes'; // Add workflow type
+  workflowType?: 'terraform' | 'kubernetes' | 'docker';
 }
 
 export interface ArchitectureDiagramRef {
@@ -70,6 +70,17 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
     const [enlargedSvg, setEnlargedSvg] = useState<string>("");
   const [isViewerOpen, setIsViewerOpen] = useState(false);
   const [isDownloadingJpg, setIsDownloadingJpg] = useState(false);
+
+  const sanitizeMermaidSyntax = (input: string): string => {
+    let syntax = String(input || '').trim();
+    syntax = syntax
+      .replace(/^```mermaid\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+    syntax = syntax.replace(/^mermaid\s+/i, '').trim();
+    return syntax;
+  };
 
   const diagramTypeOptions: Array<{ value: DiagramType; label: string }> = [
     { value: 'flowchart', label: 'Flowchart (Architecture)' },
@@ -147,9 +158,16 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
           
           // Generate unique ID for this diagram
           const diagramId = `diagram-${Date.now()}`;
+          const sanitizedSyntax = sanitizeMermaidSyntax(diagramResult.mermaidSyntax);
+          if (!sanitizedSyntax) {
+            throw new Error('Empty Mermaid syntax received from diagram generator.');
+          }
           
           // Render the diagram
-          const { svg } = await mermaid.render(diagramId, diagramResult.mermaidSyntax);
+          const { svg } = await mermaid.render(diagramId, sanitizedSyntax);
+          if (/Syntax error in text/i.test(svg)) {
+            throw new Error('Generated Mermaid syntax is invalid for the selected diagram type.');
+          }
           diagramRef.current!.innerHTML = svg;
           setEnlargedSvg(svg);
         } catch (error: any) {
@@ -180,6 +198,8 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
         endpoint = `/api/sessions/${sessionId}/generate-architecture-diagram`;
       } else if (workflowType === 'kubernetes') {
         endpoint = `/api/sessions/${sessionId}/generate-kubernetes-diagram`;
+      } else if (workflowType === 'docker') {
+        endpoint = `/api/sessions/${sessionId}/generate-docker-diagram`;
       } else {
         endpoint = `/api/sessions/${sessionId}/generate-diagram`;
       }
@@ -200,7 +220,11 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
         diagramType: diagramType
       });
       
-      setDiagramResult(result);
+      const sanitizedResult = {
+        ...result,
+        mermaidSyntax: sanitizeMermaidSyntax(result.mermaidSyntax || ''),
+      };
+      setDiagramResult(sanitizedResult);
       
       const resourceCount = result.metadata.totalResources || result.metadata.totalComponents || 0;
       const relationshipCount = result.metadata.totalRelationships || 0;
@@ -209,6 +233,7 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
         title: "Architecture diagram generated",
         description: `Found ${resourceCount} component(s) with ${relationshipCount} relationship(s)`,
       });
+      onDiagramComplete?.(sanitizedResult);
     } catch (error: any) {
       let errorMessage = error?.message || "Failed to generate architecture diagram";
       let errorDetails = "";
@@ -235,9 +260,9 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
         description: errorDetails ? `${errorMessage}: ${errorDetails}` : errorMessage,
         variant: "destructive",
       });
+      onDiagramComplete?.();
     } finally {
       setIsGenerating(false);
-      onDiagramComplete?.();
     }
   };
 
@@ -337,7 +362,7 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
                 const link = document.createElement('a');
                 const url = URL.createObjectURL(blob);
                 link.href = url;
-                link.download = `${workflowType}-diagram-${Date.now()}.jpg`;
+                link.download = `${workflowType ?? 'architecture'}-diagram-${Date.now()}.jpg`;
                 link.click();
                 URL.revokeObjectURL(url);
               }
@@ -395,7 +420,7 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
   };
 
   // Filter resources
-  const filteredResources = diagramResult?.resources.filter(resource => {
+  const filteredResources = (diagramResult?.resources ?? []).filter(resource => {
     if (!resourceFilter) return true;
     const filter = resourceFilter.toLowerCase();
     return (
@@ -406,7 +431,7 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
   }) || [];
 
   // Filter relationships
-  const filteredRelationships = diagramResult?.relationships.filter(rel => {
+  const filteredRelationships = (diagramResult?.relationships ?? []).filter(rel => {
     if (!relationshipFilter) return true;
     const filter = relationshipFilter.toLowerCase();
     return (
@@ -637,7 +662,14 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
               <Alert variant="destructive">
                 <AlertCircle className="w-4 h-4" />
                 <AlertTitle>Rendering Error</AlertTitle>
-                <AlertDescription>{renderError}</AlertDescription>
+                <AlertDescription>
+                  <div>{renderError}</div>
+                  {diagramResult?.mermaidSyntax ? (
+                    <pre className="mt-2 max-h-40 overflow-auto rounded border bg-white/70 p-2 text-xs text-black dark:bg-black/20 dark:text-gray-100">
+{diagramResult.mermaidSyntax}
+                    </pre>
+                  ) : null}
+                </AlertDescription>
               </Alert>
             ) : (
               <div className="border rounded-lg p-4 bg-white dark:bg-gray-900 overflow-auto">
@@ -650,11 +682,11 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
           </Card>
 
           {/* Resources Table */}
-          {diagramResult.resources.length > 0 && (
+          {(diagramResult.resources ?? []).length > 0 && (
             <Card className="p-4">
               <div className="flex items-center justify-between mb-3">
                 <h4 className="font-semibold text-gray-900 dark:text-gray-100">
-                  Resources ({filteredResources.length} of {diagramResult.resources.length})
+                  Resources ({filteredResources.length} of {(diagramResult.resources ?? []).length})
                 </h4>
                 <div className="relative w-64">
                   <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -704,11 +736,11 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
           )}
 
           {/* Relationships Table */}
-          {diagramResult.relationships.length > 0 && (
+          {(diagramResult.relationships ?? []).length > 0 && (
             <Card className="p-4">
               <div className="flex items-center justify-between mb-3">
                 <h4 className="font-semibold text-gray-900 dark:text-gray-100">
-                  Relationships ({filteredRelationships.length} of {diagramResult.relationships.length})
+                  Relationships ({filteredRelationships.length} of {(diagramResult.relationships ?? []).length})
                 </h4>
                 <div className="relative w-64">
                   <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />

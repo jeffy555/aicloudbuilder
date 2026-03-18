@@ -510,7 +510,7 @@ export function registerTerraformRoutes(app: Express) {
 
           return res.json({
             status: 'configured',
-            message: 'Backend resources created successfully in Azure. Generated backend.tf, provider.tf, and terraform.tf files. Now describe the infrastructure resources you want to create.',
+            message: 'Azure backend provisioning completed successfully. Generated backend.tf, provider.tf, and terraform.tf. Provide the infrastructure requirements to continue.',
             details: {
               ...defaults,
               actualLocation: storageValidation.location || defaults.location,

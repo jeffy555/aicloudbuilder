@@ -1697,13 +1697,10 @@ This infrastructure was generated using natural language descriptions and AI ass
         savedFiles = allFinalFiles;
       }
 
-      // Update session to Review step based on module approach
-      // - standalone-root: Step 7 (Review & Edit UI is at step 7 for non-aggregated-root)
-      // - aggregated-root: Step 8 (Review & Edit UI is at step 8 for aggregated-root)
-      // - child: Step 7 (Review & Edit UI is at step 7 for non-aggregated-root)
-      // Note: Frontend shows code generation UI at step 7 for non-aggregated-root, step 8 for aggregated-root
-      // Files query is enabled for steps 7-10
-      const reviewStep = session.moduleApproach === 'aggregated-root' ? '8' : '7';
+      // Update session to Build Workspace step based on module approach
+      // - standalone-root / child: Step 8 (Build Workspace, step 7 removed)
+      // - aggregated-root: Step 9 (Build Workspace for aggregated-root)
+      const reviewStep = session.moduleApproach === 'aggregated-root' ? '9' : '8';
       await storage.updateSession(sessionId, {
         currentStep: reviewStep,
         workflowStep: 'terraform_generation'

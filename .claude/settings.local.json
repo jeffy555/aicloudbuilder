@@ -20,8 +20,12 @@
       "Bash(not configured\" in the container because it only checked process.env and not:*)",
       "Bash(wc -l /d/AICloudBuilder/test/terraform/**/*.test.ts)",
       "Bash(grep \"it\\(\" /d/AICloudBuilder/test/terraform/unit/*.test.ts /d/AICloudBuilder/test/terraform/integration/*.test.ts)",
-      "Bash(grep -v \"^//\")"
+      "Bash(grep -v \"^//\")",
+      "Bash(npm run:*)",
+      "Bash(SESSION=\"175d903e-e17b-47fb-ae0b-59db67d0bf33\" curl -s -X POST http://localhost:9005/api/sessions/$SESSION/security-score -H \"Content-Type: application/json\")",
+      "Bash(cmd /c \"taskkill /PID 32992 /F\")",
+      "Bash(grep -r \"stack:\" d:/AICloudBuilder/server/routes/*.ts)"
     ]
   },
-  "model": "claude-opus-4.6"
+  "model": "claude-opus-4-6"
 }

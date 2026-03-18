@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import mermaid from "mermaid";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { queryClient, apiRequest } from "@/lib/queryClient";
@@ -15,7 +16,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import CodeEditor from "@/components/CodeEditor";
-import { FileCode, Package, Package2, Home, Cloud, CodeIcon, Loader2, Upload, FileText, RefreshCw, CheckCircle2, AlertTriangle, AlertCircle, FolderOpen, ShieldCheck } from "lucide-react";
+import { FileCode, Package, Package2, Home, Cloud, Loader2, Upload, FileText, RefreshCw, CheckCircle2, AlertTriangle, AlertCircle, FolderOpen, ShieldCheck, BarChart3, Hash, Box, Network, Shield, Lock, Activity, Database, PlayCircle, ChevronRight, Layers, Clock3, Globe, Download } from "lucide-react";
 import ActivityPanel from "@/components/ActivityPanel";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,8 +26,60 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import type { Session, Message, Repository, GeneratedFile } from "@shared/schema";
 
 type WorkflowType = 'manifest' | 'helm' | 'kustomize' | 'helm-generator' | null;
-type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type Step = 1 | 2 | 3 | 4 | 5 | 6;
 type Provider = 'github' | 'azure' | null;
+
+const K8S_KIND_LABELS: Record<string, { label: string; icon: any }> = {
+  Deployment:               { label: 'Deployment',         icon: Layers },
+  StatefulSet:              { label: 'StatefulSet',         icon: Database },
+  DaemonSet:                { label: 'DaemonSet',           icon: Layers },
+  ReplicaSet:               { label: 'ReplicaSet',          icon: Layers },
+  Job:                      { label: 'Job',                 icon: Activity },
+  CronJob:                  { label: 'CronJob',             icon: Clock3 },
+  Pod:                      { label: 'Pod',                 icon: Box },
+  Service:                  { label: 'Service',             icon: Network },
+  Ingress:                  { label: 'Ingress',             icon: Globe },
+  IngressClass:             { label: 'IngressClass',        icon: Network },
+  ConfigMap:                { label: 'ConfigMap',           icon: FileText },
+  Secret:                   { label: 'Secret',              icon: Lock },
+  PersistentVolumeClaim:    { label: 'PVC',                 icon: Database },
+  PersistentVolume:         { label: 'PV',                  icon: Database },
+  StorageClass:             { label: 'StorageClass',        icon: Database },
+  ServiceAccount:           { label: 'ServiceAccount',      icon: Shield },
+  ClusterRole:              { label: 'ClusterRole',         icon: Shield },
+  ClusterRoleBinding:       { label: 'ClusterRoleBinding',  icon: Shield },
+  Role:                     { label: 'Role',                icon: Shield },
+  RoleBinding:              { label: 'RoleBinding',         icon: Shield },
+  NetworkPolicy:            { label: 'NetworkPolicy',       icon: Shield },
+  HorizontalPodAutoscaler:  { label: 'HPA',                 icon: Activity },
+  VerticalPodAutoscaler:    { label: 'VPA',                 icon: Activity },
+  Namespace:                { label: 'Namespace',           icon: FolderOpen },
+  ResourceQuota:            { label: 'ResourceQuota',       icon: Activity },
+  LimitRange:               { label: 'LimitRange',          icon: Activity },
+};
+function k8sKindLabel(kind: string): { label: string; icon: any } {
+  return K8S_KIND_LABELS[kind] ?? { label: kind, icon: Box };
+}
+
+/** Renders a Mermaid diagram from stored syntax — used in the build report */
+function ArchitectureDiagramPreview({ mermaidSyntax }: { mermaidSyntax: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current || !mermaidSyntax) return;
+    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+    const id = `report-diagram-${Math.random().toString(36).slice(2)}`;
+    mermaid.render(id, mermaidSyntax)
+      .then(({ svg }) => {
+        if (containerRef.current) containerRef.current.innerHTML = svg;
+      })
+      .catch((err) => setError(err?.message ?? 'Diagram render error'));
+  }, [mermaidSyntax]);
+
+  if (error) return <p className="text-xs text-rose-600 p-4">{error}</p>;
+  return <div ref={containerRef} className="overflow-auto max-h-[500px] flex justify-center" />;
+}
 
 export default function KubernetesWorkflow() {
   const { toast } = useToast();
@@ -48,6 +101,18 @@ export default function KubernetesWorkflow() {
   const [helmFile, setHelmFile] = useState<File | null>(null);
   const [kustomizePath, setKustomizePath] = useState<string>('');
   const [securityScore, setSecurityScore] = useState<any>(null);
+  const [activityViewMode, setActivityViewMode] = useState<'overview' | 'build' | 'code' | 'report'>('overview');
+  const [buildId, setBuildId] = useState<string | null>(null);
+  const [rightsizingResult, setRightsizingResult] = useState<any>(null);
+  const [isRightsizing, setIsRightsizing] = useState(false);
+  const [policyCheckResult, setPolicyCheckResult] = useState<any>(null);
+  const [isPolicyChecking, setIsPolicyChecking] = useState(false);
+  const [buildAutoRun, setBuildAutoRun] = useState(false);
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [completedPipelineStages, setCompletedPipelineStages] = useState<string[]>([]);
+  // Build report data
+  const [buildDiagramResult, setBuildDiagramResult] = useState<any>(null);
+  const [buildScanResult, setBuildScanResult] = useState<any>(null);
 
   const [expandedSnippets, setExpandedSnippets] = useState<Set<string>>(new Set());
   const toggleSnippet = (id: string) => setExpandedSnippets(prev => {
@@ -102,9 +167,8 @@ export default function KubernetesWorkflow() {
           ? 'Validate'
           : 'Generate'
     },
-    { number: 5, title: 'Review' },
-    { number: 6, title: 'Activities' },
-    { number: 7, title: 'Commit' },
+    { number: 5, title: 'Build' },
+    { number: 6, title: 'Commit' },
   ];
 
   // Create or restore session on mount
@@ -175,6 +239,16 @@ export default function KubernetesWorkflow() {
     }
   }, [sessionId, currentStep]);
 
+  // Reset Build Workspace state when entering step 5
+  useEffect(() => {
+    if (currentStep === 5) {
+      setActivityViewMode('overview');
+      setScanCompleted(false);
+      setBuildId(null);
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+    }
+  }, [currentStep]);
+
   // Fetch messages
   const { data: messages = [] } = useQuery<Message[]>({
     queryKey: ['/api/sessions', sessionId, 'messages'],
@@ -197,11 +271,43 @@ export default function KubernetesWorkflow() {
   // Fetch generated files
   const { data: generatedFiles = [] } = useQuery<GeneratedFile[]>({
     queryKey: ['/api/sessions', sessionId, 'files'],
-    enabled: !!sessionId && currentStep >= 5,
+    enabled: !!sessionId && currentStep >= 4,
     refetchOnMount: true,
   });
 
   const { data: config } = useSecretsConfig();
+
+  // ── Workflow Progress panel ───────────────────────────────────────────────
+  const workflowTypeLabel =
+    workflowType === 'manifest' ? 'Manifest Generation' :
+    workflowType === 'helm' ? 'Helm Validation' :
+    workflowType === 'kustomize' ? 'Kustomize' :
+    workflowType === 'helm-generator' ? 'Helm Generator' : 'Not selected';
+
+  const workflowSummaryItems = [
+    { label: 'Workflow Type',  value: workflowTypeLabel },
+    { label: 'Repo Provider',  value: provider === 'github' ? 'GitHub' : provider === 'azure' ? 'Azure DevOps' : 'Not selected' },
+    { label: 'Repository',     value: selectedRepo || 'Not selected' },
+    { label: 'Files Generated', value: generatedFiles.length > 0 ? `${generatedFiles.length} file${generatedFiles.length !== 1 ? 's' : ''}` : 'None' },
+    { label: 'Build Status',   value: buildId ? `✓ ${buildId}` : scanCompleted ? 'Complete' : currentStep >= 6 ? 'Ready' : 'Pending' },
+  ];
+
+  const getNextActionLabel = () => {
+    if (currentStep === 1) return 'Select workflow type';
+    if (currentStep === 2) return provider ? 'Select or create repository' : 'Select repository provider';
+    if (currentStep === 3) {
+      if (workflowType === 'helm') return 'Upload Helm chart';
+      if (workflowType === 'kustomize') return 'Set Kustomize directory';
+      if (workflowType === 'helm-generator') return 'Confirm application details';
+      return 'Describe your workload';
+    }
+    if (currentStep === 4) return workflowType === 'helm-generator' ? 'Generate Helm chart' : 'Generate Kubernetes manifests';
+    if (currentStep === 5) return 'Review generated files';
+    if (currentStep === 6 && !scanCompleted) return 'Run the Build pipeline';
+    if (currentStep === 6 && scanCompleted && !buildId) return 'Finish Build & approve stages';
+    if (buildId) return 'Proceed to commit';
+    return 'Proceed to commit';
+  };
 
   // Generate Helm Chart mutation
   const generateHelmChartMutation = useMutation({
@@ -389,6 +495,14 @@ export default function KubernetesWorkflow() {
         title: "Committed Successfully",
         description: data.message || "Kubernetes manifests pushed to repository.",
       });
+      // Auto-redirect home after 3 seconds
+      setTimeout(() => {
+        localStorage.removeItem('kubernetes_workflow_session_id');
+        localStorage.removeItem('kubernetes_workflow_type');
+        localStorage.removeItem('kubernetes_workflow_provider');
+        localStorage.removeItem('kubernetes_workflow_repo');
+        setLocation('/');
+      }, 3000);
     },
     onError: (error: any) => {
       toast({
@@ -659,17 +773,65 @@ export default function KubernetesWorkflow() {
 
         <StepIndicator steps={steps} currentStep={currentStep} />
 
+        {/* Workflow summary bar — visible once a type and repo are chosen */}
+        {currentStep >= 3 && workflowType && (
+          <div className="px-4 sm:px-6 lg:px-8 mt-2">
+            <div className="max-w-6xl mx-auto flex flex-wrap items-center gap-2 py-2 px-3 rounded-xl bg-muted/40 border text-xs text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-primary/10 text-primary font-semibold">
+                {workflowType === 'manifest' ? <FileCode className="w-3.5 h-3.5" /> : workflowType === 'helm' ? <Package className="w-3.5 h-3.5" /> : workflowType === 'kustomize' ? <FolderOpen className="w-3.5 h-3.5" /> : <Package2 className="w-3.5 h-3.5" />}
+                {workflowType === 'manifest' ? 'Manifest Generation' : workflowType === 'helm' ? 'Helm Validation' : workflowType === 'kustomize' ? 'Kustomize' : 'Helm Generator'}
+              </span>
+              {provider && (
+                <span className="inline-flex items-center gap-1.5">
+                  <Cloud className="w-3.5 h-3.5" />
+                  {provider === 'github' ? 'GitHub' : 'Azure DevOps'}
+                </span>
+              )}
+              {selectedRepo && (
+                <span className="inline-flex items-center gap-1.5">
+                  <Hash className="w-3.5 h-3.5" />
+                  {selectedRepo}
+                </span>
+              )}
+              {generatedFiles.length > 0 && (
+                <span className="inline-flex items-center gap-1.5 ml-auto">
+                  <FileCode className="w-3.5 h-3.5" />
+                  {generatedFiles.length} file{generatedFiles.length !== 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         <ScrollArea className="flex-1 px-4 sm:px-6 lg:px-8 mt-6">
           <div className="max-w-6xl mx-auto pb-8 space-y-6">
-            {/* Messages */}
-            <div className="mb-8">
-              {messages.map((msg) => (
-                msg.type === 'ai' || msg.type === 'system' ? (
-                  <AIMessage key={msg.id} message={msg.content} />
-                ) : (
-                  <UserMessage key={msg.id} message={msg.content} />
-                )
-              ))}
+
+            {/* ── Workflow Progress Card ── */}
+            <div className="rounded-xl border bg-card p-5 sm:p-6">
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold">Workflow Progress</h2>
+                    <p className="text-sm text-muted-foreground">Structured setup summary for the current Kubernetes session</p>
+                  </div>
+                  <div className="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs">
+                    {(buildId || scanCompleted) ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    ) : (
+                      <Clock3 className="w-4 h-4 text-amber-600" />
+                    )}
+                    <span className="font-medium">Next Action: {getNextActionLabel()}</span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+                  {workflowSummaryItems.map((item) => (
+                    <div key={item.label} className="rounded-lg border bg-muted/30 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{item.label}</p>
+                      <p className="mt-1 text-sm font-medium break-words">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
 
             {/* Step 1: Workflow Selection */}
@@ -732,7 +894,7 @@ export default function KubernetesWorkflow() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto">
                       {config?.hasGithub && (
                         <ProviderCard
-                          icon={<CodeIcon className="w-6 h-6" />}
+                          icon={<FileCode className="w-6 h-6" />}
                           title="GitHub"
                           description="Use GitHub repositories for your Kubernetes configurations"
                           onClick={() => handleProviderSelect('github')}
@@ -871,249 +1033,688 @@ export default function KubernetesWorkflow() {
               </div>
             )}
 
-            {/* Step 5: Review (Manifest Generation) */}
-            {currentStep === 5 && workflowType === 'manifest' && (
-              <div className="space-y-6">
-                <div className="text-center">
-                  <h2 className="text-2xl font-bold mb-2">Review Generated Manifests</h2>
-                  <p className="text-muted-foreground">
-                    Review and edit the generated Kubernetes manifests
-                  </p>
-                </div>
+            {/* ════════════════════════════════════════════════════
+                 Step 5: Build Workspace (ALL workflow types)
+                 Overview / Build / Code 3-tab layout
+            ════════════════════════════════════════════════════ */}
+            {currentStep === 5 && (() => {
+              const allContent = (generatedFiles ?? []).map(f => f.content ?? '').join('\n');
+              const manifestCount = (allContent.match(/^kind:\s*\w+/gm) ?? []).length;
+              const uniqueKinds = Array.from(new Set(
+                (allContent.match(/^kind:\s*(\w+)/gm) ?? []).map(m => m.replace(/^kind:\s*/, ''))
+              ));
+              const totalLines = allContent ? allContent.split('\n').length : 0;
+              const namespaceCount = (allContent.match(/^kind:\s*Namespace/gm) ?? []).length;
+              const serviceCount = (allContent.match(/^kind:\s*Service/gm) ?? []).length;
+              const containerCount = (allContent.match(/^\s{6,}-\s+name:/gm) ?? []).length;
+              const workflowTypeLabel = workflowType === 'helm-generator' ? 'HELM' : workflowType === 'helm' ? 'HELM' : workflowType === 'compose-to-k8s' ? 'COMPOSE' : 'MANIFEST';
 
-                {/* Inline validation result alert */}
-                {manifestValidationResult && !manifestValidationResult.valid && (
-                  <Alert variant="destructive">
-                    <AlertTriangle className="h-4 w-4" />
-                    <AlertTitle>
-                      {manifestValidationResult.schemaErrors} schema error{manifestValidationResult.schemaErrors !== 1 ? 's' : ''} found
-                      {manifestValidationResult.warnings > 0 && `, ${manifestValidationResult.warnings} warning${manifestValidationResult.warnings !== 1 ? 's' : ''}`}
-                    </AlertTitle>
-                    <AlertDescription>
-                      Review and fix issues before committing. Use the <strong>Activities</strong> panel to auto-fix with AI.
-                    </AlertDescription>
-                  </Alert>
-                )}
-                {manifestValidationResult && manifestValidationResult.valid && (
-                  <Alert className="border-green-200 bg-green-50 text-green-800">
-                    <CheckCircle2 className="h-4 w-4 text-green-600" />
-                    <AlertTitle className="text-green-800">Manifests validated successfully</AlertTitle>
-                    <AlertDescription className="text-green-700">
-                      No schema errors found.{manifestValidationResult.warnings > 0 && ` ${manifestValidationResult.warnings} warning(s) — review in Activities.`}
-                    </AlertDescription>
-                  </Alert>
-                )}
-
-                {generatedFiles.length > 0 ? (
-                  <CodeEditor
-                    files={generatedFiles.map(f => ({
-                      name: f.fileName,
-                      content: f.content
-                    }))}
-                    onFileChange={async (fileName, content) => {
-                      // Update file in session using POST endpoint
-                      await apiRequest('POST', `/api/sessions/${sessionId}/files`, {
-                        fileName,
-                        content
-                      });
-                      queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-                    }}
-                  />
-                ) : (
-                  <div className="text-center py-12">
-                    <p className="text-muted-foreground">No manifests generated yet.</p>
+              return (
+                <div className="space-y-6">
+                  {/* Header */}
+                  <div>
+                    <h2 className="text-2xl font-bold tracking-tight">Build Workspace</h2>
+                    <p className="text-sm text-muted-foreground mt-0.5">
+                      {(generatedFiles ?? []).length > 0
+                        ? `${generatedFiles.length} file${generatedFiles.length !== 1 ? 's' : ''} generated · ${workflowTypeLabel} infrastructure ready`
+                        : 'Your manifests are being prepared…'}
+                    </p>
                   </div>
-                )}
 
-                <div className="flex gap-4 justify-center">
-                  <Button
-                    variant="outline"
-                    onClick={() => setCurrentStep(3)}
-                  >
-                    ← Back
-                  </Button>
-                  <Button
-                    onClick={() => setCurrentStep(6)}
-                  >
-                    Continue to Activities →
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {/* Step 6: Activities */}
-            {currentStep === 6 && (
-              <div className="space-y-6">
-                <div className="text-center">
-                  <h2 className="text-2xl font-bold mb-2">Activities</h2>
-                  <p className="text-muted-foreground">
-                    Run security scans, validate best practices, and generate architecture diagrams
-                  </p>
-                </div>
-
-                {/* Code Editor - On top */}
-                <div className="rounded-lg border bg-card">
-                  <div className="px-4 py-3 border-b bg-muted/50">
-                    <h3 className="text-sm font-medium flex items-center gap-2">
-                      <FileCode className="w-4 h-4" />
-                      Generated Manifests
-                    </h3>
+                  {/* ── Tab bar ── */}
+                  <div className="flex gap-1 border-b">
+                    {(['overview', 'build', 'code', 'report'] as const).map(mode => (
+                      <button
+                        key={mode}
+                        onClick={() => setActivityViewMode(mode)}
+                        className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors -mb-px ${
+                          activityViewMode === mode
+                            ? 'border-primary text-primary'
+                            : 'border-transparent text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {mode === 'build' ? 'Build Pipeline' : mode.charAt(0).toUpperCase() + mode.slice(1)}
+                      </button>
+                    ))}
                   </div>
-                  {generatedFiles.length > 0 ? (
-                    <CodeEditor
-                      files={generatedFiles.map(f => ({
-                        name: f.fileName,
-                        content: f.content
-                      }))}
-                      onFileChange={async (fileName, content) => {
-                        await apiRequest('POST', `/api/sessions/${sessionId}/files`, {
-                          fileName,
-                          content
-                        });
-                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-                      }}
-                    />
-                  ) : (
-                    <div className="p-8 text-center text-muted-foreground">
-                      <FileCode className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                      <p>No manifests generated yet</p>
+
+                  {/* ── OVERVIEW TAB ── */}
+                  {activityViewMode === 'overview' && (
+                    <div className="space-y-6">
+
+                      {/* KPI cards */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        {[
+                          { label: 'Files',      value: (generatedFiles ?? []).length,  sub: 'generated',  icon: FileCode, color: 'text-blue-500',    bg: 'bg-blue-50 dark:bg-blue-950/30' },
+                          { label: 'Lines',      value: totalLines.toLocaleString(),    sub: 'of YAML',    icon: Hash,     color: 'text-violet-500',  bg: 'bg-violet-50 dark:bg-violet-950/30' },
+                          { label: 'Manifests',  value: manifestCount,                  sub: 'declared',   icon: Box,      color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
+                          { label: 'Type',       value: workflowTypeLabel,              sub: 'workflow',   icon: Layers,   color: 'text-orange-500',  bg: 'bg-orange-50 dark:bg-orange-950/30' },
+                        ].map(({ label, value, sub, icon: Icon, color, bg }) => (
+                          <div key={label} className={`rounded-2xl border p-4 flex items-center gap-4 ${bg}`}>
+                            <div className={`rounded-xl p-2.5 ${bg}`}>
+                              <Icon className={`w-5 h-5 ${color}`} />
+                            </div>
+                            <div>
+                              <p className="text-xl font-bold leading-tight">{value}</p>
+                              <p className="text-xs text-muted-foreground">{label} <span className="opacity-60">{sub}</span></p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Badge pills — like TF's variables/outputs row */}
+                      {(uniqueKinds.length > 0 || namespaceCount > 0 || serviceCount > 0 || containerCount > 0) && (
+                        <div className="flex flex-wrap gap-2">
+                          {uniqueKinds.length > 0 && (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
+                              <Box className="w-3 h-3" /> {uniqueKinds.length} kind{uniqueKinds.length !== 1 ? 's' : ''}
+                            </span>
+                          )}
+                          {namespaceCount > 0 && (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
+                              <Layers className="w-3 h-3" /> {namespaceCount} namespace{namespaceCount !== 1 ? 's' : ''}
+                            </span>
+                          )}
+                          {serviceCount > 0 && (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
+                              <ChevronRight className="w-3 h-3" /> {serviceCount} service{serviceCount !== 1 ? 's' : ''}
+                            </span>
+                          )}
+                          {containerCount > 0 && (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
+                              <Box className="w-3 h-3" /> {containerCount} container{containerCount !== 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Manifest validation alert (manifest workflow) */}
+                      {manifestValidationResult && !manifestValidationResult.valid && (
+                        <Alert variant="destructive">
+                          <AlertTriangle className="h-4 w-4" />
+                          <AlertTitle>
+                            {manifestValidationResult.schemaErrors} schema error{manifestValidationResult.schemaErrors !== 1 ? 's' : ''} found
+                            {manifestValidationResult.warnings > 0 && `, ${manifestValidationResult.warnings} warning${manifestValidationResult.warnings !== 1 ? 's' : ''}`}
+                          </AlertTitle>
+                          <AlertDescription>
+                            Run the <button className="underline" onClick={() => setActivityViewMode('build')}>Build pipeline</button> to auto-fix with AI.
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                      {manifestValidationResult?.valid && (
+                        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-800">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                          <AlertTitle className="text-emerald-800">Manifests validated successfully</AlertTitle>
+                          <AlertDescription className="text-emerald-700">
+                            No schema errors.{manifestValidationResult.warnings > 0 && ` ${manifestValidationResult.warnings} warning(s) — run Build pipeline for details.`}
+                          </AlertDescription>
+                        </Alert>
+                      )}
+
+                      {/* Helm-generator lint result */}
+                      {workflowType === 'helm-generator' && helmGenLintResult && (
+                        <div className={`rounded-2xl border p-4 flex items-center gap-3 ${
+                          helmGenLintResult.status === 'passed' ? 'border-emerald-200 bg-emerald-50'
+                          : helmGenLintResult.status === 'warning' ? 'border-amber-200 bg-amber-50'
+                          : 'border-rose-200 bg-rose-50'
+                        }`}>
+                          {helmGenLintResult.status === 'passed'
+                            ? <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                            : <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />}
+                          <div>
+                            <p className="text-sm font-semibold">
+                              Helm Lint: {helmGenLintResult.status === 'passed' ? 'Passed' : helmGenLintResult.status === 'warning' ? 'Passed with warnings' : 'Failed'}
+                            </p>
+                            {(helmGenLintResult as any).chart && <p className="text-xs text-muted-foreground mt-0.5">Chart: {(helmGenLintResult as any).chart}</p>}
+                            {helmGenLintResult.errors.map((e, i) => <p key={i} className="text-xs text-rose-700 mt-0.5">{e}</p>)}
+                            {helmGenLintResult.warnings.map((w, i) => <p key={i} className="text-xs text-amber-700 mt-0.5">{w}</p>)}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Helm validation results (helm workflow) */}
+                      {workflowType === 'helm' && validationResults && (() => {
+                        const da = validationResults.deepAnalysis;
+                        const gradeColor: Record<string, string> = {
+                          A: 'text-emerald-600 border-emerald-400 bg-emerald-50 dark:bg-emerald-950',
+                          B: 'text-teal-600 border-teal-400 bg-teal-50 dark:bg-teal-950',
+                          C: 'text-yellow-600 border-yellow-400 bg-yellow-50 dark:bg-yellow-950',
+                          D: 'text-orange-600 border-orange-400 bg-orange-50 dark:bg-orange-950',
+                          F: 'text-red-600 border-red-400 bg-red-50 dark:bg-red-950',
+                        };
+                        const barColor = (score: number) =>
+                          score >= 80 ? 'bg-emerald-500' : score >= 60 ? 'bg-yellow-500' : 'bg-red-500';
+                        return (
+                          <div className="space-y-4">
+                            {da && (
+                              <Card>
+                                <CardHeader>
+                                  <CardTitle>Production Readiness Score</CardTitle>
+                                  <CardDescription>{da.passedChecks} of {da.totalChecks} checks passed</CardDescription>
+                                </CardHeader>
+                                <CardContent>
+                                  <div className="flex items-center gap-8">
+                                    <div className={`w-20 h-20 rounded-full border-4 flex flex-col items-center justify-center shrink-0 ${gradeColor[da.grade]}`}>
+                                      <span className="text-2xl font-bold leading-none">{da.grade}</span>
+                                      <span className="text-xs font-medium">{da.score}/100</span>
+                                    </div>
+                                    <div className="flex-1 space-y-2">
+                                      {[
+                                        { key: 'security', label: 'Security' },
+                                        { key: 'reliability', label: 'Reliability' },
+                                        { key: 'resources', label: 'Resources' },
+                                        { key: 'helmStructure', label: 'Helm Structure' },
+                                        { key: 'operations', label: 'Operations' },
+                                      ].map(cat => (
+                                        <div key={cat.key} className="flex items-center gap-3">
+                                          <span className="text-xs text-muted-foreground w-28 shrink-0">{cat.label}</span>
+                                          <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                                            <div className={`h-full rounded-full ${barColor(da.categoryScores[cat.key])}`}
+                                              style={{ width: `${da.categoryScores[cat.key]}%` }} />
+                                          </div>
+                                          <span className="text-xs font-mono w-8 text-right">{da.categoryScores[cat.key]}%</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </CardContent>
+                              </Card>
+                            )}
+                            {validationResults.summary && (
+                              <Card>
+                                <CardHeader><CardTitle>Validation Summary</CardTitle></CardHeader>
+                                <CardContent>
+                                  <div className="grid grid-cols-4 gap-4 text-center">
+                                    <div><p className="text-2xl font-bold">{validationResults.summary.totalIssues}</p><p className="text-xs text-muted-foreground">Issues</p></div>
+                                    <div><p className="text-2xl font-bold text-red-600">{validationResults.summary.errors}</p><p className="text-xs text-muted-foreground">Errors</p></div>
+                                    <div><p className="text-2xl font-bold text-yellow-600">{validationResults.summary.warnings}</p><p className="text-xs text-muted-foreground">Warnings</p></div>
+                                    <div><p className="text-2xl font-bold text-blue-600">{validationResults.summary.info}</p><p className="text-xs text-muted-foreground">Info</p></div>
+                                  </div>
+                                </CardContent>
+                              </Card>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      {/* Infrastructure kind chips */}
+                      {uniqueKinds.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
+                            Infrastructure Components
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {uniqueKinds.map(kind => {
+                              const { label, icon: Icon } = k8sKindLabel(kind);
+                              return (
+                                <span key={kind} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border bg-card hover:bg-muted/60 transition-colors">
+                                  <Icon className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                                  {label}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* File cards grid */}
+                      {(generatedFiles ?? []).length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
+                            Generated Files
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {generatedFiles.map(f => {
+                              const lines = (f.content ?? '').split('\n').length;
+                              const docs = ((f.content ?? '').match(/^---/gm) ?? []).length;
+                              const kinds = ((f.content ?? '').match(/^kind:\s*\w+/gm) ?? []).length;
+                              const isHelm = f.fileName.includes('Chart') || f.fileName.includes('values');
+                              const isTemplate = f.fileName.includes('templates/') || f.fileName.includes('deployment') || f.fileName.includes('service');
+                              return (
+                                <button key={f.fileName}
+                                  onClick={() => setActivityViewMode('code')}
+                                  className="group text-left rounded-2xl border bg-card p-4 hover:border-primary/40 hover:shadow-sm transition-all space-y-2"
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <FileCode className={`w-4 h-4 shrink-0 ${isHelm ? 'text-orange-500' : isTemplate ? 'text-blue-500' : 'text-muted-foreground'}`} />
+                                      <span className="text-xs font-mono font-semibold truncate">{f.fileName}</span>
+                                    </div>
+                                    <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5" />
+                                  </div>
+                                  <div className="flex gap-3 text-xs text-muted-foreground">
+                                    <span>{lines} lines</span>
+                                    {kinds > 0 && <span className="text-emerald-600 dark:text-emerald-400">{kinds} manifest{kinds !== 1 ? 's' : ''}</span>}
+                                    {docs > 0 && !kinds && <span>{docs} doc{docs !== 1 ? 's' : ''}</span>}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ── Post-build analysis (visible only after pipeline runs) ── */}
+                      {scanCompleted && (
+                        <Card>
+                          <CardHeader className="pb-3">
+                            <div className="flex items-center justify-between">
+                              <CardTitle className="flex items-center gap-2 text-base">
+                                <ShieldCheck className="w-5 h-5 text-primary" />
+                                Security Context Score
+                              </CardTitle>
+                              <Button size="sm" variant="outline" onClick={async () => {
+                                try {
+                                  const res = await fetch(`/api/sessions/${sessionId}/security-score`, { method: 'POST' });
+                                  const data = await res.json();
+                                  if (res.ok) setSecurityScore(data.score);
+                                  else toast({ title: 'Scoring failed', description: data.error, variant: 'destructive' });
+                                } catch (err: any) {
+                                  toast({ title: 'Scoring failed', description: err.message, variant: 'destructive' });
+                                }
+                              }}>
+                                {securityScore ? 'Re-score' : 'Run Score'}
+                              </Button>
+                            </div>
+                          </CardHeader>
+                          {securityScore && (
+                            <CardContent>
+                              <div className="flex items-center gap-4 mb-4">
+                                <div className={`text-4xl font-bold ${securityScore.overallScore >= 75 ? 'text-emerald-600' : securityScore.overallScore >= 50 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                  {securityScore.grade}
+                                </div>
+                                <div>
+                                  <div className="text-2xl font-semibold">{securityScore.overallScore}/100</div>
+                                  <div className="text-xs text-muted-foreground">{securityScore.totalWorkloads} workload(s) analysed</div>
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs mb-3">
+                                {[
+                                  { key: 'runAsNonRoot', label: 'runAsNonRoot', val: securityScore.metrics.runAsNonRoot, isPercent: true },
+                                  { key: 'readOnlyRootFilesystem', label: 'readOnlyRootFS', val: securityScore.metrics.readOnlyRootFilesystem, isPercent: true },
+                                  { key: 'resourceLimitsDefined', label: 'Resource Limits', val: securityScore.metrics.resourceLimitsDefined, isPercent: true },
+                                  { key: 'privilegedContainers', label: 'Privileged', val: securityScore.metrics.privilegedContainers, isPercent: false },
+                                  { key: 'hostNamespaces', label: 'Host Namespaces', val: securityScore.metrics.hostNamespaces, isPercent: false },
+                                  { key: 'latestImageTag', label: ':latest Images', val: securityScore.metrics.latestImageTag, isPercent: false },
+                                ].map(m => (
+                                  <div key={m.key} className="bg-muted/50 rounded p-2">
+                                    <div className="font-medium">{m.label}</div>
+                                    {m.isPercent
+                                      ? <div className={m.val.percent === 100 ? 'text-emerald-600' : 'text-yellow-600'}>{m.val.percent}% ({m.val.count}/{m.val.total})</div>
+                                      : <div className={m.val.count === 0 ? 'text-emerald-600' : 'text-red-600'}>{m.val.count} container(s)</div>
+                                    }
+                                  </div>
+                                ))}
+                              </div>
+                              {securityScore.recommendations?.length > 0 && (
+                                <ul className="text-xs space-y-1 text-muted-foreground">
+                                  {securityScore.recommendations.map((r: string, i: number) => (
+                                    <li key={i} className="flex items-start gap-1">
+                                      <AlertTriangle className="w-3 h-3 mt-0.5 text-yellow-500 shrink-0" />
+                                      {r}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </CardContent>
+                          )}
+                        </Card>
+                      )}
+
+                      {scanCompleted && (workflowType === 'manifest' || workflowType === 'helm-generator') && (
+                        <Card>
+                          <CardHeader className="pb-3">
+                            <div className="flex items-center justify-between">
+                              <CardTitle className="flex items-center gap-2 text-base">
+                                <Activity className="w-5 h-5 text-primary" />
+                                Resource Rightsizing
+                              </CardTitle>
+                              <Button size="sm" variant="outline" disabled={isRightsizing} onClick={async () => {
+                                setIsRightsizing(true);
+                                try {
+                                  const res = await fetch(`/api/sessions/${sessionId}/rightsize-kubernetes`, { method: 'POST' });
+                                  const data = await res.json();
+                                  if (res.ok) setRightsizingResult(data.result);
+                                  else toast({ title: 'Rightsizing failed', description: data.error, variant: 'destructive' });
+                                } catch (err: any) {
+                                  toast({ title: 'Rightsizing failed', description: err.message, variant: 'destructive' });
+                                } finally {
+                                  setIsRightsizing(false);
+                                }
+                              }}>
+                                {isRightsizing ? <><Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> Analysing…</> : rightsizingResult ? 'Re-analyse' : 'Analyse'}
+                              </Button>
+                            </div>
+                          </CardHeader>
+                          {rightsizingResult && (
+                            <CardContent>
+                              <div className="grid grid-cols-4 gap-2 text-center mb-4">
+                                {[
+                                  { label: 'Critical', count: rightsizingResult.criticalCount, color: 'text-red-600' },
+                                  { label: 'High',     count: rightsizingResult.highCount,     color: 'text-orange-600' },
+                                  { label: 'Medium',   count: rightsizingResult.mediumCount,   color: 'text-yellow-600' },
+                                  { label: 'Low',      count: rightsizingResult.lowCount,      color: 'text-blue-600' },
+                                ].map(s => (
+                                  <div key={s.label} className="bg-muted/50 rounded p-2">
+                                    <div className={`text-xl font-bold ${s.color}`}>{s.count}</div>
+                                    <div className="text-xs text-muted-foreground">{s.label}</div>
+                                  </div>
+                                ))}
+                              </div>
+                              {rightsizingResult.recommendations?.length > 0 ? (
+                                <ul className="space-y-2">
+                                  {rightsizingResult.recommendations.map((r: any, i: number) => (
+                                    <li key={i} className="flex gap-2 text-xs">
+                                      <span className={`shrink-0 font-semibold uppercase ${r.severity === 'critical' ? 'text-red-600' : r.severity === 'high' ? 'text-orange-600' : r.severity === 'medium' ? 'text-yellow-600' : 'text-blue-600'}`}>
+                                        {r.severity}
+                                      </span>
+                                      <span className="text-muted-foreground">{r.message} — <span className="text-foreground">{r.suggestion}</span></span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <p className="text-xs text-emerald-600 flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5" /> No rightsizing issues found — resources look well-configured.</p>
+                              )}
+                            </CardContent>
+                          )}
+                        </Card>
+                      )}
+
+                      {/* Policy Compliance card */}
+                      {scanCompleted && (workflowType === 'manifest' || workflowType === 'helm-generator') && (
+                        <Card>
+                          <CardHeader className="pb-3">
+                            <div className="flex items-center justify-between">
+                              <CardTitle className="flex items-center gap-2 text-base">
+                                <Shield className="w-5 h-5 text-primary" />
+                                Policy Compliance (OPA / Kyverno)
+                              </CardTitle>
+                              <Button size="sm" variant="outline" disabled={isPolicyChecking} onClick={async () => {
+                                setIsPolicyChecking(true);
+                                try {
+                                  const res = await fetch(`/api/sessions/${sessionId}/policy-check`, { method: 'POST' });
+                                  const data = await res.json();
+                                  if (res.ok) setPolicyCheckResult(data);
+                                  else toast({ title: 'Policy check failed', description: data.error, variant: 'destructive' });
+                                } catch (err: any) {
+                                  toast({ title: 'Policy check failed', description: err.message, variant: 'destructive' });
+                                } finally {
+                                  setIsPolicyChecking(false);
+                                }
+                              }}>
+                                {isPolicyChecking ? <><Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> Checking…</> : policyCheckResult ? 'Re-check' : 'Run Check'}
+                              </Button>
+                            </div>
+                          </CardHeader>
+                          {policyCheckResult && (
+                            <CardContent>
+                              {policyCheckResult.totalViolations === 0 ? (
+                                <p className="text-xs text-emerald-600 flex items-center gap-1.5">
+                                  <CheckCircle2 className="w-3.5 h-3.5" /> All policy rules passed — no violations found.
+                                </p>
+                              ) : (
+                                <div className="space-y-3">
+                                  <p className="text-xs text-muted-foreground">
+                                    <span className="font-semibold text-orange-600">{policyCheckResult.totalViolations}</span> violation{policyCheckResult.totalViolations !== 1 ? 's' : ''} across {policyCheckResult.results?.length} rule{policyCheckResult.results?.length !== 1 ? 's' : ''}
+                                  </p>
+                                  {policyCheckResult.results?.map((r: any, i: number) => (
+                                    <div key={i} className="rounded-lg border p-3 space-y-1">
+                                      <div className="flex items-center gap-2">
+                                        <span className={`text-xs font-semibold uppercase px-1.5 py-0.5 rounded ${r.hint.severity === 'critical' ? 'bg-red-100 text-red-700' : r.hint.severity === 'high' ? 'bg-orange-100 text-orange-700' : r.hint.severity === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'}`}>
+                                          {r.hint.severity}
+                                        </span>
+                                        <span className="text-xs font-semibold">{r.hint.title}</span>
+                                        <span className="ml-auto text-xs text-muted-foreground font-mono">{r.hint.engine}</span>
+                                      </div>
+                                      <p className="text-xs text-muted-foreground">{r.hint.remediation}</p>
+                                      {r.violations.map((v: any, j: number) => (
+                                        <p key={j} className="text-xs text-rose-700 font-mono pl-2">↳ {v.resource}: {v.reason}</p>
+                                      ))}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </CardContent>
+                          )}
+                        </Card>
+                      )}
+
                     </div>
                   )}
-                </div>
 
-                {/* Security Score Card (E1) */}
-                <Card>
-                  <CardHeader className="pb-3">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="flex items-center gap-2 text-base">
-                        <ShieldCheck className="w-5 h-5 text-primary" />
-                        Security Context Score
-                      </CardTitle>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={async () => {
+                  {/* ── BUILD TAB ── */}
+                  {activityViewMode === 'build' && (
+                    <div className="space-y-4">
+                      <ActivityPanel
+                        sessionId={sessionId}
+                        workflowType="kubernetes"
+                        pipelineLayout="sidebar"
+                        autoRun={buildAutoRun}
+                        onRequestRunPipeline={() => {
+                          setBuildAutoRun(false); // sidebar manages its own run
+                          setPipelineRunning(true);
+                          setCompletedPipelineStages([]);
+                        }}
+                        onDiagramResult={(result) => { setBuildDiagramResult(result); }}
+                        onScanResult={(result) => { setBuildScanResult(result); }}
+                        onScanComplete={() => {
+                          // Files may have been updated by security fixes; refresh but don't unlock commit yet
+                          // (commit is unlocked only after full pipeline approval via onPipelineComplete)
+                          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                        }}
+                        onFixesApproved={() => {
+                          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                          toast({ title: 'Fixes Applied', description: 'Security fixes applied. Files updated.' });
+                        }}
+                        onPipelineStageComplete={(stage) => {
+                          setCompletedPipelineStages(prev => [...prev, stage]);
+                        }}
+                        onPipelineComplete={async () => {
+                          setBuildAutoRun(false);
+                          setPipelineRunning(false);
+                          setScanCompleted(true);
+                          const now = new Date();
+                          const pad = (n: number) => String(n).padStart(2, '0');
+                          const id = `BUILD-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+                          setBuildId(id);
                           try {
-                            const res = await fetch(`/api/sessions/${sessionId}/security-score`, { method: 'POST' });
-                            const data = await res.json();
-                            if (res.ok) setSecurityScore(data.score);
-                            else toast({ title: 'Scoring failed', description: data.error, variant: 'destructive' });
-                          } catch (err: any) {
-                            toast({ title: 'Scoring failed', description: err.message, variant: 'destructive' });
-                          }
+                            const [ssRes, rsRes, pcRes] = await Promise.all([
+                              fetch(`/api/sessions/${sessionId}/security-score`, { method: 'POST' }),
+                              fetch(`/api/sessions/${sessionId}/rightsize-kubernetes`, { method: 'POST' }),
+                              fetch(`/api/sessions/${sessionId}/policy-check`, { method: 'POST' }),
+                            ]);
+                            const [ss, rs, pc] = await Promise.all([ssRes.json(), rsRes.json(), pcRes.json()]);
+                            if (ss.score) setSecurityScore(ss.score);
+                            if (rs.result) setRightsizingResult(rs.result);
+                            if (pc.success) setPolicyCheckResult(pc);
+                          } catch (_) { /* non-fatal */ }
+                          toast({ title: 'Build Complete', description: `${id} — ready to commit.` });
+                          setActivityViewMode('report');
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {/* ── CODE TAB ── */}
+                  {activityViewMode === 'code' && (
+                    <div className="space-y-3">
+                      <div className="rounded-2xl border bg-card overflow-hidden">
+                        {(generatedFiles ?? []).length > 0 ? (
+                          <CodeEditor
+                            files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))}
+                            onFileChange={async (fileName, content) => {
+                              await apiRequest('POST', `/api/sessions/${sessionId}/files`, { fileName, content });
+                              queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                            }}
+                          />
+                        ) : (
+                          <div className="p-10 text-center text-muted-foreground space-y-2">
+                            <FileCode className="w-8 h-8 mx-auto opacity-40" />
+                            <p className="text-sm">No files generated yet</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── REPORT TAB ── */}
+                  {activityViewMode === 'report' && (
+                    <div className="space-y-6">
+                      {/* Header */}
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h2 className="text-xl font-bold flex items-center gap-2">
+                            <FileText className="w-5 h-5 text-primary" />
+                            Build Report
+                          </h2>
+                          {buildId && (
+                            <p className="text-xs text-muted-foreground font-mono mt-0.5">{buildId} · {workflowType === 'helm-generator' ? 'Helm Generator' : workflowType === 'manifest' ? 'Kubernetes Manifests' : workflowType}</p>
+                          )}
+                        </div>
+                        <Button variant="outline" size="sm" className="gap-2 print:hidden" onClick={() => window.print()}>
+                          <Download className="w-3.5 h-3.5" /> Download PDF
+                        </Button>
+                      </div>
+
+                      {/* ── Architecture Diagram ── */}
+                      <div className="rounded-2xl border bg-card overflow-hidden">
+                        <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                          <Network className="w-4 h-4 text-primary" />
+                          <span className="font-semibold text-sm">Architecture Diagram</span>
+                        </div>
+                        {buildDiagramResult?.mermaidSyntax ? (
+                          <div className="p-4">
+                            <ArchitectureDiagramPreview mermaidSyntax={buildDiagramResult.mermaidSyntax} />
+                          </div>
+                        ) : (
+                          <div className="p-8 text-center text-muted-foreground text-sm">
+                            No diagram data — run the Build pipeline to generate the architecture diagram.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ── Security Scan Results ── */}
+                      <div className="rounded-2xl border bg-card overflow-hidden">
+                        <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                          <Shield className="w-4 h-4 text-primary" />
+                          <span className="font-semibold text-sm">Security Scan Results</span>
+                        </div>
+                        {buildScanResult ? (
+                          <div className="p-5 space-y-4">
+                            {/* KPI row */}
+                            <div className="grid grid-cols-3 gap-4">
+                              {[
+                                { label: 'Passed', value: buildScanResult.summary?.passed ?? 0, color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
+                                { label: 'Failed', value: buildScanResult.summary?.failed ?? 0, color: 'text-rose-600', bg: 'bg-rose-50 dark:bg-rose-950/30' },
+                                { label: 'Pass Rate', value: `${buildScanResult.summary?.passPercentage ?? 0}%`, color: 'text-primary', bg: 'bg-primary/5' },
+                              ].map(({ label, value, color, bg }) => (
+                                <div key={label} className={`rounded-xl border p-3 text-center ${bg}`}>
+                                  <p className={`text-2xl font-bold ${color}`}>{value}</p>
+                                  <p className="text-xs text-muted-foreground">{label}</p>
+                                </div>
+                              ))}
+                            </div>
+                            {/* Failed checks */}
+                            {(buildScanResult.failedChecks ?? []).length > 0 && (
+                              <div className="space-y-2">
+                                <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Failed Checks ({buildScanResult.failedChecks.length})</p>
+                                <div className="space-y-2">
+                                  {buildScanResult.failedChecks.map((c: any, i: number) => (
+                                    <div key={i} className="rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50/50 dark:bg-rose-950/20 p-3 space-y-1">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-mono text-xs font-semibold text-rose-700 dark:text-rose-400">{c.checkId}</span>
+                                        <span className="text-xs font-medium">{c.checkName}</span>
+                                      </div>
+                                      <p className="text-xs text-muted-foreground">{c.reason || c.guideline}</p>
+                                      {c.resource && <p className="text-xs text-muted-foreground font-mono">Resource: {c.resource}</p>}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {(buildScanResult.failedChecks ?? []).length === 0 && (
+                              <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800 px-4 py-3">
+                                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                                <span className="text-sm font-medium">All security checks passed!</span>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="p-8 text-center text-muted-foreground text-sm">
+                            No scan data — run the Build pipeline to generate security results.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Best Practices / Security Score summary */}
+                      {securityScore && (
+                        <div className="rounded-2xl border bg-card overflow-hidden">
+                          <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                            <ShieldCheck className="w-4 h-4 text-primary" />
+                            <span className="font-semibold text-sm">Security Context Score</span>
+                          </div>
+                          <div className="p-5 flex items-center gap-6">
+                            <div className={`text-5xl font-bold ${securityScore.overallScore >= 75 ? 'text-emerald-600' : securityScore.overallScore >= 50 ? 'text-yellow-600' : 'text-rose-600'}`}>
+                              {securityScore.grade}
+                            </div>
+                            <div>
+                              <div className="text-2xl font-semibold">{securityScore.overallScore}/100</div>
+                              <div className="text-xs text-muted-foreground">{securityScore.totalWorkloads} workload(s) analysed</div>
+                            </div>
+                            <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                              {[
+                                { label: 'runAsNonRoot', val: securityScore.metrics?.runAsNonRoot?.percent },
+                                { label: 'readOnlyRootFS', val: securityScore.metrics?.readOnlyRootFilesystem?.percent },
+                                { label: 'Resource Limits', val: securityScore.metrics?.resourceLimitsDefined?.percent },
+                              ].map(m => (
+                                <div key={m.label} className="bg-muted/50 rounded p-2">
+                                  <div className="font-medium">{m.label}</div>
+                                  <div className={m.val === 100 ? 'text-emerald-600' : 'text-yellow-600'}>{m.val ?? 0}%</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* ── Navigation ── */}
+                  <div className="space-y-3 pt-2">
+                    {buildId && (
+                      <div className="flex justify-center">
+                        <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-mono font-semibold bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          {buildId}
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex gap-3 justify-center">
+                      <Button variant="outline" onClick={() => setCurrentStep(3)}>← Back</Button>
+                      <Button
+                        disabled={!scanCompleted}
+                        title={!scanCompleted ? 'Run the Build pipeline first to continue' : undefined}
+                        onClick={() => {
+                          setCurrentStep(6);
+                          apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
                         }}
                       >
-                        Run Score
+                        {!scanCompleted ? (
+                          <><Clock3 className="w-4 h-4 mr-1.5 opacity-50" /> Awaiting Build…</>
+                        ) : (
+                          <><CheckCircle2 className="w-4 h-4 mr-1.5" /> Continue to Commit →</>
+                        )}
                       </Button>
                     </div>
-                  </CardHeader>
-                  {securityScore && (
-                    <CardContent>
-                      <div className="flex items-center gap-4 mb-4">
-                        <div className={`text-4xl font-bold ${securityScore.overallScore >= 75 ? 'text-green-600' : securityScore.overallScore >= 50 ? 'text-yellow-600' : 'text-red-600'}`}>
-                          {securityScore.grade}
-                        </div>
-                        <div>
-                          <div className="text-2xl font-semibold">{securityScore.overallScore}/100</div>
-                          <div className="text-xs text-muted-foreground">{securityScore.totalWorkloads} workload(s) analysed</div>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs mb-3">
-                        <div className="bg-muted/50 rounded p-2">
-                          <div className="font-medium">runAsNonRoot</div>
-                          <div className={securityScore.metrics.runAsNonRoot.percent === 100 ? 'text-green-600' : 'text-yellow-600'}>
-                            {securityScore.metrics.runAsNonRoot.percent}% ({securityScore.metrics.runAsNonRoot.count}/{securityScore.metrics.runAsNonRoot.total})
-                          </div>
-                        </div>
-                        <div className="bg-muted/50 rounded p-2">
-                          <div className="font-medium">readOnlyRootFS</div>
-                          <div className={securityScore.metrics.readOnlyRootFilesystem.percent === 100 ? 'text-green-600' : 'text-yellow-600'}>
-                            {securityScore.metrics.readOnlyRootFilesystem.percent}% ({securityScore.metrics.readOnlyRootFilesystem.count}/{securityScore.metrics.readOnlyRootFilesystem.total})
-                          </div>
-                        </div>
-                        <div className="bg-muted/50 rounded p-2">
-                          <div className="font-medium">Resource Limits</div>
-                          <div className={securityScore.metrics.resourceLimitsDefined.percent === 100 ? 'text-green-600' : 'text-yellow-600'}>
-                            {securityScore.metrics.resourceLimitsDefined.percent}% ({securityScore.metrics.resourceLimitsDefined.count}/{securityScore.metrics.resourceLimitsDefined.total})
-                          </div>
-                        </div>
-                        <div className="bg-muted/50 rounded p-2">
-                          <div className="font-medium">Privileged</div>
-                          <div className={securityScore.metrics.privilegedContainers.count === 0 ? 'text-green-600' : 'text-red-600'}>
-                            {securityScore.metrics.privilegedContainers.count} container(s)
-                          </div>
-                        </div>
-                        <div className="bg-muted/50 rounded p-2">
-                          <div className="font-medium">Host Namespaces</div>
-                          <div className={securityScore.metrics.hostNamespaces.count === 0 ? 'text-green-600' : 'text-red-600'}>
-                            {securityScore.metrics.hostNamespaces.count} workload(s)
-                          </div>
-                        </div>
-                        <div className="bg-muted/50 rounded p-2">
-                          <div className="font-medium">:latest Images</div>
-                          <div className={securityScore.metrics.latestImageTag.count === 0 ? 'text-green-600' : 'text-yellow-600'}>
-                            {securityScore.metrics.latestImageTag.count} container(s)
-                          </div>
-                        </div>
-                      </div>
-                      {securityScore.recommendations.length > 0 && (
-                        <ul className="text-xs space-y-1 text-muted-foreground">
-                          {securityScore.recommendations.map((r: string, i: number) => (
-                            <li key={i} className="flex items-start gap-1">
-                              <AlertTriangle className="w-3 h-3 mt-0.5 text-yellow-500 shrink-0" />
-                              {r}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </CardContent>
-                  )}
-                </Card>
-
-                {/* Activity Panel - Below code editor */}
-                <ActivityPanel
-                  sessionId={sessionId}
-                  workflowType="kubernetes"
-                  onScanComplete={() => {
-                    setScanCompleted(true);
-                    // Refresh files after scan/fix
-                    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-                    toast({
-                      title: "Activity Complete",
-                      description: "Activity completed successfully.",
-                    });
-                  }}
-                  onFixesApproved={() => {
-                    // Refresh files after security fixes are approved
-                    queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-                    toast({
-                      title: "Fixes Applied",
-                      description: "Security fixes have been applied. Code editor updated.",
-                    });
-                  }}
-                />
-
-                <div className="flex gap-4 justify-center">
-                  <Button
-                    variant="outline"
-                    onClick={() => setCurrentStep(5)}
-                  >
-                    ← Back
-                  </Button>
-                  <Button
-                    onClick={() => setCurrentStep(7)}
-                    disabled={!scanCompleted}
-                  >
-                    Continue to Commit →
-                  </Button>
+                    {!scanCompleted && (
+                      <p className="text-center text-xs text-muted-foreground">
+                        Switch to the <button className="underline underline-offset-2 hover:text-foreground" onClick={() => setActivityViewMode('build')}>Build tab</button> and run the pipeline to unlock commit.
+                      </p>
+                    )}
+                  </div>
                 </div>
-                {!scanCompleted && (
-                  <p className="text-sm text-muted-foreground text-center">
-                    Please run at least one activity (Security Scan, Validate, etc.) before committing
-                  </p>
-                )}
-              </div>
-            )}
+              );
+            })()}
 
             {/* Step 3: Upload/Select Helm Chart */}
             {currentStep === 3 && workflowType === 'helm' && (
@@ -1476,77 +2077,6 @@ export default function KubernetesWorkflow() {
               </Card>
             )}
 
-            {/* Step 5: Helm Generator — Review generated chart */}
-            {currentStep === 5 && workflowType === 'helm-generator' && (
-              <div className="space-y-6">
-                <div className="text-center">
-                  <h2 className="text-2xl font-bold mb-2">Generated Helm Chart</h2>
-                  <p className="text-muted-foreground">Review and edit all chart files before committing</p>
-                </div>
-
-                {/* Chart name + file count */}
-                <div className="rounded-2xl border border-border/50 p-4 flex items-center justify-between bg-white shadow-sm">
-                  <div>
-                    <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Chart name</p>
-                    <p className="text-lg font-semibold font-mono mt-1">{helmChartName || 'my-chart'}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-4xl font-bold text-primary">{generatedFiles.length}</p>
-                    <p className="text-xs text-muted-foreground">files generated</p>
-                  </div>
-                </div>
-
-                {/* Helm lint result */}
-                {helmGenLintResult && (
-                  <div className={`rounded-2xl border p-4 ${
-                    helmGenLintResult.status === 'passed' ? 'border-emerald-200 bg-emerald-50'
-                    : helmGenLintResult.status === 'warning' ? 'border-amber-200 bg-amber-50'
-                    : 'border-rose-200 bg-rose-50'
-                  }`}>
-                    <p className="text-sm font-semibold flex items-center gap-2">
-                      {helmGenLintResult.status === 'passed' ? <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                        : <AlertTriangle className="w-4 h-4 text-amber-600" />}
-                      Helm Lint:
-                      {helmGenLintResult.status === 'passed' ? ' Passed' :
-                        helmGenLintResult.status === 'warning' ? ' Passed with warnings' : ' Failed'}
-                    </p>
-                    {helmGenLintResult.errors.map((e, i) => (
-                      <p key={i} className="text-xs text-rose-700 mt-1 ml-6">{e}</p>
-                    ))}
-                    {helmGenLintResult.warnings.map((w, i) => (
-                      <p key={i} className="text-xs text-amber-700 mt-1 ml-6">{w}</p>
-                    ))}
-                  </div>
-                )}
-
-                {/* Code editor with all chart files */}
-                <Card className="rounded-3xl border border-border/60 overflow-hidden shadow-xl">
-                  {generatedFiles.length > 0 ? (
-                    <CodeEditor
-                      files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))}
-                      onFileChange={async (fileName, content) => {
-                        await apiRequest('POST', `/api/sessions/${sessionId}/files`, { fileName, content });
-                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-                      }}
-                    />
-                  ) : (
-                    <div className="p-8 text-center text-muted-foreground">
-                      No files generated. Try going back and regenerating.
-                    </div>
-                  )}
-                </Card>
-
-                <div className="flex gap-4 justify-center">
-                  <Button variant="outline" onClick={() => setCurrentStep(3)}>← Back</Button>
-                  <Button onClick={() => {
-                    setCurrentStep(6);
-                    apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
-                  }}>
-                    Continue to Activities →
-                  </Button>
-                </div>
-              </div>
-            )}
 
             {/* Step 4: Build (Kustomize) - shows during build */}
             {currentStep === 4 && workflowType === 'kustomize' && (
@@ -1566,253 +2096,18 @@ export default function KubernetesWorkflow() {
               </div>
             )}
 
-            {/* Step 5: Review (Helm Chart Validation Results) */}
-            {currentStep === 5 && workflowType === 'helm' && validationResults && (
+            {/* Step 6: Commit & Push */}
+            {currentStep === 6 && (
               <div className="space-y-6">
-                <div className="text-center">
-                  <h2 className="text-2xl font-bold mb-2">Validation Results</h2>
-                  <p className="text-muted-foreground">Deep multi-pass analysis of your Helm chart</p>
-                </div>
-
-                <div className="max-w-4xl mx-auto space-y-6">
-
-                  {/* Production Readiness Score */}
-                  {validationResults.deepAnalysis && (() => {
-                    const da = validationResults.deepAnalysis;
-                    const gradeColor: Record<string, string> = {
-                      A: 'text-emerald-600 border-emerald-400 bg-emerald-50 dark:bg-emerald-950',
-                      B: 'text-teal-600 border-teal-400 bg-teal-50 dark:bg-teal-950',
-                      C: 'text-yellow-600 border-yellow-400 bg-yellow-50 dark:bg-yellow-950',
-                      D: 'text-orange-600 border-orange-400 bg-orange-50 dark:bg-orange-950',
-                      F: 'text-red-600 border-red-400 bg-red-50 dark:bg-red-950',
-                    };
-                    const barColor = (score: number) =>
-                      score >= 80 ? 'bg-emerald-500' : score >= 60 ? 'bg-yellow-500' : 'bg-red-500';
-                    const categories = [
-                      { key: 'security',      label: 'Security',      score: da.categoryScores.security },
-                      { key: 'reliability',   label: 'Reliability',   score: da.categoryScores.reliability },
-                      { key: 'resources',     label: 'Resources',     score: da.categoryScores.resources },
-                      { key: 'helmStructure', label: 'Helm Structure',score: da.categoryScores.helmStructure },
-                      { key: 'operations',    label: 'Operations',    score: da.categoryScores.operations },
-                    ];
-                    return (
-                      <Card>
-                        <CardHeader>
-                          <CardTitle>Production Readiness Score</CardTitle>
-                          <CardDescription>{da.passedChecks} of {da.totalChecks} checks passed across 5 specialist passes</CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                          <div className="flex items-center gap-8">
-                            {/* Grade circle */}
-                            <div className={`w-24 h-24 rounded-full border-4 flex flex-col items-center justify-center flex-shrink-0 ${gradeColor[da.grade]}`}>
-                              <span className="text-3xl font-bold leading-none">{da.grade}</span>
-                              <span className="text-sm font-medium">{da.score}/100</span>
-                            </div>
-                            {/* Category bars */}
-                            <div className="flex-1 space-y-2">
-                              {categories.map(cat => (
-                                <div key={cat.key} className="flex items-center gap-3">
-                                  <span className="text-xs text-muted-foreground w-28 flex-shrink-0">{cat.label}</span>
-                                  <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
-                                    <div
-                                      className={`h-full rounded-full transition-all ${barColor(cat.score)}`}
-                                      style={{ width: `${cat.score}%` }}
-                                    />
-                                  </div>
-                                  <span className="text-xs font-mono w-8 text-right">{cat.score}%</span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    );
-                  })()}
-
-                  {/* Validation Summary */}
-                  <Card>
-                    <CardHeader><CardTitle>Validation Summary</CardTitle></CardHeader>
-                    <CardContent>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div className="text-center">
-                          <div className="text-2xl font-bold">{validationResults.summary.totalIssues}</div>
-                          <div className="text-sm text-muted-foreground">Total Issues</div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-2xl font-bold text-destructive">{validationResults.summary.errors}</div>
-                          <div className="text-sm text-muted-foreground">Errors</div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-2xl font-bold text-yellow-600">{validationResults.summary.warnings}</div>
-                          <div className="text-sm text-muted-foreground">Warnings</div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-2xl font-bold text-blue-600">{validationResults.summary.info}</div>
-                          <div className="text-sm text-muted-foreground">Info</div>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  {/* Tool Results */}
-                  {validationResults.lintResults && (
-                    <Card>
-                      <CardHeader><CardTitle>Tool Results</CardTitle></CardHeader>
-                      <CardContent className="space-y-4">
-                        {validationResults.lintResults.helmLint && (
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="font-medium">Helm Lint</span>
-                              <span className={`text-sm font-semibold ${validationResults.lintResults.helmLint.status === 'passed' ? 'text-green-600' : validationResults.lintResults.helmLint.status === 'warning' ? 'text-yellow-600' : 'text-red-600'}`}>
-                                {validationResults.lintResults.helmLint.status.toUpperCase()}
-                              </span>
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {validationResults.lintResults.helmLint.errors} error(s) · {validationResults.lintResults.helmLint.warnings} warning(s)
-                            </div>
-                          </div>
-                        )}
-                        {validationResults.lintResults.kubeval && (
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="font-medium">Kubeval Schema</span>
-                              <span className={`text-sm font-semibold ${validationResults.lintResults.kubeval.status === 'passed' ? 'text-green-600' : 'text-red-600'}`}>
-                                {validationResults.lintResults.kubeval.status.toUpperCase()}
-                              </span>
-                            </div>
-                            <div className="text-xs text-muted-foreground">{validationResults.lintResults.kubeval.errors} error(s)</div>
-                          </div>
-                        )}
-                        {validationResults.lintResults.checkov && (
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="font-medium">Checkov Security</span>
-                              <span className={`text-sm font-semibold ${validationResults.lintResults.checkov.failed === 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                {validationResults.lintResults.checkov.failed === 0 ? 'PASSED' : 'FAILED'}
-                              </span>
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {validationResults.lintResults.checkov.passed} passed · {validationResults.lintResults.checkov.failed} failed · {validationResults.lintResults.checkov.skipped} skipped
-                            </div>
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  )}
-
-                  {/* Deep Analysis Issues — grouped by category with fix snippets */}
-                  {validationResults.deepAnalysis?.issues?.length > 0 && (
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>Deep Analysis Findings</CardTitle>
-                        <CardDescription>
-                          {validationResults.deepAnalysis.issues.length} finding(s) across 5 specialist passes · click any issue to see the fix
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent>
-                        {(['security', 'reliability', 'resources', 'helm-structure', 'operations'] as const).map(cat => {
-                          const catIssues = validationResults.deepAnalysis.issues.filter((i: any) => i.category === cat);
-                          if (catIssues.length === 0) return null;
-                          const catLabel: Record<string, string> = {
-                            security: 'Security', reliability: 'Reliability', resources: 'Resource Management',
-                            'helm-structure': 'Helm Structure', operations: 'Operations',
-                          };
-                          return (
-                            <div key={cat} className="mb-6">
-                              <h4 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-2">{catLabel[cat]}</h4>
-                              <div className="space-y-2">
-                                {catIssues.map((issue: any) => {
-                                  const snippetId = issue.id;
-                                  const sev = issue.severity;
-                                  const severityStyle = sev === 'critical' ? 'border-red-600 bg-red-50 dark:bg-red-950'
-                                    : sev === 'high' ? 'border-orange-500 bg-orange-50 dark:bg-orange-950'
-                                    : sev === 'medium' ? 'border-yellow-500 bg-yellow-50 dark:bg-yellow-950'
-                                    : 'border-blue-400 bg-blue-50 dark:bg-blue-950';
-                                  const sevBadge = sev === 'critical' ? 'bg-red-600 text-white'
-                                    : sev === 'high' ? 'bg-orange-500 text-white'
-                                    : sev === 'medium' ? 'bg-yellow-500 text-white'
-                                    : 'bg-blue-400 text-white';
-                                  return (
-                                    <div key={snippetId} className={`rounded border-l-4 ${severityStyle} overflow-hidden`}>
-                                      <button
-                                        className="w-full text-left p-3 flex items-start gap-3"
-                                        onClick={() => toggleSnippet(snippetId)}
-                                      >
-                                        <span className={`text-xs font-bold px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5 ${sevBadge}`}>
-                                          {sev.toUpperCase()}
-                                        </span>
-                                        <div className="flex-1 min-w-0">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <span className="text-sm font-semibold">[{issue.id}] {issue.title}</span>
-                                            {issue.fixSnippet && (
-                                              <span className="text-xs text-muted-foreground flex-shrink-0">
-                                                {expandedSnippets.has(snippetId) ? '▲ hide fix' : '▼ show fix'}
-                                              </span>
-                                            )}
-                                          </div>
-                                          <p className="text-xs text-muted-foreground mt-0.5">{issue.description}</p>
-                                          {issue.file && <p className="text-xs text-muted-foreground/70 mt-0.5">File: {issue.file}</p>}
-                                        </div>
-                                      </button>
-                                      {expandedSnippets.has(snippetId) && issue.fixSnippet && (
-                                        <div className="px-3 pb-3">
-                                          <pre className="text-xs bg-muted rounded p-3 overflow-x-auto whitespace-pre-wrap font-mono border">
-                                            {issue.fixSnippet}
-                                          </pre>
-                                        </div>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </CardContent>
-                    </Card>
-                  )}
-
-                  {/* Lint / Checkov issues (non-deep-analysis) */}
-                  {validationResults.issues?.filter((i: any) => i.source !== 'best-practices').length > 0 && (
-                    <Card>
-                      <CardHeader><CardTitle>Tool Issues</CardTitle></CardHeader>
-                      <CardContent>
-                        <div className="space-y-2 max-h-72 overflow-y-auto">
-                          {validationResults.issues
-                            .filter((i: any) => i.source !== 'best-practices')
-                            .map((issue: any, index: number) => (
-                            <div key={index} className={`p-3 rounded border-l-4 text-sm ${
-                              issue.severity === 'error' ? 'bg-red-50 dark:bg-red-950 border-red-500'
-                              : issue.severity === 'warning' ? 'bg-yellow-50 dark:bg-yellow-950 border-yellow-500'
-                              : 'bg-blue-50 dark:bg-blue-950 border-blue-500'
-                            }`}>
-                              <div className="flex items-center gap-2 mb-0.5">
-                                <span className="font-semibold text-xs">{issue.severity.toUpperCase()}</span>
-                                <span className="text-xs text-muted-foreground">({issue.source})</span>
-                              </div>
-                              <p className="font-medium">{issue.message}</p>
-                              {issue.file && <p className="text-xs text-muted-foreground mt-0.5">File: {issue.file}{issue.line ? ` (Line ${issue.line})` : ''}</p>}
-                            </div>
-                          ))}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  )}
-
-                </div>
-
-                <div className="flex gap-4 justify-center">
-                  <Button variant="outline" onClick={() => { setCurrentStep(3); setValidationResults(null); }}>
-                    ← Back
-                  </Button>
-                  <Button onClick={() => setCurrentStep(6)}>Continue to Activities →</Button>
-                </div>
-              </div>
-            )}
-
-            {/* Step 7: Commit & Push */}
-            {currentStep === 7 && (
-              <div className="space-y-6">
+                {/* Build ID badge */}
+                {buildId && (
+                  <div className="flex justify-center">
+                    <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-mono font-semibold bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      {buildId}
+                    </span>
+                  </div>
+                )}
                 <div className="text-center">
                   <h2 className="text-2xl font-bold mb-2">Commit & Push</h2>
                   <p className="text-muted-foreground">
@@ -1821,21 +2116,24 @@ export default function KubernetesWorkflow() {
                 </div>
 
                 {isCommitted ? (
-                  <div className="flex flex-col items-center gap-4 p-6 border rounded-lg bg-green-50 dark:bg-green-950">
-                    <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
-                      <CheckCircle2 className="w-6 h-6" />
-                      <h3 className="text-lg font-semibold">Successfully Committed!</h3>
+                  <div className="flex flex-col items-center gap-6 py-12">
+                    <div className="w-20 h-20 rounded-full bg-emerald-100 dark:bg-emerald-900/40 flex items-center justify-center">
+                      <CheckCircle2 className="w-10 h-10 text-emerald-600" />
                     </div>
-                    <p className="text-sm text-muted-foreground text-center">
-                      Your Kubernetes manifests have been committed to the repository.
-                    </p>
-                    <Button
-                      onClick={handleGoHome}
-                      className="w-full sm:w-auto"
-                      data-testid="button-go-home"
-                    >
-                      <Home className="w-4 h-4 mr-2" />
-                      Go to Home
+                    <div className="text-center space-y-1">
+                      <h3 className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">Successfully Committed!</h3>
+                      {buildId && (
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-semibold bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700">
+                          <Hash className="w-3 h-3" />{buildId}
+                        </span>
+                      )}
+                      <p className="text-sm text-muted-foreground mt-2">
+                        Your Kubernetes manifests have been committed to the repository.
+                        <br />Redirecting to home in a moment…
+                      </p>
+                    </div>
+                    <Button onClick={handleGoHome} data-testid="button-go-home" className="gap-2">
+                      <Home className="w-4 h-4" /> Go to Home
                     </Button>
                   </div>
                 ) : (
@@ -1891,7 +2189,7 @@ export default function KubernetesWorkflow() {
                     <div className="flex gap-4 justify-center">
                       <Button
                         variant="outline"
-                        onClick={() => setCurrentStep(6)}
+                        onClick={() => setCurrentStep(5)}
                       >
                         ← Back
                       </Button>
@@ -1924,8 +2222,8 @@ export default function KubernetesWorkflow() {
               </div>
             )}
 
-            {/* Step 3+: Placeholder for other steps (only if not in Helm validation flow) */}
-            {(currentStep > 7 && !(currentStep === 5 && workflowType === 'helm' && validationResults)) && (
+            {/* Placeholder for unexpected steps */}
+            {(currentStep > 6 && !(currentStep === 5 && workflowType === 'helm' && validationResults)) && (
               <div className="text-center py-12">
                 <div className="space-y-4">
                   <div className="p-4 bg-muted rounded-lg">
