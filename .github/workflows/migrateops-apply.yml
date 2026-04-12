@@ -1,0 +1,115 @@
+name: MigrateOps Apply Migration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-migration:
+    name: Validate the Migration
+    runs-on: ubuntu-latest
+    env:
+      TF_IN_AUTOMATION: "true"
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID || '' }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET || '' }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID || '' }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID || '' }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS || '' }}
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID || '' }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET || '' }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID || '' }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID || '' }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Azure Login (optional)
+        if: ${{ env.AZURE_CREDENTIALS != '' }}
+        uses: azure/login@v2
+        with:
+          creds: ${{ env.AZURE_CREDENTIALS }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Export plan summary
+        run: |
+          terraform show -json tfplan > tfplan.json
+          jq '{
+            add: ([.resource_changes[]? | select(.change.actions | index("create"))] | length),
+            change: ([.resource_changes[]? | select(.change.actions | index("update"))] | length),
+            destroy: ([.resource_changes[]? | select(.change.actions | index("delete"))] | length)
+          }' tfplan.json > plan-summary.json
+          echo "Plan summary:" >> "$GITHUB_STEP_SUMMARY"
+          cat plan-summary.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload tfplan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: migrateops-plan-artifacts
+          path: |
+            ./tfplan
+            ./tfplan.json
+            ./plan-summary.json
+          if-no-files-found: error
+
+  apply-migration:
+    name: Apply Migration (Approval Required)
+    needs: validate-migration
+    runs-on: ubuntu-latest
+    environment: migrateops-apply
+    env:
+      TF_IN_AUTOMATION: "true"
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID || '' }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET || '' }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID || '' }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID || '' }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS || '' }}
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID || '' }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET || '' }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID || '' }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID || '' }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Azure Login (optional)
+        if: ${{ env.AZURE_CREDENTIALS != '' }}
+        uses: azure/login@v2
+        with:
+          creds: ${{ env.AZURE_CREDENTIALS }}
+
+      - name: Download tfplan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: migrateops-plan-artifacts
+          path: .
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Apply
+        run: terraform apply -input=false -auto-approve tfplan
