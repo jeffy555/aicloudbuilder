@@ -1,11 +1,82 @@
 import 'dotenv/config';
 import express, { type Request, Response, NextFunction } from "express";
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { remediationRAGService } from "./rag/remediation-rag";
 import { logFeatureFlagStatus, featureFlagMiddleware } from "./middleware/feature-flags";
 
 const app = express();
+
+// ─── Security Headers (Helmet.js) ──────────────────────────────────────────
+// Applied in all environments. Adds X-Frame-Options, X-Content-Type-Options,
+// Referrer-Policy, HSTS (production), and more.
+app.use(helmet({
+  contentSecurityPolicy: process.env.NODE_ENV === 'production' ? {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],   // unsafe-inline needed by React runtime
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'", 'data:'],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+    }
+  } : false,  // Disabled in dev to avoid breaking Vite HMR
+  crossOriginEmbedderPolicy: false,  // Disabled — Mermaid loads web workers
+}));
+
+// ─── CORS Policy (production only) ─────────────────────────────────────────
+// Allowlist the Container App domain and localhost for dev.
+// CONTAINER_APP_ORIGIN env var must be set on the Container App (e.g. https://myapp.azurecontainerapps.io)
+if (process.env.NODE_ENV === 'production') {
+  const allowedOrigins = new Set<string>(
+    [process.env.CONTAINER_APP_ORIGIN, 'http://localhost:9005']
+      .filter(Boolean) as string[]
+  );
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    }
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+}
+
+// ─── Rate Limiting (production only) ───────────────────────────────────────
+// Protects against credential stuffing, brute force, and AI cost abuse.
+// Localhost dev is unaffected (NODE_ENV !== 'production').
+if (process.env.NODE_ENV === 'production') {
+  // Auth endpoints: 10 attempts per 15 minutes per IP
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many requests — please try again later.' },
+  });
+  app.use('/api/auth', authLimiter);
+
+  // AI generation endpoints: 20 calls per minute per IP
+  // Covers generate-terraform, generate-dockerfile, generate-compose, generate-helm-chart, etc.
+  const aiGenLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Generation rate limit exceeded — please wait a moment.' },
+    skip: (req) => req.method !== 'POST',
+  });
+  app.use('/api/sessions', aiGenLimiter);
+}
 
 declare module 'http' {
   interface IncomingMessage {
@@ -55,6 +126,21 @@ app.use((req, res, next) => {
 (async () => {
   // Phase 0: Log feature flag status
   logFeatureFlagStatus();
+
+  // Run DB migrations on startup
+  try {
+    const { addMicrosoftAuth } = await import("./migrations/add-microsoft-auth");
+    await addMicrosoftAuth();
+  } catch (error: any) {
+    console.error('⚠️  Migration add-microsoft-auth failed:', error.message);
+  }
+
+  try {
+    const { addAwsAuthColumn } = await import("./migrations/add-aws-auth-column");
+    await addAwsAuthColumn();
+  } catch (error: any) {
+    console.error('⚠️  Migration add-aws-auth-column failed:', error.message);
+  }
 
   // Initialize RAG service on server startup
   try {

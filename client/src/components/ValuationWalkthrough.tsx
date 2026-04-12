@@ -538,12 +538,12 @@ function SlideResourceTable() {
 }
 
 const slides: Slide[] = [
-  { step: 1, title: "Welcome", subtitle: "Analyze live Azure resources and identify cost savings", icon: DollarSign, content: <SlideWelcome /> },
-  { step: 2, title: "Connect to Azure", subtitle: "Verify credentials and test connection", icon: Cloud, content: <SlideConnect /> },
-  { step: 3, title: "Scan Resources", subtitle: "Discover all deployed Azure resources", icon: Package, content: <SlideScan /> },
-  { step: 4, title: "Analyze Costs", subtitle: "Calculate costs using Azure Pricing API", icon: Wallet, content: <SlideAnalyze /> },
-  { step: 5, title: "View Results", subtitle: "Cost breakdown and potential savings", icon: TrendingDown, content: <SlideResultsSummary /> },
-  { step: 6, title: "Remediation Plans", subtitle: "Detailed recommendations for each resource", icon: Lightbulb, content: <SlideResourceTable /> },
+  { step: 1, title: "Azure Cost Visibility in Minutes", subtitle: "Connect once — see your entire Azure spend broken down by resource, SKU, and service tier", icon: DollarSign, content: <SlideWelcome /> },
+  { step: 2, title: "Secure Azure Connection", subtitle: "Uses your existing credentials — read-only access, nothing stored, no new service principals needed", icon: Cloud, content: <SlideConnect /> },
+  { step: 3, title: "Full Resource Inventory", subtitle: "Every VM, Storage, App Service, Redis, SQL, AKS node scanned — nothing missed, nothing estimated", icon: Package, content: <SlideScan /> },
+  { step: 4, title: "Live Pricing, Not Estimates", subtitle: "Azure Retail API + Cost Management queried in real time — actual spend, not catalog guesses", icon: Wallet, content: <SlideAnalyze /> },
+  { step: 5, title: "Cost Breakdown & Savings Map", subtitle: "Total spend, per-resource costs, and identified savings opportunities — all in one dashboard", icon: TrendingDown, content: <SlideResultsSummary /> },
+  { step: 6, title: "Actionable SKU Rightsizing", subtitle: "Specific downgrades with %-saving estimates — not 'consider optimizing', but exactly which SKU to change to", icon: Lightbulb, content: <SlideResourceTable /> },
 ];
 
 const SLIDE_DURATION = 5000;

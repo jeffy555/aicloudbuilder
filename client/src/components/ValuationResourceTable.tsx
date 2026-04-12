@@ -10,9 +10,10 @@ import type { ValuationResource } from "@shared/schema";
 
 interface Props {
   resources: ValuationResource[];
+  currencySymbol?: string;
 }
 
-export default function ValuationResourceTable({ resources }: Props) {
+export default function ValuationResourceTable({ resources, currencySymbol = '₹' }: Props) {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
   const toggleRow = (resourceId: string) => {
@@ -143,16 +144,28 @@ export default function ValuationResourceTable({ resources }: Props) {
 
                       {/* Monthly Cost */}
                       <TableCell>
-                        <span className="text-sm font-mono font-semibold text-blue-700 dark:text-blue-400">
-                          ₹{resource.monthlyCost.toFixed(2)}
-                        </span>
+                        {(resource as any).pricingError ? (
+                          <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300 text-xs">
+                            Price unavailable
+                          </Badge>
+                        ) : (
+                          <span className="text-sm font-mono font-semibold text-blue-700 dark:text-blue-400">
+                            {currencySymbol}{resource.monthlyCost.toFixed(2)}
+                          </span>
+                        )}
                       </TableCell>
 
                       {/* Yearly Cost */}
                       <TableCell>
-                        <span className="text-sm font-mono text-slate-600 dark:text-slate-400">
-                          ₹{resource.yearlyCost.toFixed(2)}
-                        </span>
+                        {(resource as any).pricingError ? (
+                          <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300 text-xs">
+                            Price unavailable
+                          </Badge>
+                        ) : (
+                          <span className="text-sm font-mono text-slate-600 dark:text-slate-400">
+                            {currencySymbol}{resource.yearlyCost.toFixed(2)}
+                          </span>
+                        )}
                       </TableCell>
 
                       {/* Optimization */}
@@ -160,7 +173,7 @@ export default function ValuationResourceTable({ resources }: Props) {
                         {resource.remediation ? (
                           <Popover>
                             <PopoverTrigger>
-                              <Badge className="bg-gradient-to-r from-emerald-100 to-green-100 text-emerald-800 dark:from-emerald-900/50 dark:to-green-900/50 dark:text-emerald-200 cursor-pointer hover:shadow-md transition-shadow border-emerald-200 dark:border-emerald-800">
+                              <Badge className="bg-gradient-to-r from-emerald-100 to-green-100 text-emerald-800 dark:from-emerald-900/50 dark:to-green-900/50 dark:text-emerald-200 cursor-pointer hover:scale-105 hover:shadow-md transition-all duration-200 border-emerald-200 dark:border-emerald-800" title="Click for details">
                                 <TrendingDown className="w-3 h-3 mr-1" />
                                 Save {resource.remediation.savings_percent}%
                               </Badge>
@@ -189,7 +202,7 @@ export default function ValuationResourceTable({ resources }: Props) {
                                   <div className="flex justify-between items-center text-sm">
                                     <span className="text-slate-600 dark:text-slate-400">Monthly Savings:</span>
                                     <span className="font-bold text-emerald-700 dark:text-emerald-400 text-lg">
-                                      ₹{resource.remediation.savings_monthly.toFixed(2)}
+                                      {currencySymbol}{resource.remediation.savings_monthly.toFixed(2)}
                                     </span>
                                   </div>
                                   <div className="flex justify-between items-center text-sm">

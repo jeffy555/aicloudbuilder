@@ -55,9 +55,10 @@ function transformMetricsToChartData(metrics: UsageMetrics): ChartDataPoint[] {
         // Convert bytes to percentage (assume 2GB max for web apps)
         point.memory = (average / (2 * 1024 * 1024 * 1024)) * 100;
       } else if (metricName === 'Available Memory Bytes') {
-        // Convert available to used percentage (conservative estimate)
+        // Convert available to used percentage using actual VM memory if available
         const avgAvailableGB = average / (1024 * 1024 * 1024);
-        point.memory = avgAvailableGB > 0 ? Math.min(100, 100 - (avgAvailableGB / 100) * 100) : 50;
+        const maxMemoryGB = (metrics.statistics as any)?.maxMemoryGB || 100;
+        point.memory = avgAvailableGB > 0 ? Math.min(100, 100 - (avgAvailableGB / maxMemoryGB) * 100) : 50;
       } else if (metricName === 'dtu_consumption_percent') {
         point.dtu = average;
       } else if (metricName === 'storage_percent') {

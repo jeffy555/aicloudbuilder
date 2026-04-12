@@ -1,10 +1,10 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { writeFile, unlink, mkdtemp, rmdir } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface LintIssue {
   severity: 'error' | 'warning' | 'info';
@@ -76,7 +76,7 @@ export async function lintHelmChart(chartPath: string): Promise<LintResult> {
   try {
     console.log(`\n🔍 Running helm lint on: ${chartPath}`);
     
-    const { stdout, stderr } = await execAsync(`helm lint "${chartPath}"`, {
+    const { stdout, stderr } = await execFileAsync('helm', ['lint', chartPath], {
       timeout: 30000, // 30 second timeout
     });
 
@@ -121,17 +121,17 @@ export async function renderHelmChart(chartPath: string, values?: Record<string,
   try {
     console.log(`\n📦 Rendering Helm chart: ${chartPath}`);
     
-    let command = `helm template "${chartPath}"`;
+    const templateArgs = ['template', chartPath];
     if (values) {
       // Create temporary values file
       const tempDir = await mkdtemp(join(tmpdir(), 'helm-values-'));
       const valuesFile = join(tempDir, 'values.yaml');
       const yaml = await import('js-yaml');
       await writeFile(valuesFile, yaml.dump(values), 'utf-8');
-      command += ` -f "${valuesFile}"`;
+      templateArgs.push('-f', valuesFile);
     }
 
-    const { stdout } = await execAsync(command, {
+    const { stdout } = await execFileAsync('helm', templateArgs, {
       timeout: 60000, // 60 second timeout
     });
 

@@ -8,16 +8,25 @@ import {
   type GeneratedFile,
   type InsertGeneratedFile,
   type UserActivity,
-  type InsertUserActivity
+  type InsertUserActivity,
+  type ArchitectureVersion,
+  type InsertArchitectureVersion,
+  type BuildHistory,
+  type InsertBuildHistory,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
+import { dedupeGeneratedFilesKeepNewest } from "./utils/generated-files-dedupe";
 
 export interface IStorage {
   // User methods
   getUser(id: string): Promise<User | undefined>;
   getUserById(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
+  getUserByMicrosoftId(microsoftId: string): Promise<User | undefined>;
+  getUserByAwsSub(awsSub: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+  updateUserMicrosoftId(userId: string, microsoftId: string): Promise<User>;
+  updateUserAwsSub(userId: string, awsSub: string): Promise<User>;
 
   // Session methods
   getSession(id: string): Promise<Session | undefined>;
@@ -40,6 +49,18 @@ export interface IStorage {
   getSessionCountByUser(userId: string): Promise<number>;
   createUserActivity(activity: InsertUserActivity): Promise<UserActivity>;
   getUserActivities(userId: string, options?: { module?: string; limit?: number; offset?: number }): Promise<UserActivity[]>;
+
+  // Architecture version history methods
+  createArchitectureVersion(version: InsertArchitectureVersion): Promise<ArchitectureVersion>;
+  getArchitectureVersions(sessionId: string): Promise<ArchitectureVersion[]>;
+  getArchitectureVersion(id: string): Promise<ArchitectureVersion | undefined>;
+
+  // Build history methods
+  createBuildHistory(build: InsertBuildHistory): Promise<BuildHistory>;
+  getBuildHistory(options: { userId?: string; sessionId?: string; module?: string; limit?: number; offset?: number }): Promise<BuildHistory[]>;
+  getBuildById(id: string): Promise<BuildHistory | undefined>;
+  getBuildByBuildId(buildId: string): Promise<BuildHistory | undefined>;
+  updateBuildHistory(id: string, updates: Partial<InsertBuildHistory>): Promise<BuildHistory>;
 }
 
 export class MemStorage implements IStorage {
@@ -48,6 +69,8 @@ export class MemStorage implements IStorage {
   private messages: Map<string, Message>;
   private generatedFiles: Map<string, GeneratedFile>;
   private userActivitiesMap: Map<string, UserActivity>;
+  private archVersions: Map<string, ArchitectureVersion>;
+  private buildHistoryMap: Map<string, BuildHistory>;
 
   constructor() {
     this.users = new Map();
@@ -55,6 +78,8 @@ export class MemStorage implements IStorage {
     this.messages = new Map();
     this.generatedFiles = new Map();
     this.userActivitiesMap = new Map();
+    this.archVersions = new Map();
+    this.buildHistoryMap = new Map();
   }
 
   // User methods
@@ -72,15 +97,47 @@ export class MemStorage implements IStorage {
     );
   }
 
+  async getUserByMicrosoftId(microsoftId: string): Promise<User | undefined> {
+    return Array.from(this.users.values()).find(
+      (user) => user.microsoftId === microsoftId,
+    );
+  }
+
+  async updateUserMicrosoftId(userId: string, microsoftId: string): Promise<User> {
+    const user = this.users.get(userId);
+    if (!user) throw new Error("User not found");
+    const updated = { ...user, microsoftId, authProvider: "microsoft", updatedAt: new Date() };
+    this.users.set(userId, updated);
+    return updated;
+  }
+
+  async getUserByAwsSub(awsSub: string): Promise<User | undefined> {
+    return Array.from(this.users.values()).find(
+      (user) => (user as any).awsSub === awsSub,
+    );
+  }
+
+  async updateUserAwsSub(userId: string, awsSub: string): Promise<User> {
+    const user = this.users.get(userId);
+    if (!user) throw new Error("User not found");
+    const updated = { ...user, awsSub, authProvider: "aws", updatedAt: new Date() };
+    this.users.set(userId, updated);
+    return updated;
+  }
+
   async createUser(insertUser: InsertUser): Promise<User> {
     const id = randomUUID();
     const now = new Date();
-    const user: User = {
+    const user = {
+      microsoftId: null,
+      awsSub: null,
+      authProvider: "local",
+      password: null,
       ...insertUser,
-      id,
+      id: id as string,
       createdAt: now,
       updatedAt: now,
-    };
+    } as User;
     this.users.set(id, user);
     return user;
   }
@@ -164,9 +221,12 @@ export class MemStorage implements IStorage {
 
   // Generated file methods
   async getFilesBySession(sessionId: string): Promise<GeneratedFile[]> {
-    return Array.from(this.generatedFiles.values())
-      .filter((file) => file.sessionId === sessionId)
-      .sort((a, b) => a.fileName.localeCompare(b.fileName));
+    const raw = Array.from(this.generatedFiles.values()).filter((file) => file.sessionId === sessionId);
+    const { kept, removeIds } = dedupeGeneratedFilesKeepNewest(raw);
+    for (const id of removeIds) {
+      this.generatedFiles.delete(id);
+    }
+    return kept;
   }
 
   async createFile(insertFile: InsertGeneratedFile): Promise<GeneratedFile> {
@@ -263,6 +323,87 @@ export class MemStorage implements IStorage {
     const offset = options?.offset ?? 0;
     const limit = options?.limit ?? 50;
     return activities.slice(offset, offset + limit);
+  }
+
+  // Architecture version history methods
+  async createArchitectureVersion(insert: InsertArchitectureVersion): Promise<ArchitectureVersion> {
+    const id = randomUUID();
+    const version: ArchitectureVersion = {
+      id,
+      sessionId: insert.sessionId,
+      version: insert.version,
+      label: insert.label ?? null,
+      analysisSnapshot: insert.analysisSnapshot,
+      mermaidSyntax: insert.mermaidSyntax ?? null,
+      diagramType: insert.diagramType ?? null,
+      componentsSnapshot: insert.componentsSnapshot ?? null,
+      codeSnapshot: insert.codeSnapshot ?? null,
+      compliancePresets: insert.compliancePresets ?? null,
+      createdAt: new Date(),
+    };
+    this.archVersions.set(id, version);
+    return version;
+  }
+
+  async getArchitectureVersions(sessionId: string): Promise<ArchitectureVersion[]> {
+    return Array.from(this.archVersions.values())
+      .filter(v => v.sessionId === sessionId)
+      .sort((a, b) => a.version - b.version);
+  }
+
+  async getArchitectureVersion(id: string): Promise<ArchitectureVersion | undefined> {
+    return this.archVersions.get(id);
+  }
+
+  // Build history methods
+  async createBuildHistory(insert: InsertBuildHistory): Promise<BuildHistory> {
+    const id = randomUUID();
+    const build: BuildHistory = {
+      id,
+      userId: insert.userId ?? null,
+      sessionId: insert.sessionId,
+      module: insert.module,
+      buildId: insert.buildId,
+      status: insert.status ?? 'completed',
+      stages: insert.stages ?? null,
+      pipelineStages: insert.pipelineStages ?? null,
+      totalDurationMs: insert.totalDurationMs ?? null,
+      filesGenerated: insert.filesGenerated ?? null,
+      repositoryName: insert.repositoryName ?? null,
+      repositoryBranch: insert.repositoryBranch ?? null,
+      metadata: insert.metadata ?? null,
+      createdAt: new Date(),
+      completedAt: insert.completedAt ?? null,
+    };
+    this.buildHistoryMap.set(id, build);
+    return build;
+  }
+
+  async getBuildHistory(options: { userId?: string; sessionId?: string; module?: string; limit?: number; offset?: number }): Promise<BuildHistory[]> {
+    let builds = Array.from(this.buildHistoryMap.values());
+    if (options.userId) builds = builds.filter(b => b.userId === options.userId);
+    if (options.sessionId) builds = builds.filter(b => b.sessionId === options.sessionId);
+    if (options.module) builds = builds.filter(b => b.module === options.module);
+    builds.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? 50;
+    return builds.slice(offset, offset + limit);
+  }
+
+  async getBuildById(id: string): Promise<BuildHistory | undefined> {
+    return this.buildHistoryMap.get(id);
+  }
+
+  async getBuildByBuildId(buildId: string): Promise<BuildHistory | undefined> {
+    return Array.from(this.buildHistoryMap.values()).find(b => b.buildId === buildId);
+  }
+
+  async updateBuildHistory(id: string, updates: Partial<InsertBuildHistory>): Promise<BuildHistory> {
+    const existing = this.buildHistoryMap.get(id);
+    if (!existing) throw new Error(`Build ${id} not found`);
+    const updated = { ...existing, ...updates };
+    this.buildHistoryMap.set(id, updated);
+    return updated;
   }
 }
 

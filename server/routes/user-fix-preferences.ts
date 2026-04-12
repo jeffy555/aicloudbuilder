@@ -7,6 +7,8 @@
 import type { Express } from 'express';
 import { userFixPreferencesStore } from '../rag/user-fix-preferences-store';
 import { requireAuth, optionalAuth } from '../middleware/auth';
+import { validateRequest } from '../middleware/validate';
+import { createPreferenceBody, updatePreferenceBody } from '@shared/api-contracts/user-fix-preferences';
 import { insertUserFixPreferenceSchema } from '../../shared/schema';
 import { z } from 'zod';
 
@@ -177,7 +179,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * POST /api/users/me/fix-preferences
    * Create a new fix preference
    */
-  app.post('/api/users/me/fix-preferences', requireAuth, async (req, res) => {
+  app.post('/api/users/me/fix-preferences', requireAuth, validateRequest({ body: createPreferenceBody }), async (req, res) => {
     try {
       const userId = req.user!.id;
 
@@ -209,7 +211,7 @@ export function registerUserFixPreferencesRoutes(app: Express) {
    * PUT /api/users/me/fix-preferences/:id
    * Update an existing preference
    */
-  app.put('/api/users/me/fix-preferences/:id', requireAuth, async (req, res) => {
+  app.put('/api/users/me/fix-preferences/:id', requireAuth, validateRequest({ body: updatePreferenceBody }), async (req, res) => {
     try {
       const userId = req.user!.id;
       const { id } = req.params;

@@ -1,10 +1,10 @@
-import { exec } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import { mkdtemp, mkdir, writeFile, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface CheckovRunResult {
   passed: number;
@@ -48,7 +48,7 @@ async function runCheckovCommand(framework: string, tempDir: string): Promise<st
   let lastError: Error | null = null;
   for (const [command, args] of commands) {
     try {
-      const { stdout, stderr } = await execAsync(`${command} ${args.join(" ")}`, {
+      const { stdout, stderr } = await execFileAsync(command, args, {
         timeout: 120000,
         cwd: tempDir,
       });

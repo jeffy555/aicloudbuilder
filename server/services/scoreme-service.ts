@@ -4,6 +4,30 @@ import { bitwardenService } from "./bitwarden-service";
 import { runCheckovOnFiles, CheckovRunResult } from "./scoreme/checkov-runner";
 import { fetch } from "undici";
 import { mcpClient } from "../mcp-client";
+import { aiChatCompletion } from '../utils/ai-client.js';
+import { z } from 'zod';
+import { sanitizeField, sanitizeContent } from '../utils/sanitize-prompt.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('ScoreMe');
+
+// ─── Zod schemas for AI response validation ─────────────────────────────────
+
+const aiFileAnalysisSchema = z.object({
+  description: z.string().catch('No description available'),
+  resources: z.array(z.string()).catch([]),
+});
+
+const aiPillarSchema = z.object({
+  name: z.string(),
+  score: z.number().min(0).max(100),
+  weight: z.number().min(0).max(1),
+  details: z.array(z.string()).catch([]),
+});
+const aiScoringResponseSchema = z.object({
+  pillars: z.array(aiPillarSchema).length(4).catch([]),
+  confidence: z.string().catch('Not recommended'),
+});
 
 export interface ScoreMeRequest {
   provider: "github" | "azure";
@@ -13,7 +37,7 @@ export interface ScoreMeRequest {
   branch?: string;
 }
 
-type InventoryCategory = "terraform" | "kubernetes" | "helm" | "automation" | "bicep" | "arm" | "dockerfile" | "docker-compose";
+type InventoryCategory = "terraform" | "kubernetes" | "helm" | "automation" | "bicep" | "arm" | "dockerfile" | "docker-compose" | "cicd";
 
 // Kubernetes-specific path/filename patterns to distinguish from generic YAML
 const K8S_PATH_PATTERNS = [
@@ -78,6 +102,35 @@ const FILE_TYPES: Record<InventoryCategory, (path: string) => boolean> = {
       /deploy[^/]*\.json$/i.test(lower) ||
       /template\.json$/i.test(lower);
   },
+
+  // CI/CD pipeline configuration files
+  cicd: (path: string) => {
+    const lower = path.toLowerCase();
+    const filename = lower.split("/").pop() || "";
+    return (
+      // GitHub Actions
+      lower.includes(".github/workflows/") && (lower.endsWith(".yml") || lower.endsWith(".yaml")) ||
+      // Azure Pipelines
+      filename === "azure-pipelines.yml" || filename === "azure-pipelines.yaml" ||
+      lower.includes(".azure-pipelines/") ||
+      // GitLab CI
+      filename === ".gitlab-ci.yml" || lower.includes(".gitlab/ci/") ||
+      // CircleCI
+      lower.includes(".circleci/") && filename === "config.yml" ||
+      // Jenkins
+      filename === "jenkinsfile" || filename.startsWith("jenkinsfile.") ||
+      // Drone CI
+      filename === ".drone.yml" ||
+      // Travis CI
+      filename === ".travis.yml" ||
+      // Bitbucket Pipelines
+      filename === "bitbucket-pipelines.yml" ||
+      // Argo CD / Flux CD
+      lower.includes("argocd/") || lower.includes("fluxcd/") ||
+      // Tekton
+      lower.includes("tekton/") && (lower.endsWith(".yaml") || lower.endsWith(".yml"))
+    );
+  },
 };
 
 // Application code indicators (non-DevOps files)
@@ -114,7 +167,9 @@ function hasApplicationCode(tree: Array<{ path: string }>): boolean {
   return tree.some((entry) => APP_CODE_PATTERNS.some((pattern) => pattern(entry.path)));
 }
 
-const MAX_FILES = 120;
+/** Maximum files to analyze per IaC category.
+ *  Override via SCOREME_MAX_FILES environment variable. */
+const MAX_FILES = parseInt(process.env.SCOREME_MAX_FILES || '120', 10);
 
 // ============ Content Analysis Functions ============
 
@@ -122,6 +177,81 @@ interface FileDetail {
   path: string;
   description: string;
   resources?: string[];
+}
+
+// ============ AI System Prompts ============
+
+const AI_PROMPT_TERRAFORM = 'Analyze this Terraform file. Identify: resource types, providers, modules, variables, outputs, security concerns, and overall purpose. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of resources/modules/providers found"], "quality": "brief quality assessment" }';
+
+const AI_PROMPT_KUBERNETES = 'Analyze this Kubernetes manifest. Identify: resource kinds, names, namespaces, security posture (securityContext, runAsNonRoot, etc.), resource limits, probes, and overall purpose. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of resource kind/name pairs"], "quality": "brief quality assessment" }';
+
+const AI_PROMPT_HELM = 'Analyze this Helm chart file. Identify: chart metadata, dependencies, values structure, template patterns, and overall purpose. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of chart components found"], "quality": "brief quality assessment" }';
+
+const AI_PROMPT_SHELL = 'Analyze this shell script. Identify: purpose, tools used (docker/kubectl/terraform/etc), error handling quality, security concerns, and cloud provider interactions. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of tools/commands used"], "quality": "brief quality assessment" }';
+
+const AI_PROMPT_POWERSHELL = 'Analyze this PowerShell script. Identify: purpose, modules used, Azure/AWS cmdlets, parameter handling, error handling, and security concerns. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of modules/cmdlets used"], "quality": "brief quality assessment" }';
+
+const AI_PROMPT_PYTHON = 'Analyze this Python script. Identify: purpose, cloud SDKs used (boto3/azure/google), CLI patterns, infrastructure interactions, and security concerns. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of SDKs/tools used"], "quality": "brief quality assessment" }';
+
+const AI_PROMPT_BICEP = 'Analyze this Azure Bicep file. Identify: resource types, parameters, modules, outputs, and overall purpose. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of Azure resource types found"], "quality": "brief quality assessment" }';
+
+const AI_PROMPT_ARM = 'Analyze this ARM template JSON. Identify: resource types, parameters, variables, outputs, and overall purpose. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of Azure resource types found"], "quality": "brief quality assessment" }';
+
+/**
+ * Helper: call OpenAI for file analysis with fallback
+ */
+async function aiAnalyzeFile(
+  systemPrompt: string,
+  path: string,
+  content: string,
+  fallbackLabel: string,
+  fallbackFn: (path: string, content: string) => FileDetail
+): Promise<FileDetail> {
+  try {
+    const completion = await aiChatCompletion({
+      model: 'gpt-4o-mini',
+      temperature: 0.3,
+      max_tokens: 500,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const, content: `File: ${sanitizeField(path)}\n\n${sanitizeContent(content.substring(0, 4000))}` },
+      ],
+    });
+    const result = aiFileAnalysisSchema.safeParse(JSON.parse(completion.choices[0]?.message?.content || '{}'));
+    if (!result.success) {
+      log.warn('AI file analysis validation failed', { error: result.error.message });
+      return fallbackFn(path, content);
+    }
+    return {
+      path,
+      description: result.data.description || fallbackLabel,
+      resources: result.data.resources,
+    };
+  } catch {
+    return fallbackFn(path, content);
+  }
+}
+
+/**
+ * Process files in batches of 5 using Promise.allSettled
+ */
+async function processInBatches<T>(
+  items: T[],
+  batchSize: number,
+  processor: (item: T) => Promise<FileDetail>
+): Promise<FileDetail[]> {
+  const results: FileDetail[] = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const settled = await Promise.allSettled(batch.map(processor));
+    for (const result of settled) {
+      if (result.status === 'fulfilled') {
+        results.push(result.value);
+      }
+    }
+  }
+  return results;
 }
 
 /**
@@ -150,9 +280,9 @@ function uniqueArray<T>(arr: T[]): T[] {
 }
 
 /**
- * Analyze Terraform file content to extract resources, providers, and modules
+ * Analyze Terraform file content to extract resources, providers, and modules (regex fallback)
  */
-function analyzeTerraformFile(path: string, content: string): FileDetail {
+function analyzeTerraformFileFallback(path: string, content: string): FileDetail {
   const resources: string[] = [];
 
   // Extract resource blocks: resource "type" "name"
@@ -215,9 +345,16 @@ function analyzeTerraformFile(path: string, content: string): FileDetail {
 }
 
 /**
- * Analyze Kubernetes YAML file content to extract kind, name, namespace
+ * AI-powered Terraform file analysis
  */
-function analyzeKubernetesFile(path: string, content: string): FileDetail {
+async function analyzeTerraformFile(path: string, content: string): Promise<FileDetail> {
+  return aiAnalyzeFile(AI_PROMPT_TERRAFORM, path, content, 'Terraform file', analyzeTerraformFileFallback);
+}
+
+/**
+ * Analyze Kubernetes YAML file content to extract kind, name, namespace (regex fallback)
+ */
+function analyzeKubernetesFileFallback(path: string, content: string): FileDetail {
   const resources: string[] = [];
 
   // Parse YAML documents (handle multi-document YAML with ---)
@@ -259,9 +396,16 @@ function analyzeKubernetesFile(path: string, content: string): FileDetail {
 }
 
 /**
- * Analyze Helm chart files
+ * AI-powered Kubernetes file analysis
  */
-function analyzeHelmFile(path: string, content: string): FileDetail {
+async function analyzeKubernetesFile(path: string, content: string): Promise<FileDetail> {
+  return aiAnalyzeFile(AI_PROMPT_KUBERNETES, path, content, 'Kubernetes configuration file', analyzeKubernetesFileFallback);
+}
+
+/**
+ * Analyze Helm chart files (regex fallback)
+ */
+function analyzeHelmFileFallback(path: string, content: string): FileDetail {
   const resources: string[] = [];
   const filename = path.split("/").pop()?.toLowerCase() || "";
 
@@ -299,7 +443,7 @@ function analyzeHelmFile(path: string, content: string): FileDetail {
     };
   } else if (path.includes("/templates/")) {
     // Helm template - analyze like Kubernetes but note it's a template
-    const detail = analyzeKubernetesFile(path, content);
+    const detail = analyzeKubernetesFileFallback(path, content);
     detail.description = `Template: ${detail.description}`;
     return detail;
   }
@@ -308,9 +452,16 @@ function analyzeHelmFile(path: string, content: string): FileDetail {
 }
 
 /**
- * Analyze Shell script content (.sh files)
+ * AI-powered Helm file analysis
  */
-function analyzeShellScript(path: string, content: string): FileDetail {
+async function analyzeHelmFile(path: string, content: string): Promise<FileDetail> {
+  return aiAnalyzeFile(AI_PROMPT_HELM, path, content, 'Helm file', analyzeHelmFileFallback);
+}
+
+/**
+ * Analyze Shell script content (.sh files) (regex fallback)
+ */
+function analyzeShellScriptFallback(path: string, content: string): FileDetail {
   const resources: string[] = [];
 
   // Extract shebang
@@ -356,9 +507,16 @@ function analyzeShellScript(path: string, content: string): FileDetail {
 }
 
 /**
- * Analyze PowerShell script content (.ps1 files)
+ * AI-powered Shell script analysis
  */
-function analyzePowerShellScript(path: string, content: string): FileDetail {
+async function analyzeShellScript(path: string, content: string): Promise<FileDetail> {
+  return aiAnalyzeFile(AI_PROMPT_SHELL, path, content, 'Shell script', analyzeShellScriptFallback);
+}
+
+/**
+ * Analyze PowerShell script content (.ps1 files) (regex fallback)
+ */
+function analyzePowerShellScriptFallback(path: string, content: string): FileDetail {
   const resources: string[] = [];
 
   // Extract module imports
@@ -406,9 +564,16 @@ function analyzePowerShellScript(path: string, content: string): FileDetail {
 }
 
 /**
- * Analyze Python script content (.py files)
+ * AI-powered PowerShell script analysis
  */
-function analyzePythonScript(path: string, content: string): FileDetail {
+async function analyzePowerShellScript(path: string, content: string): Promise<FileDetail> {
+  return aiAnalyzeFile(AI_PROMPT_POWERSHELL, path, content, 'PowerShell script', analyzePowerShellScriptFallback);
+}
+
+/**
+ * Analyze Python script content (.py files) (regex fallback)
+ */
+function analyzePythonScriptFallback(path: string, content: string): FileDetail {
   const resources: string[] = [];
 
   // Extract imports
@@ -467,6 +632,93 @@ function analyzePythonScript(path: string, content: string): FileDetail {
   return { path, description, resources };
 }
 
+/**
+ * AI-powered Python script analysis
+ */
+async function analyzePythonScript(path: string, content: string): Promise<FileDetail> {
+  return aiAnalyzeFile(AI_PROMPT_PYTHON, path, content, 'Python script', analyzePythonScriptFallback);
+}
+
+/**
+ * Analyze Bicep file (AI with regex fallback)
+ */
+async function analyzeBicepFile(path: string, content: string): Promise<FileDetail> {
+  return aiAnalyzeFile(AI_PROMPT_BICEP, path, content, 'Bicep file', (p, c) => {
+    const resources: string[] = [];
+    const matches = extractMatches(c, /resource\s+\w+\s+'([^']+)'/g);
+    matches.forEach(m => resources.push(m[1]));
+    const types = uniqueArray(resources);
+    const description = types.length > 0
+      ? `Bicep: ${types.slice(0, 3).join(', ')}${types.length > 3 ? '...' : ''}`
+      : 'Bicep configuration';
+    return { path: p, description, resources };
+  });
+}
+
+/**
+ * Analyze ARM template (AI with JSON-parse fallback)
+ */
+async function analyzeArmFile(path: string, content: string): Promise<FileDetail> {
+  return aiAnalyzeFile(AI_PROMPT_ARM, path, content, 'ARM template', (p, c) => {
+    const resources: string[] = [];
+    try {
+      const parsed = JSON.parse(c);
+      if (Array.isArray(parsed.resources)) {
+        parsed.resources.forEach((r: any) => { if (r.type) resources.push(r.type); });
+      }
+    } catch { /* not valid JSON */ }
+    const types = uniqueArray(resources);
+    const description = types.length > 0
+      ? `ARM template: ${types.slice(0, 3).join(', ')}${types.length > 3 ? '...' : ''}`
+      : 'ARM template';
+    return { path: p, description, resources };
+  });
+}
+
+/**
+ * Analyze CI/CD pipeline file
+ */
+async function analyzeCicdFile(path: string, content: string): Promise<FileDetail> {
+  const lower = path.toLowerCase();
+  let platform = 'CI/CD';
+  if (lower.includes('.github/workflows/')) platform = 'GitHub Actions';
+  else if (lower.includes('azure-pipelines') || lower.includes('.azure-pipelines')) platform = 'Azure Pipelines';
+  else if (lower.includes('.gitlab-ci') || lower.includes('.gitlab/ci/')) platform = 'GitLab CI';
+  else if (lower.includes('.circleci/')) platform = 'CircleCI';
+  else if (lower.includes('jenkinsfile')) platform = 'Jenkins';
+  else if (lower.includes('.drone.yml')) platform = 'Drone CI';
+  else if (lower.includes('.travis.yml')) platform = 'Travis CI';
+  else if (lower.includes('bitbucket-pipelines')) platform = 'Bitbucket Pipelines';
+  else if (lower.includes('argocd/')) platform = 'Argo CD';
+  else if (lower.includes('fluxcd/')) platform = 'Flux CD';
+  else if (lower.includes('tekton/')) platform = 'Tekton';
+
+  const fallbackFn = (_p: string, _c: string): FileDetail => {
+    const resources = [`platform: ${platform}`];
+    const patterns = [
+      { regex: /deploy/i, label: 'deployment' },
+      { regex: /build/i, label: 'build' },
+      { regex: /test/i, label: 'testing' },
+      { regex: /lint/i, label: 'linting' },
+      { regex: /scan|security|sast|dast|trivy|snyk|checkov/i, label: 'security-scan' },
+      { regex: /docker|container|image/i, label: 'container-build' },
+      { regex: /terraform|infra/i, label: 'infrastructure' },
+      { regex: /kubectl|helm|k8s/i, label: 'kubernetes-deploy' },
+    ];
+    for (const p of patterns) {
+      if (p.regex.test(_c)) resources.push(`stage: ${p.label}`);
+    }
+    const stages = resources.filter(r => r.startsWith('stage:')).map(r => r.replace('stage: ', ''));
+    const desc = stages.length > 0
+      ? `${platform} pipeline: ${stages.slice(0, 4).join(', ')}`
+      : `${platform} configuration`;
+    return { path: _p, description: desc, resources };
+  };
+
+  const cicdPrompt = `Analyze this ${platform} CI/CD pipeline. Identify: stages/jobs, deployment targets, security scanning steps, build artifacts, environment handling, and overall purpose. Return JSON: { "description": "1-2 sentence summary", "resources": ["list of stages and tools used"], "quality": "brief quality assessment" }`;
+  return aiAnalyzeFile(cicdPrompt, path, content, `${platform} configuration`, fallbackFn);
+}
+
 function limitArray<T>(items: T[], limit = MAX_FILES): T[] {
   return items.slice(0, limit);
 }
@@ -484,93 +736,217 @@ function convertChecksToFindings(
   }));
 }
 
-function computeConfidence(finalScore: number): ScoreMeReport["confidence"] {
-  if (finalScore >= 90) return "Production-ready";
-  if (finalScore >= 70) return "Needs minor fixes";
-  if (finalScore >= 50) return "Risky";
-  return "Not recommended";
-}
-
 function weightedScore(scores: Array<{ score: number; weight: number }>): number {
   return scores.reduce((acc, entry) => acc + entry.score * entry.weight, 0);
 }
 
-function summarizeInventoryWithContent(
+/**
+ * AI-driven pillar scoring, replacing hardcoded formulas (C2) and
+ * hardcoded confidence thresholds (C3).
+ *
+ * Returns the 4 pillar scores with AI-determined weights, a final
+ * weighted score, and a confidence label from the allowed enum.
+ */
+async function computePillarScoresWithAI(input: {
+  scanResults: {
+    terraform: { passed: number; failed: number; skipped: number };
+    kubernetes: { passed: number; failed: number; skipped: number };
+    docker: { passed: number; failed: number; skipped: number };
+    automation: { passed: number; failed: number; skipped: number };
+    totalPassed: number; totalFailed: number; totalSkipped: number; totalChecks: number;
+  };
+  fileCounts: {
+    terraform: number; kubernetes: number; helm: number; bicep: number;
+    arm: number; dockerfiles: number; dockerCompose: number; automation: number; cicd: number;
+  };
+  infraCount: number;
+  containerCount: number;
+}): Promise<{
+  pillarScores: ScoreMeReport["pillarScores"];
+  finalScore: number;
+  confidence: ScoreMeReport["confidence"];
+}> {
+  const CONFIDENCE_VALUES: ScoreMeReport["confidence"][] = [
+    "Production-ready", "Needs minor fixes", "Risky", "Not recommended",
+  ];
+
+  // Fallback scoring (same structure, simple heuristics) used if AI fails
+  function fallbackScoring(): {
+    pillarScores: ScoreMeReport["pillarScores"];
+    finalScore: number;
+    confidence: ScoreMeReport["confidence"];
+  } {
+    const { scanResults: s, fileCounts: fc, infraCount, containerCount } = input;
+    const pillars: ScoreMeReport["pillarScores"] = [
+      {
+        name: "Security & Compliance", weight: 0.4,
+        score: Math.max(0, 100 - s.totalFailed * 4),
+        details: [`${s.totalFailed} failed checks, ${s.totalPassed} passed`],
+      },
+      {
+        name: "Infrastructure Coverage", weight: 0.25,
+        score: Math.min(100, 50 + Math.min(50, infraCount * 5)),
+        details: [`${infraCount} IaC files (TF/Bicep/ARM), ${fc.kubernetes} K8s, ${fc.helm} Helm`],
+      },
+      {
+        name: "Automated Scanning", weight: 0.2,
+        score: s.totalChecks > 0 ? Math.round((s.totalPassed / s.totalChecks) * 100) : 100,
+        details: [`${s.totalChecks} checks, ${s.totalChecks > 0 ? Math.round((s.totalPassed / s.totalChecks) * 100) : 100}% pass rate`],
+      },
+      {
+        name: "Containerization & Automation", weight: 0.15,
+        score: Math.min(100, 50 + containerCount * 10 + fc.automation * 5 + fc.helm * 5),
+        details: [`${containerCount} container files, ${fc.automation} scripts, ${fc.helm} Helm, ${fc.cicd} CI/CD`],
+      },
+    ];
+    const score = weightedScore(pillars);
+    let conf: ScoreMeReport["confidence"] = "Not recommended";
+    if (score >= 90) conf = "Production-ready";
+    else if (score >= 70) conf = "Needs minor fixes";
+    else if (score >= 50) conf = "Risky";
+    return { pillarScores: pillars, finalScore: score, confidence: conf };
+  }
+
+  try {
+    const systemPrompt = `You are a DevOps maturity assessor. Given repository scan metrics, score 4 pillars and determine deployment confidence.
+
+Return JSON:
+{
+  "pillars": [
+    {
+      "name": "Security & Compliance",
+      "score": <0-100>,
+      "weight": <0.35-0.45>,
+      "details": ["line 1", "line 2"]
+    },
+    {
+      "name": "Infrastructure Coverage",
+      "score": <0-100>,
+      "weight": <0.20-0.30>,
+      "details": ["line 1", "line 2"]
+    },
+    {
+      "name": "Automated Scanning",
+      "score": <0-100>,
+      "weight": <0.15-0.25>,
+      "details": ["line 1"]
+    },
+    {
+      "name": "Containerization & Automation",
+      "score": <0-100>,
+      "weight": <0.10-0.20>,
+      "details": ["line 1"]
+    }
+  ],
+  "confidence": "Production-ready" | "Needs minor fixes" | "Risky" | "Not recommended"
+}
+
+Scoring guidelines:
+- Security: Each failed check costs 3-5 points. Critical failures (>10) should drop below 50.
+- Infrastructure Coverage: Base 50 for having any IaC. +3-5 per file, capped at 100. Bicep/ARM count equally with Terraform.
+- Automated Scanning: Pass rate percentage, penalised if very few total checks (<5).
+- Containerization: Base 50 if any Dockerfiles exist. +10 per Dockerfile, +5 per compose/helm/cicd/automation.
+- Weights MUST sum to exactly 1.0. Adjust within allowed ranges based on repo profile.
+- Confidence: "Production-ready" (≥85 final + no critical gaps), "Needs minor fixes" (65-85), "Risky" (45-65), "Not recommended" (<45 or critical failures).
+- Details: 1-3 short lines per pillar citing actual numbers.`;
+
+    const userPrompt = `Scan results:\n${JSON.stringify(input, null, 2)}`;
+
+    const completion = await aiChatCompletion({
+      model: "gpt-4o-mini",
+      temperature: 0.3,
+      max_tokens: 2000,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system" as const, content: systemPrompt },
+        { role: "user" as const, content: userPrompt },
+      ],
+    });
+
+    const content = completion.choices[0]?.message?.content;
+    if (!content) return fallbackScoring();
+
+    const zodResult = aiScoringResponseSchema.safeParse(JSON.parse(content));
+    if (!zodResult.success) {
+      log.warn('AI pillar scoring validation failed', { error: zodResult.error.message });
+      return fallbackScoring();
+    }
+
+    const parsed = zodResult.data;
+
+    if (parsed.pillars.length !== 4) {
+      return fallbackScoring();
+    }
+
+    // Normalise weights to sum to 1.0
+    const totalWeight = parsed.pillars.reduce((s, p) => s + (p.weight || 0), 0);
+    const pillarScores: ScoreMeReport["pillarScores"] = parsed.pillars.map(p => ({
+      name: p.name,
+      score: Math.max(0, Math.min(100, Math.round(p.score))),
+      weight: totalWeight > 0 ? p.weight / totalWeight : 0.25,
+      details: p.details,
+    }));
+
+    const finalScore = weightedScore(pillarScores);
+
+    const confidence: ScoreMeReport["confidence"] = CONFIDENCE_VALUES.includes(parsed.confidence as any)
+      ? (parsed.confidence as ScoreMeReport["confidence"])
+      : finalScore >= 85 ? "Production-ready"
+      : finalScore >= 65 ? "Needs minor fixes"
+      : finalScore >= 45 ? "Risky"
+      : "Not recommended";
+
+    return { pillarScores, finalScore, confidence };
+  } catch (error) {
+    log.warn('AI pillar scoring failed, using fallback', { error: error instanceof Error ? error.message : String(error) });
+    return fallbackScoring();
+  }
+}
+
+async function summarizeInventoryWithContent(
   files: Array<{ path: string; content: string }>,
   type: InventoryCategory
-): ScoreMeReport["inventory"][number] | null {
+): Promise<ScoreMeReport["inventory"][number] | null> {
   if (files.length === 0) return null;
 
   let summary = `${files.length} file${files.length > 1 ? "s" : ""} detected`;
-  const fileDetails: FileDetail[] = [];
+  let fileDetails: FileDetail[] = [];
 
-  // Analyze file contents based on type
+  // Use batched AI analysis for all types
   if (type === "terraform") {
-    // Collect all resources across files
+    fileDetails = await processInBatches(files, 5, f => analyzeTerraformFile(f.path, f.content));
     const allResources: string[] = [];
-    for (const file of files) {
-      const detail = analyzeTerraformFile(file.path, file.content);
-      fileDetails.push(detail);
-      if (detail.resources) {
-        allResources.push(...detail.resources.filter(r => r.startsWith("resource:")));
-      }
-    }
-    // Summarize resource types
+    fileDetails.forEach(d => { if (d.resources) allResources.push(...d.resources.filter(r => r.startsWith("resource:"))); });
     const resourceTypes = uniqueArray(allResources.map(r => r.split(".")[0].replace("resource: ", "")));
     if (resourceTypes.length > 0) {
       summary += ` - Resources: ${resourceTypes.slice(0, 5).join(", ")}${resourceTypes.length > 5 ? ` (+${resourceTypes.length - 5} more)` : ""}`;
     }
   } else if (type === "kubernetes") {
-    // Collect all K8s kinds
+    fileDetails = await processInBatches(files, 5, f => analyzeKubernetesFile(f.path, f.content));
     const allKinds: string[] = [];
-    for (const file of files) {
-      const detail = analyzeKubernetesFile(file.path, file.content);
-      fileDetails.push(detail);
-      if (detail.resources) {
-        allKinds.push(...detail.resources.map(r => r.split("/")[0]));
-      }
-    }
+    fileDetails.forEach(d => { if (d.resources) allKinds.push(...d.resources.map(r => r.split("/")[0])); });
     const uniqueKinds = uniqueArray(allKinds);
     if (uniqueKinds.length > 0) {
       summary += ` - Kinds: ${uniqueKinds.slice(0, 5).join(", ")}${uniqueKinds.length > 5 ? ` (+${uniqueKinds.length - 5} more)` : ""}`;
     }
   } else if (type === "helm") {
-    for (const file of files) {
-      const detail = analyzeHelmFile(file.path, file.content);
-      fileDetails.push(detail);
-    }
-    // Find chart name from Chart.yaml
+    fileDetails = await processInBatches(files, 5, f => analyzeHelmFile(f.path, f.content));
     const chartDetail = fileDetails.find(d => d.path.toLowerCase().endsWith("chart.yaml"));
     if (chartDetail && chartDetail.resources?.[0]) {
       summary += ` - ${chartDetail.resources[0]}`;
     }
   } else if (type === "automation") {
-    // Analyze each script based on type using content analysis
-    for (const file of files) {
-      if (file.path.endsWith(".sh")) {
-        fileDetails.push(analyzeShellScript(file.path, file.content));
-      } else if (file.path.endsWith(".ps1")) {
-        fileDetails.push(analyzePowerShellScript(file.path, file.content));
-      } else if (file.path.endsWith(".py")) {
-        fileDetails.push(analyzePythonScript(file.path, file.content));
-      } else {
-        const filename = file.path.split("/").pop() || file.path;
-        fileDetails.push({ path: file.path, description: `Script: ${filename}` });
-      }
-    }
-
-    // Collect all "uses:" resources for summary
+    fileDetails = await processInBatches(files, 5, f => {
+      if (f.path.endsWith(".sh")) return analyzeShellScript(f.path, f.content);
+      if (f.path.endsWith(".ps1")) return analyzePowerShellScript(f.path, f.content);
+      if (f.path.endsWith(".py")) return analyzePythonScript(f.path, f.content);
+      return Promise.resolve({ path: f.path, description: `Script: ${f.path.split("/").pop() || f.path}` });
+    });
     const allTools: string[] = [];
     fileDetails.forEach(d => {
-      if (d.resources) {
-        d.resources.filter(r => r.startsWith("uses:")).forEach(r => {
-          allTools.push(r.replace("uses: ", ""));
-        });
-      }
+      if (d.resources) d.resources.filter(r => r.startsWith("uses:")).forEach(r => allTools.push(r.replace("uses: ", "")));
     });
     const uniqueTools = uniqueArray(allTools);
-
-    // Build summary with counts and tool usage
     const sh = files.filter(f => f.path.endsWith(".sh")).length;
     const ps1 = files.filter(f => f.path.endsWith(".ps1")).length;
     const py = files.filter(f => f.path.endsWith(".py")).length;
@@ -582,8 +958,34 @@ function summarizeInventoryWithContent(
     if (uniqueTools.length > 0) {
       summary += ` - Tools: ${uniqueTools.slice(0, 4).join(", ")}${uniqueTools.length > 4 ? ` (+${uniqueTools.length - 4} more)` : ""}`;
     }
+  } else if (type === "bicep") {
+    fileDetails = await processInBatches(files, 5, f => analyzeBicepFile(f.path, f.content));
+    const allTypes: string[] = [];
+    fileDetails.forEach(d => { if (d.resources) allTypes.push(...d.resources); });
+    const uniqueTypes = uniqueArray(allTypes);
+    if (uniqueTypes.length > 0) {
+      summary += ` - Types: ${uniqueTypes.slice(0, 4).join(", ")}${uniqueTypes.length > 4 ? '...' : ''}`;
+    }
+  } else if (type === "arm") {
+    fileDetails = await processInBatches(files, 5, f => analyzeArmFile(f.path, f.content));
+    const allTypes: string[] = [];
+    fileDetails.forEach(d => { if (d.resources) allTypes.push(...d.resources); });
+    const uniqueTypes = uniqueArray(allTypes);
+    if (uniqueTypes.length > 0) {
+      summary += ` - Types: ${uniqueTypes.slice(0, 4).join(", ")}${uniqueTypes.length > 4 ? '...' : ''}`;
+    }
+  } else if (type === "cicd") {
+    fileDetails = await processInBatches(files, 5, f => analyzeCicdFile(f.path, f.content));
+    const platforms: string[] = [];
+    fileDetails.forEach(d => {
+      if (d.resources) d.resources.filter(r => r.startsWith("platform:")).forEach(r => platforms.push(r.replace("platform: ", "")));
+    });
+    const uniquePlatforms = uniqueArray(platforms);
+    if (uniquePlatforms.length > 0) {
+      summary += ` - ${uniquePlatforms.join(", ")}`;
+    }
   } else {
-    // For other types (dockerfile, docker-compose, bicep, arm)
+    // dockerfile, docker-compose — simple description
     for (const file of files) {
       const filename = file.path.split("/").pop() || file.path;
       fileDetails.push({ path: file.path, description: `${type}: ${filename}` });
@@ -627,14 +1029,9 @@ async function fetchGitHubTree(
   );
   if (!treeResponse.ok) {
     const body = await treeResponse.text();
-    console.error(
-      `[ScoreMe] Failed to fetch GitHub tree (${owner}/${repo}@${branch}): ${treeResponse.status} ${treeResponse.statusText} - ${body.substring(
-        0,
-        400
-      )}`
-    );
+    log.error(`Failed to fetch GitHub tree`, { owner, repo, branch, status: treeResponse.status, statusText: treeResponse.statusText, body: body.substring(0, 400) });
     if (treeResponse.status === 409 && body.includes("Git Repository is empty")) {
-      console.warn(`[ScoreMe] Repository ${owner}/${repo} is empty; returning empty tree.`);
+      log.warn('Repository is empty; returning empty tree', { owner, repo });
       return { branch, tree: [] };
     }
     throw new Error(
@@ -744,6 +1141,7 @@ interface RepositoryFiles {
   armFiles: Array<{ path: string; content: string }>;
   dockerfiles: Array<{ path: string; content: string }>;
   dockerComposeFiles: Array<{ path: string; content: string }>;
+  cicdFiles: Array<{ path: string; content: string }>;
   // Tree metadata for empty/app-code detection
   treeSize: number;
   hasAppCode: boolean;
@@ -759,6 +1157,7 @@ function categorizePaths(tree: Array<{ path: string }>) {
     arm: [],
     dockerfile: [],
     "docker-compose": [],
+    cicd: [],
   };
 
   for (const entry of tree) {
@@ -769,7 +1168,7 @@ function categorizePaths(tree: Array<{ path: string }>) {
     }
 
     // Check all other categories
-    (["terraform", "kubernetes", "automation", "bicep", "arm", "dockerfile", "docker-compose"] as InventoryCategory[]).forEach((category) => {
+    (["terraform", "kubernetes", "automation", "bicep", "arm", "dockerfile", "docker-compose", "cicd"] as InventoryCategory[]).forEach((category) => {
       if (FILE_TYPES[category](entry.path)) {
         categories[category].push(entry);
       }
@@ -834,7 +1233,7 @@ async function resolveGitHubRepository(
       return parseGitHubRepoInput(bestName, ownerFallback);
     }
   } catch (error: any) {
-    console.warn("⚠️ ScoreMe: Unable to resolve GitHub repository via MCP:", error?.message || error);
+    log.warn('Unable to resolve GitHub repository via MCP', { error: error?.message || String(error) });
   }
 
   return parseGitHubRepoInput(candidate, ownerFallback);
@@ -851,7 +1250,7 @@ async function ensureFiles(
       const content = await fetcher(entry.path);
       files.push({ path: entry.path, content });
     } catch (error) {
-      console.warn(`Unable to fetch ${entry.path}:`, error);
+      log.warn(`Unable to fetch file`, { path: entry.path, error: error instanceof Error ? error.message : String(error) });
     }
   }
   return files;
@@ -908,6 +1307,7 @@ export class ScoreMeService {
     const armFiles = await ensureFiles(categorized.arm, fetcher);
     const dockerfiles = await ensureFiles(categorized.dockerfile, fetcher);
     const dockerComposeFiles = await ensureFiles(categorized["docker-compose"], fetcher);
+    const cicdFiles = await ensureFiles(categorized.cicd, fetcher);
 
     return this.buildReport(`${resolvedOwner}/${resolvedRepo}`, "github", {
       terraformFiles,
@@ -918,6 +1318,7 @@ export class ScoreMeService {
       armFiles,
       dockerfiles,
       dockerComposeFiles,
+      cicdFiles,
       treeSize: tree.length,
       hasAppCode: hasApplicationCode(tree),
     });
@@ -939,6 +1340,7 @@ export class ScoreMeService {
     const armFiles = await ensureFiles(categorized.arm, fetcher);
     const dockerfiles = await ensureFiles(categorized.dockerfile, fetcher);
     const dockerComposeFiles = await ensureFiles(categorized["docker-compose"], fetcher);
+    const cicdFiles = await ensureFiles(categorized.cicd, fetcher);
 
     return this.buildReport(`${org}/${project}/${repository}`, "azure", {
       terraformFiles,
@@ -949,6 +1351,7 @@ export class ScoreMeService {
       armFiles,
       dockerfiles,
       dockerComposeFiles,
+      cicdFiles,
       treeSize: tree.length,
       hasAppCode: hasApplicationCode(tree as Array<{ path: string }>),
     });
@@ -959,11 +1362,16 @@ export class ScoreMeService {
     provider: "github" | "azure",
     files: RepositoryFiles
   ): Promise<ScoreMeReport> {
-    // Run Checkov on scannable infrastructure code (terraform, kubernetes, dockerfile, automation)
-    const terraformResult = await runCheckovOnFiles("terraform", files.terraformFiles);
-    const kubernetesResult = await runCheckovOnFiles("kubernetes", files.kubernetesFiles);
-    const dockerResult = await runCheckovOnFiles("dockerfile", files.dockerfiles);
-    const automationResult = await runCheckovOnFiles("automation", files.automationScripts);
+    // Run Checkov on all scannable categories in parallel
+    log.info(`Starting security scan for ${repositoryLabel}`, { terraform: files.terraformFiles.length, kubernetes: files.kubernetesFiles.length, docker: files.dockerfiles.length, scripts: files.automationScripts.length });
+    const scanStart = Date.now();
+    const [terraformResult, kubernetesResult, dockerResult, automationResult] = await Promise.all([
+      runCheckovOnFiles("terraform", files.terraformFiles),
+      runCheckovOnFiles("kubernetes", files.kubernetesFiles),
+      runCheckovOnFiles("dockerfile", files.dockerfiles),
+      runCheckovOnFiles("automation", files.automationScripts),
+    ]);
+    log.info('Security scan completed', { durationSec: ((Date.now() - scanStart) / 1000).toFixed(1) });
 
     const totalFailed = terraformResult.failed + kubernetesResult.failed + dockerResult.failed + automationResult.failed;
     const totalPassed = terraformResult.passed + kubernetesResult.passed + dockerResult.passed + automationResult.passed;
@@ -991,7 +1399,8 @@ export class ScoreMeService {
       files.bicepFiles.length +
       files.armFiles.length +
       files.dockerfiles.length +
-      files.dockerComposeFiles.length;
+      files.dockerComposeFiles.length +
+      files.cicdFiles.length;
 
     // Early exit for empty repositories
     if (files.treeSize === 0) {
@@ -1056,71 +1465,68 @@ export class ScoreMeService {
       };
     }
 
-    const pillarScores = [
-      {
-        name: "Security & Compliance",
-        score: Math.max(0, 100 - totalFailed * 4),
-        weight: 0.4,
-        details: [
-          `Checkov failed checks: ${totalFailed}`,
-          `Terraform: ${terraformResult.failed} failed, ${terraformResult.passed} passed`,
-          `Kubernetes: ${kubernetesResult.failed} failed, ${kubernetesResult.passed} passed`,
-          ...(dockerResult.passed + dockerResult.failed > 0
-            ? [`Dockerfile: ${dockerResult.failed} failed, ${dockerResult.passed} passed`]
-            : []),
-          ...(automationResult.passed + automationResult.failed > 0
-            ? [`Automation: ${automationResult.failed} failed, ${automationResult.passed} passed`]
-            : []),
-        ],
-      },
-      {
-        name: "Infrastructure Coverage",
-        score: Math.min(100, 50 + Math.min(50, infraCount * 5)),
-        weight: 0.25,
-        details: [
-          `Terraform files: ${files.terraformFiles.length}`,
-          ...(files.bicepFiles.length ? [`Bicep files: ${files.bicepFiles.length}`] : []),
-          ...(files.armFiles.length ? [`ARM templates: ${files.armFiles.length}`] : []),
-          `Kubernetes manifests: ${files.kubernetesFiles.length}`,
-          `Helm charts: ${files.helmCharts.length}`,
-        ],
-      },
-      {
-        name: "Automated Scanning",
-        score: totalChecks > 0 ? Math.round((totalPassed / totalChecks) * 100) : 100,
-        weight: 0.2,
-        details: [
-          `Total checks run: ${totalChecks}`,
-          `Pass rate: ${totalChecks > 0 ? Math.round((totalPassed / totalChecks) * 100) : 100}%`,
-        ],
-      },
-      {
-        name: "Containerization & Automation",
-        score: Math.min(100, 50 + containerCount * 10 + files.automationScripts.length * 5 + files.helmCharts.length * 5),
-        weight: 0.15,
-        details: [
-          ...(files.dockerfiles.length ? [`Dockerfiles: ${files.dockerfiles.length}`] : []),
-          ...(files.dockerComposeFiles.length ? [`Docker Compose files: ${files.dockerComposeFiles.length}`] : []),
-          `Automation scripts: ${files.automationScripts.length}`,
-          `Helm charts: ${files.helmCharts.length}`,
-        ],
-      },
-    ];
-
-    const finalScore = weightedScore(pillarScores);
-
-    // Inventory: infra code first, then kubernetes/helm, then containers, then automation
-    // Use content-aware analysis for Terraform, Kubernetes, and Helm
-    const inventory = [
-      summarizeInventoryWithContent(files.terraformFiles, "terraform"),
-      summarizeInventoryWithContent(files.kubernetesFiles, "kubernetes"),
-      summarizeInventoryWithContent(files.helmCharts, "helm"),
-      summarizeInventoryWithContent(files.bicepFiles, "bicep"),
-      summarizeInventoryWithContent(files.armFiles, "arm"),
-      summarizeInventoryWithContent(files.dockerfiles, "dockerfile"),
-      summarizeInventoryWithContent(files.dockerComposeFiles, "docker-compose"),
-      summarizeInventoryWithContent(files.automationScripts, "automation"),
-    ].filter(Boolean) as ScoreMeReport["inventory"];
+    /**
+     * AI-driven pillar scoring and confidence assessment (C2+C3).
+     *
+     * **Pillar weight philosophy (L2):**
+     * - **Security & Compliance (≈0.40)**: Highest weight because security failures
+     *   can cause breaches, compliance fines, and data loss. Even a small number of
+     *   critical vulnerabilities should heavily penalise the overall score.
+     * - **Infrastructure Coverage (≈0.25)**: IaC coverage determines reproducibility
+     *   and drift prevention. A repo with zero IaC is essentially unauditable.
+     * - **Automated Scanning (≈0.20)**: Pass rate across all checks reflects ongoing
+     *   code hygiene. Separate from Security because a repo can have many passing
+     *   low-severity checks yet still fail on critical ones.
+     * - **Containerization & Automation (≈0.15)**: Lowest weight — containers and
+     *   CI/CD automation improve velocity but their absence is less dangerous than
+     *   missing security or IaC coverage.
+     *
+     * The AI may adjust weights ±0.05 based on the specific repository profile
+     * (e.g., a pure Helm repo may weight containerization higher). Weights must
+     * always sum to 1.0.
+     */
+    // Run pillar scoring and inventory analysis in parallel (both depend on scan results but not each other)
+    log.info('Starting pillar scoring + inventory analysis');
+    const analysisStart = Date.now();
+    const [pillarResult, inventoryResults] = await Promise.all([
+      computePillarScoresWithAI({
+        scanResults: {
+          terraform: { passed: terraformResult.passed, failed: terraformResult.failed, skipped: terraformResult.skipped },
+          kubernetes: { passed: kubernetesResult.passed, failed: kubernetesResult.failed, skipped: kubernetesResult.skipped },
+          docker: { passed: dockerResult.passed, failed: dockerResult.failed, skipped: dockerResult.skipped },
+          automation: { passed: automationResult.passed, failed: automationResult.failed, skipped: automationResult.skipped },
+          totalPassed, totalFailed, totalSkipped, totalChecks,
+        },
+        fileCounts: {
+          terraform: files.terraformFiles.length,
+          kubernetes: files.kubernetesFiles.length,
+          helm: files.helmCharts.length,
+          bicep: files.bicepFiles.length,
+          arm: files.armFiles.length,
+          dockerfiles: files.dockerfiles.length,
+          dockerCompose: files.dockerComposeFiles.length,
+          automation: files.automationScripts.length,
+          cicd: files.cicdFiles.length,
+        },
+        infraCount,
+        containerCount,
+      }),
+      // Inventory: infra code first, then kubernetes/helm, then containers, then automation, then CI/CD
+      Promise.all([
+        summarizeInventoryWithContent(files.terraformFiles, "terraform"),
+        summarizeInventoryWithContent(files.kubernetesFiles, "kubernetes"),
+        summarizeInventoryWithContent(files.helmCharts, "helm"),
+        summarizeInventoryWithContent(files.bicepFiles, "bicep"),
+        summarizeInventoryWithContent(files.armFiles, "arm"),
+        summarizeInventoryWithContent(files.dockerfiles, "dockerfile"),
+        summarizeInventoryWithContent(files.dockerComposeFiles, "docker-compose"),
+        summarizeInventoryWithContent(files.automationScripts, "automation"),
+        summarizeInventoryWithContent(files.cicdFiles, "cicd"),
+      ]),
+    ]);
+    const { pillarScores, finalScore, confidence } = pillarResult;
+    const inventory = inventoryResults.filter(Boolean) as ScoreMeReport["inventory"];
+    log.info('Analysis completed', { durationSec: ((Date.now() - analysisStart) / 1000).toFixed(1), score: finalScore.toFixed(1), confidence });
 
     return {
       repository: repositoryLabel,
@@ -1129,7 +1535,7 @@ export class ScoreMeService {
       findings,
       pillarScores,
       finalScore: Number(finalScore.toFixed(1)),
-      confidence: computeConfidence(finalScore),
+      confidence,
       updatedAt: new Date().toISOString(),
     };
   }

@@ -7,6 +7,10 @@
 
 import { getPricingConfig, buildPricingApiFilter, selectBestPricingItem, calculateMonthlyCost, isFreeResource } from '../azure-pricing-config';
 
+// In-memory pricing cache to reduce Azure Retail Prices API calls
+const pricingCache = new Map<string, { data: any; timestamp: number }>();
+const PRICING_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
 // Azure ARM type → Terraform resource type mapping
 export const AZURE_ARM_TO_TERRAFORM_TYPE: Record<string, string> = {
   'Microsoft.Storage/storageAccounts': 'azurerm_storage_account',
@@ -110,8 +114,9 @@ export function extractPricingAttributes(
 export async function calculateResourceCost(
   terraformType: string,
   attributes: Record<string, any>,
-  location: string
-): Promise<{ monthlyCost: number; yearlyCost: number; pricingDetails: any }> {
+  location: string,
+  currency: string = 'INR'
+): Promise<{ monthlyCost: number; yearlyCost: number; pricingDetails: any; pricingError?: boolean }> {
   // Check if resource is free
   const freeReason = isFreeResource(terraformType);
   if (freeReason) {
@@ -131,10 +136,22 @@ export async function calculateResourceCost(
   // Build OData filter for Azure Pricing API
   const filter = buildPricingApiFilter(terraformType, attributes, location);
 
-  // Fetch pricing data from Azure Retail Prices API (INR currency)
-  // Add currency filter for INR prices
-  const currencyFilter = "currencyCode eq 'INR'";
+  // Add currency filter for the requested currency
+  const currencyFilter = `currencyCode eq '${currency}'`;
   const filterParam = filter ? `${filter} and ${currencyFilter}` : currencyFilter;
+
+  // Check pricing cache before making API call
+  const cacheKey = `${terraformType}|${location}|${JSON.stringify(attributes)}|${currency}`;
+  const cached = pricingCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < PRICING_CACHE_TTL) {
+    console.log(`   💾 Using cached pricing for ${terraformType}`);
+    const pricingItem = selectBestPricingItem(terraformType, cached.data.Items, attributes);
+    if (pricingItem) {
+      const monthlyCost = calculateMonthlyCost(terraformType, pricingItem, attributes) ?? 0;
+      return { monthlyCost, yearlyCost: monthlyCost * 12, pricingDetails: pricingItem };
+    }
+    // If cached data didn't yield a match, fall through to re-fetch
+  }
 
   const response = await fetch(
     `https://prices.azure.com/api/retail/prices?$filter=${encodeURIComponent(filterParam)}`
@@ -146,6 +163,11 @@ export async function calculateResourceCost(
 
   const data = await response.json();
 
+  // Store successful response in cache
+  if (data.Items && data.Items.length > 0) {
+    pricingCache.set(cacheKey, { data, timestamp: Date.now() });
+  }
+
   console.log(`   🔍 Pricing API returned ${data.Items?.length || 0} items for ${terraformType}`);
 
   if (!data.Items || data.Items.length === 0) {
@@ -153,7 +175,8 @@ export async function calculateResourceCost(
     return {
       monthlyCost: 0,
       yearlyCost: 0,
-      pricingDetails: { error: 'No pricing data available for this resource configuration' }
+      pricingDetails: { error: 'No pricing data available for this resource configuration' },
+      pricingError: true
     };
   }
 
@@ -165,7 +188,8 @@ export async function calculateResourceCost(
     return {
       monthlyCost: 0,
       yearlyCost: 0,
-      pricingDetails: { error: 'Could not match pricing item' }
+      pricingDetails: { error: 'Could not match pricing item' },
+      pricingError: true
     };
   }
 

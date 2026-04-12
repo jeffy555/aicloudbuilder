@@ -5,25 +5,38 @@
  */
 
 import type { Express } from "express";
+import { aiChatCompletion } from '../utils/ai-client.js';
 import { storage } from "../storage";
 import { fetchAzureResources, validateAzureConnection, fetchResourceGroups } from "../valuation/resource-fetcher";
 import { mapAzureResourceToTerraformType, extractPricingAttributes, calculateResourceCost } from "../valuation/pricing-mapper";
-import { generateRecommendation, calculateTotalSavings } from "../valuation/recommendation-engine";
+import { generateAIRecommendations, calculateTotalSavings } from "../valuation/recommendation-engine";
 import { fetchMetricsForResources } from "../valuation/metrics-fetcher";
 import type { ValuationResource, ValuationSummary, UsageMetrics } from "@shared/schema";
+import { validateRequest } from "../middleware/validate";
+import { requireAuth, optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { aiMediumLimiter } from "../middleware/rate-limit";
+import {
+  valuationConnectBody,
+  resourceGroupsBody,
+  valuationScanBody,
+  valuationAnalyzeBody,
+  reservedInstancesBody,
+  budgetAlertsBody,
+  multicloudCompareBody,
+} from "@shared/api-contracts/valuation";
 
 export function registerValuationRoutes(app: Express): void {
 
   // POST /api/valuation/connect - Verify Azure connection
-  app.post("/api/valuation/connect", async (req, res) => {
+  app.post("/api/valuation/connect", optionalAuth, validateRequest({ body: valuationConnectBody }), async (req, res) => {
     try {
       console.log('\n🔌 ========== VALUATION: CONNECT ==========');
 
       // Get userId from session if available (for Bitwarden)
       const { sessionId } = req.body;
-      let userId: string | undefined;
+      let userId: string | undefined = (req as AuthenticatedRequest).userId;
 
-      if (sessionId) {
+      if (!userId && sessionId) {
         const session = await storage.getSession(sessionId);
         userId = session?.userId || undefined;
       }
@@ -36,6 +49,20 @@ export function registerValuationRoutes(app: Express): void {
           details: 'Could not connect to Azure. Please configure credentials in Settings or set environment variables (AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID).'
         });
       }
+
+      // Audit log
+      try {
+        if (userId) {
+          await storage.createUserActivity({
+            userId,
+            sessionId: sessionId || null,
+            module: 'valuation',
+            actionType: 'valuation_connect',
+            actionLabel: 'Connected to Azure subscription',
+            metadata: { subscriptionId: process.env.AZURE_SUBSCRIPTION_ID || 'unknown' },
+          });
+        }
+      } catch (_auditErr) { /* audit failure should not break endpoint */ }
 
       res.json({
         success: true,
@@ -52,7 +79,7 @@ export function registerValuationRoutes(app: Express): void {
   });
 
   // POST /api/valuation/resource-groups - Get list of resource groups
-  app.post("/api/valuation/resource-groups", async (req, res) => {
+  app.post("/api/valuation/resource-groups", optionalAuth, validateRequest({ body: resourceGroupsBody }), async (req, res) => {
     try {
       console.log('\n📦 ========== VALUATION: RESOURCE GROUPS ==========');
 
@@ -82,7 +109,7 @@ export function registerValuationRoutes(app: Express): void {
   });
 
   // POST /api/valuation/scan - Scan Azure resources
-  app.post("/api/valuation/scan", async (req, res) => {
+  app.post("/api/valuation/scan", optionalAuth, validateRequest({ body: valuationScanBody }), async (req, res) => {
     try {
       const { sessionId, resourceGroupIds } = req.body;
 
@@ -101,7 +128,7 @@ export function registerValuationRoutes(app: Express): void {
 
       // Get userId from session (for Bitwarden)
       const session = await storage.getSession(sessionId);
-      const userId = session?.userId || undefined;
+      const userId = (req as AuthenticatedRequest).userId || session?.userId || undefined;
 
       // Fetch resources from Azure (optionally filtered by resource groups)
       const resources = await fetchAzureResources(userId, resourceGroupIds);
@@ -114,6 +141,20 @@ export function registerValuationRoutes(app: Express): void {
       });
 
       console.log(`✅ Scan complete: ${resources.length} resource(s) stored in session`);
+
+      // Audit log
+      try {
+        if (userId) {
+          await storage.createUserActivity({
+            userId,
+            sessionId,
+            module: 'valuation',
+            actionType: 'valuation_scan',
+            actionLabel: `Scanned ${resources.length} resources from ${resourceGroupIds?.length || 'all'} resource groups`,
+            metadata: { scannedCount: resources.length, resourceGroupCount: resourceGroupIds?.length || 0 },
+          });
+        }
+      } catch (_auditErr) { /* audit failure should not break endpoint */ }
 
       res.json({
         success: true,
@@ -131,13 +172,16 @@ export function registerValuationRoutes(app: Express): void {
   });
 
   // POST /api/valuation/analyze - Analyze costs and generate recommendations
-  app.post("/api/valuation/analyze", async (req, res) => {
+  app.post("/api/valuation/analyze", optionalAuth, aiMediumLimiter, validateRequest({ body: valuationAnalyzeBody }), async (req, res) => {
     try {
-      const { sessionId, fetchMetrics = true } = req.body;
+      const VALID_CURRENCIES = ['USD', 'INR', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'CNY', 'KRW', 'BRL', 'MXN', 'SGD', 'HKD', 'NOK', 'SEK', 'DKK', 'NZD', 'ZAR', 'AED'] as const;
+      const { sessionId, fetchMetrics = true, currency: rawCurrency = 'INR' } = req.body;
+      const currency = VALID_CURRENCIES.includes(rawCurrency) ? rawCurrency : 'USD';
 
       console.log(`\n💰 ========== VALUATION: ANALYZE ==========`);
       console.log(`Session ID: ${sessionId}`);
       console.log(`Fetch Metrics: ${fetchMetrics}`);
+      console.log(`Currency: ${currency}`);
 
       if (!sessionId) {
         return res.status(400).json({
@@ -157,11 +201,12 @@ export function registerValuationRoutes(app: Express): void {
       }
 
       const azureResources = JSON.parse(session.scannedResources);
-      const userId = session?.userId || undefined;
+      const userId = (req as AuthenticatedRequest).userId || session?.userId || undefined;
       console.log(`📋 Analyzing ${azureResources.length} resource(s)...`);
 
       // Fetch usage metrics if requested
       let metricsMap = new Map<string, UsageMetrics>();
+      let metricsWarning: string | undefined;
       if (fetchMetrics) {
         try {
           // Load Azure credentials to get access token
@@ -187,10 +232,14 @@ export function registerValuationRoutes(app: Express): void {
             const tokenData = await tokenResponse.json();
             const accessToken = tokenData.access_token;
 
-            // Prepare resources for metrics fetching
+            // Prepare resources for metrics fetching (include vmSize for accurate memory calculations)
             const resourcesForMetrics = azureResources
               .filter((r: any) => r.type) // Only resources with type
-              .map((r: any) => ({ id: r.id, type: r.type }));
+              .map((r: any) => ({
+                id: r.id,
+                type: r.type,
+                vmSize: r.properties?.hardwareProfile?.vmSize || undefined
+              }));
 
             metricsMap = await fetchMetricsForResources(resourcesForMetrics, accessToken);
             console.log(`   ✅ Fetched metrics for ${metricsMap.size} resource(s)`);
@@ -200,9 +249,13 @@ export function registerValuationRoutes(app: Express): void {
             await storage.updateSession(sessionId, {
               usageMetricsCache: JSON.stringify(metricsCache)
             });
+          } else {
+            metricsWarning = `Azure Monitor token fetch failed (${tokenResponse.status}). Using rule-based recommendations (lower confidence).`;
+            console.warn(`   ⚠️  ${metricsWarning}`);
           }
         } catch (metricsError: any) {
           console.warn(`   ⚠️  Failed to fetch metrics: ${metricsError.message}`);
+          metricsWarning = `Azure Monitor metrics unavailable: ${metricsError.message}. Using rule-based recommendations (lower confidence).`;
           console.log(`   ℹ️  Continuing with rule-based recommendations...`);
         }
       }
@@ -224,6 +277,7 @@ export function registerValuationRoutes(app: Express): void {
           let monthlyCost: number;
           let yearlyCost: number;
           let pricingDetails: any;
+          let pricingError = false;
 
           if (azureResource.actualCostMTD !== undefined && azureResource.actualCostMTD > 0) {
             // Use actual cost from Azure Cost Management (month-to-date)
@@ -249,12 +303,14 @@ export function registerValuationRoutes(app: Express): void {
             const result = await calculateResourceCost(
               terraformType,
               attributes,
-              azureResource.location
+              azureResource.location,
+              currency
             );
 
             monthlyCost = result.monthlyCost;
             yearlyCost = result.yearlyCost;
             pricingDetails = result.pricingDetails;
+            pricingError = result.pricingError || false;
 
             if (pricingDetails && !pricingDetails.freeReason) {
               console.log(`   💰 ${azureResource.name} - Estimated Pricing:`, {
@@ -283,25 +339,44 @@ export function registerValuationRoutes(app: Express): void {
             currentTier: azureResource.tier,
             monthlyCost,
             yearlyCost,
-            currency: 'INR',
+            currency,
             pricingDetails,
+            pricingError,
             usageMetrics: resourceMetrics,
             metricsAvailable: !!resourceMetrics
           };
 
-          // Generate cost optimization recommendation (with metrics if available)
-          const remediation = generateRecommendation(valuationResource, monthlyCost, resourceMetrics);
-          valuationResource.remediation = remediation || undefined;
-
           valuationResources.push(valuationResource);
 
-          console.log(`   ✅ ${azureResource.name}: $${monthlyCost.toFixed(2)}/month` +
-            (valuationResource.remediation ? ` (Save ${valuationResource.remediation.savings_percent}%)` : ''));
+          console.log(`   ✅ ${azureResource.name}: $${monthlyCost.toFixed(2)}/month`);
 
         } catch (resourceError: any) {
           console.error(`   ❌ Failed to analyze ${azureResource.name}:`, resourceError.message);
           // Continue with other resources
         }
+      }
+
+      // Generate AI-powered recommendations for all resources at once
+      try {
+        const aiInput = valuationResources.map(r => ({
+          resource: r,
+          monthlyCost: r.monthlyCost,
+          metrics: r.usageMetrics,
+        }));
+
+        const aiRecommendations = await generateAIRecommendations(aiInput, currency);
+
+        // Apply AI recommendations to resources
+        for (const r of valuationResources) {
+          const rec = aiRecommendations.get(r.name);
+          if (rec) {
+            r.remediation = rec;
+            console.log(`   💡 ${r.name}: Save ${rec.savings_percent}% → ${rec.recommended_sku}`);
+          }
+        }
+      } catch (aiError: any) {
+        console.warn(`   ⚠️  AI recommendation engine failed: ${aiError.message}`);
+        // Resources will have no recommendations — better than wrong hardcoded ones
       }
 
       // Calculate savings summary
@@ -319,16 +394,36 @@ export function registerValuationRoutes(app: Express): void {
         recommendationCount: savings.resourcesWithRecommendations
       };
 
+      const pricingWarnings = valuationResources.filter(r => (r as any).pricingError).length;
+
       console.log(`\n📊 Analysis Summary:`);
       console.log(`   Total Monthly Cost: $${summary.totalMonthlyCost.toFixed(2)}`);
       console.log(`   Potential Savings: $${summary.potentialSavings.toFixed(2)}/month (${summary.savingsPercent}%)`);
       console.log(`   Resources Analyzed: ${summary.resourceCount}`);
       console.log(`   Recommendations: ${summary.recommendationCount}`);
+      if (pricingWarnings > 0) console.log(`   Pricing Warnings: ${pricingWarnings}`);
+
+      // Audit log
+      try {
+        if (userId) {
+          await storage.createUserActivity({
+            userId,
+            sessionId,
+            module: 'valuation',
+            actionType: 'valuation_analyze',
+            actionLabel: `Analyzed ${valuationResources.length} resources, found ${summary.recommendationCount} recommendations`,
+            metadata: { resourceCount: valuationResources.length, recommendationCount: summary.recommendationCount, currency },
+          });
+        }
+      } catch (_auditErr) { /* audit failure should not break endpoint */ }
 
       res.json({
         success: true,
         summary,
-        resources: valuationResources
+        resources: valuationResources,
+        metricsWarning,
+        pricingWarnings,
+        currency
       });
 
     } catch (error: any) {
@@ -344,7 +439,7 @@ export function registerValuationRoutes(app: Express): void {
   // POST /api/valuation/reserved-instances
   // Accepts the already-analyzed resources array from Step 4 and applies
   // Azure/AWS/GCP reserved-pricing discount rates to produce RI recommendations.
-  app.post("/api/valuation/reserved-instances", async (req, res) => {
+  app.post("/api/valuation/reserved-instances", optionalAuth, aiMediumLimiter, validateRequest({ body: reservedInstancesBody }), async (req, res) => {
     try {
       const { resources } = req.body;
 
@@ -355,76 +450,95 @@ export function registerValuationRoutes(app: Express): void {
       console.log(`\n💡 ========== VALUATION: RESERVED INSTANCES ==========`);
       console.log(`   Analysing ${resources.length} resource(s) for RI eligibility`);
 
-      // Discount rates per terraform resource type.
-      // Source: Azure public pricing pages (1-yr no-upfront / 3-yr no-upfront).
-      const RI_DISCOUNTS: Record<string, { oneYr: number; threeYr: number; commitmentType: string }> = {
-        'azurerm_linux_virtual_machine':      { oneYr: 0.36, threeYr: 0.58, commitmentType: 'Reserved Instance' },
-        'azurerm_windows_virtual_machine':    { oneYr: 0.36, threeYr: 0.58, commitmentType: 'Reserved Instance' },
-        'azurerm_virtual_machine':            { oneYr: 0.36, threeYr: 0.58, commitmentType: 'Reserved Instance' },
-        'azurerm_kubernetes_cluster':         { oneYr: 0.36, threeYr: 0.58, commitmentType: 'Reserved Instance' },
-        'azurerm_app_service_plan':           { oneYr: 0.31, threeYr: 0.49, commitmentType: 'Reserved Instance' },
-        'azurerm_service_plan':               { oneYr: 0.31, threeYr: 0.49, commitmentType: 'Reserved Instance' },
-        'azurerm_mssql_database':             { oneYr: 0.33, threeYr: 0.54, commitmentType: 'Reserved Capacity' },
-        'azurerm_postgresql_flexible_server': { oneYr: 0.33, threeYr: 0.54, commitmentType: 'Reserved Capacity' },
-        'azurerm_mysql_flexible_server':      { oneYr: 0.33, threeYr: 0.54, commitmentType: 'Reserved Capacity' },
-        'azurerm_redis_cache':                { oneYr: 0.33, threeYr: 0.54, commitmentType: 'Reserved Capacity' },
-      };
+      // Build resource summary for AI
+      const resourceSummary = resources
+        .filter((r: any) => r.monthlyCost > 0)
+        .map((r: any) => ({
+          name: r.name,
+          type: r.terraformType || r.azureType,
+          sku: r.currentSku,
+          region: r.location,
+          monthlyCost: r.monthlyCost,
+          currency: r.currency || 'INR',
+        }));
 
-      const recommendations: any[] = [];
-      let totalOnDemandMonthly = 0;
-      let totalReservedMonthly = 0;
-      let skippedCount = 0;
+      const riCompletion = await aiChatCompletion({
+        model: 'gpt-4o-mini',
+        temperature: 0.3,
+        max_tokens: 6000,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: `You are an Azure Reserved Instance pricing advisor. For each resource, calculate the 1-year and 3-year reserved instance/capacity savings based on current Azure RI pricing for the specific SKU and region. Use real Azure RI discount rates — they vary by resource type, SKU size, and region. Resources that are not eligible for reservations (e.g. storage accounts, container registries) should be skipped.
 
-      for (const resource of resources) {
-        const discount = RI_DISCOUNTS[resource.terraformType];
-        if (!discount || !resource.monthlyCost || resource.monthlyCost <= 0) {
-          skippedCount++;
-          continue;
-        }
+Return JSON with this exact structure:
+{
+  "recommendations": [
+    {
+      "resourceName": "string",
+      "resourceType": "string",
+      "region": "string",
+      "currentSku": "string",
+      "onDemandMonthly": number,
+      "reservedMonthly1Yr": number,
+      "reservedMonthly3Yr": number,
+      "saving1YrMonthly": number,
+      "saving1YrAnnual": number,
+      "saving1YrPercent": number,
+      "saving3YrMonthly": number,
+      "saving3YrAnnual": number,
+      "saving3YrPercent": number,
+      "commitmentType": "Reserved Instance" | "Reserved Capacity" | "Savings Plan",
+      "recommendation": "strong" | "moderate" | "review",
+      "rationale": "detailed explanation with specific numbers"
+    }
+  ],
+  "summary": {
+    "totalOnDemandMonthly": number,
+    "totalReservedMonthly": number,
+    "totalSavingMonthly": number,
+    "totalSavingAnnual": number,
+    "eligibleCount": number,
+    "skippedCount": number
+  }
+}`
+          },
+          {
+            role: 'user',
+            content: `Analyze these ${resourceSummary.length} Azure resources for RI eligibility:\n${JSON.stringify(resourceSummary, null, 2)}`
+          }
+        ]
+      });
 
-        const saving1YrMonthly   = parseFloat((resource.monthlyCost * discount.oneYr).toFixed(2));
-        const reservedMonthly1Yr = parseFloat((resource.monthlyCost - saving1YrMonthly).toFixed(2));
-        const saving3YrMonthly   = parseFloat((resource.monthlyCost * discount.threeYr).toFixed(2));
-        const reservedMonthly3Yr = parseFloat((resource.monthlyCost - saving3YrMonthly).toFixed(2));
-        const saving1YrPercent   = Math.round(discount.oneYr * 100);
-        const saving3YrPercent   = Math.round(discount.threeYr * 100);
-
-        totalOnDemandMonthly += resource.monthlyCost;
-        totalReservedMonthly += reservedMonthly1Yr;
-
-        recommendations.push({
-          resourceName:      resource.name,
-          resourceType:      resource.terraformType,
-          region:            resource.location,
-          currentSku:        resource.currentSku || 'Unknown',
-          onDemandMonthly:   resource.monthlyCost,
-          reservedMonthly1Yr,
-          reservedMonthly3Yr,
-          saving1YrMonthly,
-          saving1YrAnnual:   parseFloat((saving1YrMonthly * 12).toFixed(2)),
-          saving1YrPercent,
-          saving3YrMonthly,
-          saving3YrAnnual:   parseFloat((saving3YrMonthly * 12).toFixed(2)),
-          saving3YrPercent,
-          commitmentType:    discount.commitmentType,
-          recommendation:    saving1YrPercent >= 30 ? 'strong' : saving1YrPercent >= 20 ? 'moderate' : 'review',
-          rationale: `Switch to 1-year ${discount.commitmentType} to save ${saving1YrPercent}% — ₹${saving1YrMonthly.toFixed(0)}/month (₹${(saving1YrMonthly * 12).toFixed(0)}/year).`,
-        });
+      const riContent = riCompletion.choices[0]?.message?.content;
+      if (!riContent) {
+        return res.status(500).json({ error: 'AI returned empty response for RI analysis' });
       }
 
-      const totalSavingMonthly = parseFloat((totalOnDemandMonthly - totalReservedMonthly).toFixed(2));
+      const riResult = JSON.parse(riContent) as {
+        recommendations: any[];
+        summary: {
+          totalOnDemandMonthly: number;
+          totalReservedMonthly: number;
+          totalSavingMonthly: number;
+          totalSavingAnnual: number;
+          eligibleCount: number;
+          skippedCount: number;
+        };
+      };
 
-      console.log(`   ✅ ${recommendations.length} eligible, ${skippedCount} skipped`);
-      console.log(`   💰 Potential saving: ₹${totalSavingMonthly.toFixed(2)}/month`);
+      console.log(`   ✅ ${riResult.summary?.eligibleCount || riResult.recommendations?.length || 0} eligible, ${riResult.summary?.skippedCount || 0} skipped`);
+      console.log(`   💰 Potential saving: ₹${(riResult.summary?.totalSavingMonthly || 0).toFixed(2)}/month`);
 
       res.json({
-        recommendations,
-        totalOnDemandMonthly: parseFloat(totalOnDemandMonthly.toFixed(2)),
-        totalReservedMonthly: parseFloat(totalReservedMonthly.toFixed(2)),
-        totalSavingMonthly,
-        totalSavingAnnual: parseFloat((totalSavingMonthly * 12).toFixed(2)),
-        eligibleCount:  recommendations.length,
-        skippedCount,
+        recommendations: riResult.recommendations || [],
+        totalOnDemandMonthly: riResult.summary?.totalOnDemandMonthly || 0,
+        totalReservedMonthly: riResult.summary?.totalReservedMonthly || 0,
+        totalSavingMonthly: riResult.summary?.totalSavingMonthly || 0,
+        totalSavingAnnual: riResult.summary?.totalSavingAnnual || 0,
+        eligibleCount: riResult.summary?.eligibleCount || riResult.recommendations?.length || 0,
+        skippedCount: riResult.summary?.skippedCount || 0,
       });
 
     } catch (error: any) {
@@ -436,7 +550,7 @@ export function registerValuationRoutes(app: Express): void {
   // ─── FinOps: Budget Alert Generator ─────────────────────────────────────────
   // POST /api/valuation/budget-alerts
   // Creates a real Azure Budget Alert via the Cost Management REST API.
-  app.post("/api/valuation/budget-alerts", async (req, res) => {
+  app.post("/api/valuation/budget-alerts", requireAuth, validateRequest({ body: budgetAlertsBody }), async (req: any, res) => {
     try {
       const {
         sessionId,
@@ -543,6 +657,21 @@ export function registerValuationRoutes(app: Express): void {
 
       console.log(`   ✅ Budget created: ${budgetName} (${scopeLabel})`);
 
+      // Audit log
+      try {
+        const authReq = req as AuthenticatedRequest;
+        if (authReq.userId) {
+          await storage.createUserActivity({
+            userId: authReq.userId,
+            sessionId: sessionId || null,
+            module: 'valuation',
+            actionType: 'valuation_budget_create',
+            actionLabel: `Created budget alert: $${budget}/month with ${(thresholds as number[]).length} thresholds`,
+            metadata: { budgetName, amount: budget, thresholds, emailCount: emailList.length },
+          });
+        }
+      } catch (_auditErr) { /* audit failure should not break endpoint */ }
+
       res.json({
         success: true,
         budgetName,
@@ -566,7 +695,7 @@ export function registerValuationRoutes(app: Express): void {
   // POST /api/valuation/multicloud-compare
   // Uses static equivalent-price ratios to estimate the same workload cost on
   // AWS and GCP, given already-calculated Azure costs from Step 4.
-  app.post("/api/valuation/multicloud-compare", async (req, res) => {
+  app.post("/api/valuation/multicloud-compare", optionalAuth, aiMediumLimiter, validateRequest({ body: multicloudCompareBody }), async (req, res) => {
     try {
       const { resources } = req.body;
 
@@ -577,98 +706,80 @@ export function registerValuationRoutes(app: Express): void {
       console.log(`\n🌍 ========== VALUATION: MULTI-CLOUD COMPARE ==========`);
       console.log(`   Comparing ${resources.length} resource(s) across Azure / AWS / GCP`);
 
-      // Equivalent-cost ratios relative to Azure on-demand price.
-      // Based on public on-demand pricing (us-east-1 / us-central1 vs eastus).
-      // Source: Vendor pricing pages, last validated 2026-03.
-      const MULTICLOUD_RATIOS: Record<string, { aws: number; gcp: number; awsLabel: string; gcpLabel: string }> = {
-        'azurerm_linux_virtual_machine':      { aws: 0.87, gcp: 0.80, awsLabel: 'EC2 (m-series)',         gcpLabel: 'Compute Engine (n2)' },
-        'azurerm_windows_virtual_machine':    { aws: 0.90, gcp: 0.86, awsLabel: 'EC2 Windows',            gcpLabel: 'Compute Engine Windows' },
-        'azurerm_virtual_machine':            { aws: 0.87, gcp: 0.80, awsLabel: 'EC2',                    gcpLabel: 'Compute Engine' },
-        'azurerm_kubernetes_cluster':         { aws: 0.85, gcp: 0.75, awsLabel: 'EKS',                    gcpLabel: 'GKE' },
-        'azurerm_app_service_plan':           { aws: 0.88, gcp: 0.82, awsLabel: 'Elastic Beanstalk / EC2', gcpLabel: 'App Engine' },
-        'azurerm_service_plan':               { aws: 0.88, gcp: 0.82, awsLabel: 'Elastic Beanstalk / EC2', gcpLabel: 'App Engine' },
-        'azurerm_mssql_database':             { aws: 0.92, gcp: 0.88, awsLabel: 'RDS SQL Server',          gcpLabel: 'Cloud SQL (SQL Server)' },
-        'azurerm_postgresql_flexible_server': { aws: 0.88, gcp: 0.82, awsLabel: 'RDS PostgreSQL',          gcpLabel: 'Cloud SQL PostgreSQL' },
-        'azurerm_mysql_flexible_server':      { aws: 0.88, gcp: 0.82, awsLabel: 'RDS MySQL',               gcpLabel: 'Cloud SQL MySQL' },
-        'azurerm_redis_cache':                { aws: 0.90, gcp: 0.85, awsLabel: 'ElastiCache Redis',        gcpLabel: 'Memorystore Redis' },
-        'azurerm_storage_account':            { aws: 0.85, gcp: 0.78, awsLabel: 'S3',                       gcpLabel: 'Cloud Storage' },
-        'azurerm_container_registry':         { aws: 0.70, gcp: 0.60, awsLabel: 'ECR',                      gcpLabel: 'Artifact Registry' },
-        'azurerm_linux_web_app':              { aws: 0.88, gcp: 0.82, awsLabel: 'Elastic Beanstalk',        gcpLabel: 'App Engine' },
-        'azurerm_managed_disk':               { aws: 0.90, gcp: 0.82, awsLabel: 'EBS',                      gcpLabel: 'Persistent Disk' },
-        'azurerm_container_group':            { aws: 0.85, gcp: 0.78, awsLabel: 'ECS Fargate',              gcpLabel: 'Cloud Run' },
-      };
+      const resourceSummary = resources
+        .filter((r: any) => r.monthlyCost > 0)
+        .map((r: any) => ({
+          name: r.name,
+          azureType: r.azureType || r.type,
+          sku: r.currentSku,
+          region: r.location,
+          monthlyCost: r.monthlyCost,
+          currency: r.currency || 'INR',
+        }));
 
-      const lineItems: any[] = [];
-      let azureTotal = 0;
-      let awsTotal   = 0;
-      let gcpTotal   = 0;
+      const mcCompletion = await aiChatCompletion({
+        model: 'gpt-4o-mini',
+        temperature: 0.3,
+        max_tokens: 6000,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: `You are a multi-cloud pricing expert. For each Azure resource, identify the closest equivalent service and SKU on AWS and GCP, and estimate the monthly cost based on current public pricing. Use real pricing knowledge for the specific SKU and region — do not use generic ratios. Return JSON:
+{
+  "lineItems": [
+    {
+      "resourceName": "string",
+      "role": "string (e.g. 'Web Server', 'Database')",
+      "azureSku": "string",
+      "azureMonthly": number,
+      "awsEquivalent": "specific AWS service and instance type",
+      "awsMonthly": number,
+      "gcpEquivalent": "specific GCP service and machine type",
+      "gcpMonthly": number
+    }
+  ],
+  "totals": { "azure": number, "aws": number, "gcp": number },
+  "annualTotals": { "azure": number, "aws": number, "gcp": number },
+  "cheapestProvider": "azure" | "aws" | "gcp",
+  "savingVsAzure": { "aws": number, "gcp": number },
+  "insights": ["array of 3-5 specific, actionable insights about the cost comparison"],
+  "resourceCount": number
+}`
+          },
+          {
+            role: 'user',
+            content: `Compare these ${resourceSummary.length} Azure resources across AWS and GCP:\n${JSON.stringify(resourceSummary, null, 2)}`
+          }
+        ]
+      });
 
-      for (const resource of resources) {
-        if (!resource.monthlyCost || resource.monthlyCost <= 0) continue;
-        const ratios = MULTICLOUD_RATIOS[resource.terraformType];
-        if (!ratios) continue;
-
-        const awsMonthly = parseFloat((resource.monthlyCost * ratios.aws).toFixed(2));
-        const gcpMonthly = parseFloat((resource.monthlyCost * ratios.gcp).toFixed(2));
-
-        azureTotal += resource.monthlyCost;
-        awsTotal   += awsMonthly;
-        gcpTotal   += gcpMonthly;
-
-        lineItems.push({
-          resourceName:  resource.name,
-          role:          resource.type || resource.terraformType,
-          azureSku:      resource.currentSku || 'Unknown',
-          azureMonthly:  resource.monthlyCost,
-          awsEquivalent: ratios.awsLabel,
-          awsMonthly,
-          gcpEquivalent: ratios.gcpLabel,
-          gcpMonthly,
-        });
+      const mcContent = mcCompletion.choices[0]?.message?.content;
+      if (!mcContent) {
+        return res.status(500).json({ error: 'AI returned empty response for multi-cloud comparison' });
       }
 
-      const totals = {
-        azure: parseFloat(azureTotal.toFixed(2)),
-        aws:   parseFloat(awsTotal.toFixed(2)),
-        gcp:   parseFloat(gcpTotal.toFixed(2)),
+      const mcResult = JSON.parse(mcContent) as {
+        lineItems: any[];
+        totals: { azure: number; aws: number; gcp: number };
+        annualTotals: { azure: number; aws: number; gcp: number };
+        cheapestProvider: string;
+        savingVsAzure: { aws: number; gcp: number };
+        insights: string[];
+        resourceCount: number;
       };
 
-      const cheapestProvider = (Object.entries(totals) as [string, number][])
-        .sort(([, a], [, b]) => a - b)[0][0] as 'azure' | 'aws' | 'gcp';
-
-      const insights: string[] = [];
-      const cheapestCost = totals[cheapestProvider];
-
-      if (cheapestProvider === 'gcp') {
-        insights.push(`GCP is cheapest at ₹${gcpTotal.toFixed(0)}/month — ₹${(azureTotal - gcpTotal).toFixed(0)} less than your current Azure spend`);
-      } else if (cheapestProvider === 'aws') {
-        insights.push(`AWS is cheaper than Azure by ₹${(azureTotal - awsTotal).toFixed(0)}/month for this workload`);
-      } else {
-        insights.push(`Azure is the most cost-effective option for this workload`);
-      }
-
-      insights.push(`Annual savings vs Azure: AWS saves ₹${((azureTotal - awsTotal) * 12).toFixed(0)}, GCP saves ₹${((azureTotal - gcpTotal) * 12).toFixed(0)}`);
-      insights.push(`All three clouds offer 30–58% additional savings with reserved/committed-use pricing`);
-      insights.push(`Estimates based on equivalent on-demand rates. Actual costs depend on region, data transfer, and support tier`);
-
-      console.log(`   ✅ ${lineItems.length} resource(s) compared | Azure ₹${azureTotal.toFixed(0)} | AWS ₹${awsTotal.toFixed(0)} | GCP ₹${gcpTotal.toFixed(0)}`);
-      console.log(`   🏆 Cheapest: ${cheapestProvider}`);
+      console.log(`   ✅ ${mcResult.lineItems?.length || 0} resource(s) compared`);
+      console.log(`   🏆 Cheapest: ${mcResult.cheapestProvider}`);
 
       res.json({
-        lineItems,
-        totals,
-        annualTotals: {
-          azure: parseFloat((azureTotal * 12).toFixed(2)),
-          aws:   parseFloat((awsTotal   * 12).toFixed(2)),
-          gcp:   parseFloat((gcpTotal   * 12).toFixed(2)),
-        },
-        cheapestProvider,
-        savingVsAzure: {
-          aws: parseFloat((azureTotal - awsTotal).toFixed(2)),
-          gcp: parseFloat((azureTotal - gcpTotal).toFixed(2)),
-        },
-        insights,
-        resourceCount: lineItems.length,
+        lineItems: mcResult.lineItems || [],
+        totals: mcResult.totals || { azure: 0, aws: 0, gcp: 0 },
+        annualTotals: mcResult.annualTotals || { azure: 0, aws: 0, gcp: 0 },
+        cheapestProvider: mcResult.cheapestProvider || 'azure',
+        savingVsAzure: mcResult.savingVsAzure || { aws: 0, gcp: 0 },
+        insights: mcResult.insights || [],
+        resourceCount: mcResult.resourceCount || mcResult.lineItems?.length || 0,
       });
 
     } catch (error: any) {

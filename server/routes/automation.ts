@@ -2,13 +2,17 @@ import type { Express } from "express";
 import { storage } from "../storage";
 import { openaiService } from "../openai-service";
 import { mcpClient, type MCPProvider } from "../mcp-client";
+import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { sessionIdParams } from "@shared/api-contracts/common";
+import { generateAutomationBody, commitAutomationBody } from "@shared/api-contracts/automation";
 
 /**
  * Automation Scripts routes
  */
 export function registerAutomationRoutes(app: Express): void {
   // Generate automation script
-  app.post("/api/sessions/:id/generate-automation", async (req, res) => {
+  app.post("/api/sessions/:id/generate-automation", optionalAuth, validateRequest({ params: sessionIdParams, body: generateAutomationBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const { language, prompt } = req.body;
       const sessionId = req.params.id;
@@ -31,6 +35,10 @@ export function registerAutomationRoutes(app: Express): void {
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Automation session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       console.log(`\n🤖 ========== AUTOMATION SCRIPT GENERATION ==========`);
@@ -86,15 +94,19 @@ export function registerAutomationRoutes(app: Express): void {
   });
 
   // Commit automation files to repository
-  app.post("/api/sessions/:id/commit-automation", async (req, res) => {
+  app.post("/api/sessions/:id/commit-automation", optionalAuth, validateRequest({ params: sessionIdParams, body: commitAutomationBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     let session: any = null;
-    
+
     try {
       session = await storage.getSession(sessionId);
-      
+
       if (!session || !session.provider || !session.repositoryName) {
         return res.status(400).json({ error: 'Session not properly configured' });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Commit-automation session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       const { message, branch = 'main' } = req.body;

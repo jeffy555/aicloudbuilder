@@ -1,8 +1,25 @@
 /**
  * Security Context Scorer
  * Analyses Kubernetes YAML manifests and produces a consolidated security score.
+ * Uses GPT-4o-mini for scoring, grading, and recommendations.
  */
 import yaml from 'js-yaml';
+import { aiChatCompletion } from '../utils/ai-client.js';
+import { z } from 'zod';
+import { sanitizeJsonForPrompt } from '../utils/sanitize-prompt.js';
+
+// ─── Zod schemas for AI response validation ─────────────────────────────────
+
+const aiSecurityScoreSchema = z.object({
+  score: z.number().min(0).max(100),
+  grade: z.enum(['A', 'B', 'C', 'D', 'F']).catch('C'),
+  recommendations: z.array(z.string()).catch([]),
+  findings: z.array(z.object({
+    category: z.string(),
+    status: z.string(),
+    details: z.string(),
+  })).catch([]),
+});
 
 export interface SecurityScoreResult {
   overallScore: number;          // 0-100
@@ -67,7 +84,7 @@ function extractPodSpecs(manifests: string[]): PodData[] {
 /**
  * Score Kubernetes manifests for security context compliance
  */
-export function scoreSecurityContexts(manifests: string[]): SecurityScoreResult {
+export async function scoreSecurityContexts(manifests: string[]): Promise<SecurityScoreResult> {
   const pods = extractPodSpecs(manifests);
   const total = pods.length;
 
@@ -153,45 +170,69 @@ export function scoreSecurityContexts(manifests: string[]): SecurityScoreResult 
     latestImageTag:         { count: latestTagCount,       total: totalContainers, percent: pct(latestTagCount, totalContainers) },
   };
 
-  // Weighted score: positive metrics (max 70pts) - penalties (max -30pts)
-  const positiveScore =
-    metrics.runAsNonRoot.percent * 0.25 +
-    metrics.readOnlyRootFilesystem.percent * 0.20 +
-    metrics.resourceLimitsDefined.percent * 0.25;
+  // Use AI for scoring, grading, and recommendations
+  try {
+    const response = await aiChatCompletion({
+      model: 'gpt-4o-mini',
+      temperature: 0.3,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system' as const,
+          content: `You are a Kubernetes security expert. Analyze the security posture of these workloads and provide a score (0-100), grade (A/B/C/D/F), and specific recommendations.
 
-  const penaltyScore =
-    (privilegedCount > 0 ? 20 : 0) +
-    (hostNamespaceCount > 0 ? 10 : 0) +
-    (metrics.latestImageTag.percent > 50 ? 5 : 0);
+Return JSON with this exact shape:
+{
+  "score": <number 0-100>,
+  "grade": "<A|B|C|D|F>",
+  "recommendations": ["<string>", ...],
+  "findings": [{ "category": "<string>", "status": "<string>", "details": "<string>" }, ...]
+}
 
-  const overallScore = Math.max(0, Math.min(100, Math.round(positiveScore) - penaltyScore + 30));
+Base your assessment on the metrics provided. Higher runAsNonRoot, readOnlyRootFilesystem, and resourceLimits percentages are good. Privileged containers, host namespaces, and latest image tags are bad. Provide actionable, specific recommendations referencing actual counts.`,
+        },
+        {
+          role: 'user' as const,
+          content: JSON.stringify(sanitizeJsonForPrompt({
+            totalWorkloads: total,
+            totalContainers,
+            metrics: {
+              runAsNonRoot: { count: runAsNonRootCount, total: totalContainers, percent: metrics.runAsNonRoot.percent },
+              readOnlyRootFilesystem: { count: readOnlyRootFsCount, total: totalContainers, percent: metrics.readOnlyRootFilesystem.percent },
+              resourceLimitsDefined: { count: resourceLimitsCount, total: totalContainers, percent: metrics.resourceLimitsDefined.percent },
+              privilegedContainers: { count: privilegedCount, total: totalContainers, percent: metrics.privilegedContainers.percent },
+              hostNamespaces: { count: hostNamespaceCount, total, percent: metrics.hostNamespaces.percent },
+              latestImageTag: { count: latestTagCount, total: totalContainers, percent: metrics.latestImageTag.percent },
+            },
+          })),
+        },
+      ],
+    });
 
-  const grade: SecurityScoreResult['grade'] =
-    overallScore >= 90 ? 'A' :
-    overallScore >= 75 ? 'B' :
-    overallScore >= 60 ? 'C' :
-    overallScore >= 45 ? 'D' : 'F';
+    const result = aiSecurityScoreSchema.safeParse(JSON.parse(response.choices[0].message.content ?? '{}'));
+    if (!result.success) {
+      console.warn('[security-scorer] AI response validation failed:', result.error.message);
+      return {
+        overallScore: 0,
+        grade: 'F' as const,
+        totalWorkloads: total,
+        metrics,
+        recommendations: ['Security analysis unavailable - AI response validation failed'],
+      };
+    }
 
-  // Generate targeted recommendations
-  const recommendations: string[] = [];
-  if (metrics.runAsNonRoot.percent < 100) {
-    recommendations.push(`Set securityContext.runAsNonRoot: true on ${totalContainers - runAsNonRootCount} container(s).`);
-  }
-  if (metrics.readOnlyRootFilesystem.percent < 100) {
-    recommendations.push(`Set securityContext.readOnlyRootFilesystem: true on ${totalContainers - readOnlyRootFsCount} container(s).`);
-  }
-  if (metrics.resourceLimitsDefined.percent < 100) {
-    recommendations.push(`Add CPU/memory limits to ${totalContainers - resourceLimitsCount} container(s).`);
-  }
-  if (privilegedCount > 0) {
-    recommendations.push(`Remove privileged: true from ${privilegedCount} container(s) — this is a critical risk.`);
-  }
-  if (hostNamespaceCount > 0) {
-    recommendations.push(`Disable hostPID/hostIPC/hostNetwork on ${hostNamespaceCount} workload(s).`);
-  }
-  if (latestTagCount > 0) {
-    recommendations.push(`Pin image tags (avoid :latest) on ${latestTagCount} container(s).`);
-  }
+    const { score, grade, recommendations } = result.data;
+    const overallScore = Math.max(0, Math.min(100, Math.round(score)));
 
-  return { overallScore, grade, totalWorkloads: total, metrics, recommendations };
+    return { overallScore, grade, totalWorkloads: total, metrics, recommendations };
+  } catch (err) {
+    console.warn('Security scorer AI call failed, returning safe defaults:', err);
+    return {
+      overallScore: 0,
+      grade: 'F' as const,
+      totalWorkloads: total,
+      metrics,
+      recommendations: ['Security analysis unavailable - AI service error'],
+    };
+  }
 }

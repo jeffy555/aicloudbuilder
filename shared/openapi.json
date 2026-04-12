@@ -1,0 +1,7605 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AICloudBuilder API",
+    "version": "2.0.0",
+    "description": "Spec-Driven API for AICloudBuilder — Terraform, Kubernetes, Docker, ArchMe, and more."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:9005",
+      "description": "Development server"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "timestamp"
+        ]
+      },
+      "UserPublic": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "email",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "SignupResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserPublic"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "user",
+          "token"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
+          "details": {
+            "nullable": true
+          },
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "SignupBody": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 30
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 8
+          }
+        },
+        "required": [
+          "username",
+          "email",
+          "password"
+        ]
+      },
+      "LoginResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserPublic"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "user",
+          "token"
+        ]
+      },
+      "LoginBody": {
+        "type": "object",
+        "properties": {
+          "usernameOrEmail": {
+            "type": "string",
+            "minLength": 1
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rememberMe": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "true"
+                ]
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "false"
+                ]
+              },
+              {
+                "nullable": true
+              }
+            ]
+          }
+        },
+        "required": [
+          "usernameOrEmail",
+          "password"
+        ]
+      },
+      "LogoutResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "MeResponse": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/UserPublic"
+          }
+        },
+        "required": [
+          "user"
+        ]
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string",
+            "nullable": true
+          },
+          "provider": {
+            "type": "string",
+            "nullable": true
+          },
+          "repositoryId": {
+            "type": "string",
+            "nullable": true
+          },
+          "repositoryName": {
+            "type": "string",
+            "nullable": true
+          },
+          "repositoryBranch": {
+            "type": "string",
+            "nullable": true
+          },
+          "cloudProvider": {
+            "type": "string",
+            "nullable": true
+          },
+          "moduleApproach": {
+            "type": "string",
+            "nullable": true
+          },
+          "currentStep": {
+            "type": "string"
+          },
+          "workflowStep": {
+            "type": "string"
+          },
+          "activeModule": {
+            "type": "string",
+            "nullable": true
+          },
+          "isExistingRepo": {
+            "type": "string",
+            "nullable": true
+          },
+          "detectedCloudProvider": {
+            "type": "string",
+            "nullable": true
+          },
+          "detectedModuleType": {
+            "type": "string",
+            "nullable": true
+          },
+          "detectedTerraformFiles": {
+            "nullable": true
+          },
+          "archMeAnalysis": {
+            "type": "string",
+            "nullable": true
+          },
+          "hasBackend": {
+            "type": "string",
+            "nullable": true
+          },
+          "backendType": {
+            "type": "string",
+            "nullable": true
+          },
+          "backendStorageAccount": {
+            "type": "string",
+            "nullable": true
+          },
+          "backendResourceGroup": {
+            "type": "string",
+            "nullable": true
+          },
+          "backendContainer": {
+            "type": "string",
+            "nullable": true
+          },
+          "backendStateKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "backendLocation": {
+            "type": "string",
+            "nullable": true
+          },
+          "backendValidated": {
+            "type": "string",
+            "nullable": true
+          },
+          "backendDeclined": {
+            "type": "string",
+            "nullable": true
+          },
+          "scannedResources": {
+            "type": "string",
+            "nullable": true
+          },
+          "scanTimestamp": {
+            "type": "string",
+            "nullable": true
+          },
+          "selectedResourceGroups": {
+            "type": "string",
+            "nullable": true
+          },
+          "usageMetricsCache": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "userId",
+          "provider",
+          "repositoryId",
+          "repositoryName",
+          "repositoryBranch",
+          "cloudProvider",
+          "moduleApproach",
+          "currentStep",
+          "workflowStep",
+          "activeModule",
+          "isExistingRepo",
+          "detectedCloudProvider",
+          "detectedModuleType",
+          "archMeAnalysis",
+          "hasBackend",
+          "backendType",
+          "backendStorageAccount",
+          "backendResourceGroup",
+          "backendContainer",
+          "backendStateKey",
+          "backendLocation",
+          "backendValidated",
+          "backendDeclined",
+          "scannedResources",
+          "scanTimestamp",
+          "selectedResourceGroups",
+          "usageMetricsCache",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "UpdateSessionBody": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "repositoryId": {
+            "type": "string"
+          },
+          "repositoryName": {
+            "type": "string"
+          },
+          "repositoryBranch": {
+            "type": "string"
+          },
+          "cloudProvider": {
+            "type": "string"
+          },
+          "moduleApproach": {
+            "type": "string"
+          },
+          "currentStep": {
+            "type": "string"
+          },
+          "workflowStep": {
+            "type": "string"
+          },
+          "activeModule": {
+            "type": "string"
+          }
+        }
+      },
+      "ResetSessionResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "filesCleared": {
+            "type": "number"
+          },
+          "stateReset": {
+            "type": "boolean"
+          },
+          "session": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Session"
+              },
+              {
+                "nullable": true
+              }
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "filesCleared",
+          "stateReset",
+          "session"
+        ]
+      },
+      "ResetSessionBody": {
+        "type": "object",
+        "properties": {
+          "clearFiles": {
+            "type": "boolean",
+            "default": true
+          },
+          "resetState": {
+            "type": "boolean",
+            "default": false
+          },
+          "keepProvider": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "sessionId",
+          "type",
+          "content",
+          "createdAt"
+        ]
+      },
+      "MessagesResponse": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Message"
+        }
+      },
+      "FilesDebugResponse": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "sessionExists": {
+            "type": "boolean"
+          },
+          "fileCount": {
+            "type": "number"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "fileName": {
+                  "type": "string"
+                },
+                "contentLength": {
+                  "type": "number"
+                },
+                "sessionId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "fileName",
+                "contentLength",
+                "sessionId"
+              ]
+            }
+          },
+          "sessionInfo": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "moduleType": {
+                "type": "string",
+                "nullable": true
+              },
+              "hasResources": {
+                "type": "string",
+                "nullable": true
+              },
+              "moduleApproach": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "moduleType",
+              "hasResources",
+              "moduleApproach"
+            ]
+          }
+        },
+        "required": [
+          "sessionId",
+          "sessionExists",
+          "fileCount",
+          "files",
+          "sessionInfo"
+        ]
+      },
+      "SystemMessageResponse": {
+        "type": "object",
+        "properties": {
+          "aiMessage": {
+            "$ref": "#/components/schemas/Message"
+          }
+        },
+        "required": [
+          "aiMessage"
+        ]
+      },
+      "SystemMessageBody": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "ChatResponse": {
+        "type": "object",
+        "properties": {
+          "userMessage": {
+            "$ref": "#/components/schemas/Message"
+          },
+          "aiMessage": {
+            "$ref": "#/components/schemas/Message"
+          },
+          "autoGenerationTriggered": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "userMessage",
+          "aiMessage"
+        ]
+      },
+      "ChatBody": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "GeneratedFile": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "fileName": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "sessionId",
+          "fileName",
+          "content",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "FilesResponse": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/GeneratedFile"
+        }
+      },
+      "CreateFileBody": {
+        "type": "object",
+        "properties": {
+          "fileName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "fileName",
+          "content"
+        ]
+      },
+      "BulkFilesResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GeneratedFile"
+            }
+          },
+          "updated": {
+            "type": "number"
+          },
+          "created": {
+            "type": "number"
+          },
+          "total": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "success",
+          "files",
+          "updated",
+          "created",
+          "total"
+        ]
+      },
+      "BulkFilesBody": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fileName": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fileName",
+                "content"
+              ]
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "files"
+        ]
+      },
+      "UpdateFileBody": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      },
+      "PrewarmResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "serverType": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "provider",
+          "serverType"
+        ]
+      },
+      "Repository": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "lastUpdated": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "RepositoryList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Repository"
+        }
+      },
+      "CreateRepoBody": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "BranchesResponse": {
+        "type": "object",
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "defaultBranch": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "branches",
+          "defaultBranch"
+        ]
+      },
+      "TerraformGeneratorMetadata": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "schemaVersion": {
+            "type": "number"
+          },
+          "generator": {
+            "type": "string",
+            "enum": [
+              "AICloudBuilder"
+            ]
+          },
+          "moduleApproach": {
+            "type": "string",
+            "nullable": true
+          },
+          "cloudProvider": {
+            "type": "string",
+            "nullable": true
+          },
+          "generatedAt": {
+            "type": "string"
+          },
+          "resourceAddresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "generator",
+          "moduleApproach",
+          "cloudProvider",
+          "generatedAt"
+        ]
+      },
+      "ScanRepoResponse": {
+        "type": "object",
+        "properties": {
+          "isExisting": {
+            "type": "boolean"
+          },
+          "cloudProvider": {
+            "type": "string",
+            "nullable": true
+          },
+          "moduleType": {
+            "type": "string",
+            "nullable": true
+          },
+          "terraformFiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "terraformFilesWithContent": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          },
+          "existingResources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "name",
+                "file"
+              ]
+            }
+          },
+          "existingResourceAddresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "hasResources": {
+            "type": "boolean"
+          },
+          "hasModules": {
+            "type": "boolean"
+          },
+          "providerBlocks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "backend": {
+            "nullable": true
+          },
+          "refreshed": {
+            "type": "boolean"
+          },
+          "filesStored": {
+            "type": "number"
+          },
+          "createdByAICloudBuilder": {
+            "type": "boolean"
+          },
+          "generatorMetadata": {
+            "$ref": "#/components/schemas/TerraformGeneratorMetadata"
+          }
+        },
+        "required": [
+          "isExisting",
+          "cloudProvider",
+          "moduleType",
+          "terraformFiles",
+          "hasResources",
+          "hasModules",
+          "providerBlocks"
+        ]
+      },
+      "ScanRepoBody": {
+        "type": "object",
+        "properties": {
+          "refresh": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "ValidateAggregatedResponse": {
+        "type": "object",
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "requestedResources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "availableResources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "valid",
+          "message",
+          "requestedResources",
+          "availableResources"
+        ]
+      },
+      "ValidateAggregatedBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "childModuleResources": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "description",
+          "childModuleResources"
+        ]
+      },
+      "ScanChildModuleResponse": {
+        "type": "object",
+        "properties": {
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "name",
+                "description"
+              ]
+            }
+          },
+          "totalResources": {
+            "type": "number"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "resources",
+          "message"
+        ]
+      },
+      "ScanChildModuleBody": {
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "repositoryId",
+          "provider"
+        ]
+      },
+      "ConfigureBackendResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "session": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "ConfigureBackendBody": {
+        "type": "object",
+        "properties": {
+          "hasBackend": {
+            "type": "boolean"
+          },
+          "backendType": {
+            "type": "string"
+          },
+          "storageAccountName": {
+            "type": "string"
+          },
+          "resourceGroupName": {
+            "type": "string"
+          },
+          "containerName": {
+            "type": "string"
+          },
+          "stateFileKey": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "declined": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RefactorResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "RefactorBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "RefactorFixResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "RefactorFixBody": {
+        "type": "object",
+        "properties": {
+          "checkId": {
+            "type": "string"
+          },
+          "resourceType": {
+            "type": "string"
+          },
+          "fileName": {
+            "type": "string"
+          }
+        }
+      },
+      "GenerateDiagramResponse": {
+        "type": "object",
+        "properties": {
+          "mermaidSyntax": {
+            "type": "string"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          },
+          "relationships": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          },
+          "metadata": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "mermaidSyntax"
+        ]
+      },
+      "GenerateDiagramBody": {
+        "type": "object",
+        "properties": {
+          "diagramType": {
+            "type": "string"
+          }
+        }
+      },
+      "ValidatePolicyResponse": {
+        "type": "object",
+        "properties": {
+          "violations": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          },
+          "summary": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "violations"
+        ]
+      },
+      "ValidatePolicyBody": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fileName": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fileName",
+                "content"
+              ]
+            }
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "files"
+        ]
+      },
+      "RightsizingResponse": {
+        "type": "object",
+        "properties": {
+          "recommendations": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "recommendations"
+        ]
+      },
+      "RightsizingBody": {
+        "type": "object",
+        "properties": {}
+      },
+      "ApplyRightsizingResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "fileName": {
+            "type": "string"
+          },
+          "fileId": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "ApplyRightsizingBody": {
+        "type": "object",
+        "properties": {
+          "resourceType": {
+            "type": "string",
+            "minLength": 1
+          },
+          "resourceName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attribute": {
+            "type": "string",
+            "minLength": 1
+          },
+          "currentValue": {
+            "type": "string",
+            "minLength": 1
+          },
+          "suggestedValue": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "resourceType",
+          "resourceName",
+          "attribute",
+          "currentValue",
+          "suggestedValue"
+        ]
+      },
+      "AnalyzePlanDiffResponse": {
+        "type": "object",
+        "properties": {
+          "diff": {
+            "nullable": true
+          }
+        }
+      },
+      "AnalyzePlanDiffBody": {
+        "type": "object",
+        "properties": {
+          "planJson": {
+            "nullable": true
+          }
+        }
+      },
+      "GenerateTerraformResponse": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "fileName": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "fileName",
+                "content"
+              ]
+            }
+          },
+          "terraformCliCheck": {
+            "type": "object",
+            "properties": {
+              "ran": {
+                "type": "boolean"
+              },
+              "skippedReason": {
+                "type": "string"
+              },
+              "initOk": {
+                "type": "boolean"
+              },
+              "validateOk": {
+                "type": "boolean"
+              },
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "severity": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "terraformCliRepair": {
+            "type": "object",
+            "properties": {
+              "attempted": {
+                "type": "boolean"
+              },
+              "succeeded": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "required": [
+          "files"
+        ]
+      },
+      "GenerateTerraformBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "cloudProvider": {
+            "type": "string"
+          },
+          "moduleApproach": {
+            "type": "string"
+          }
+        }
+      },
+      "TerraformCliRepairResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "terraformCliCheck": {
+            "type": "object",
+            "properties": {
+              "ran": {
+                "type": "boolean"
+              },
+              "skippedReason": {
+                "type": "string"
+              },
+              "initOk": {
+                "type": "boolean"
+              },
+              "validateOk": {
+                "type": "boolean"
+              },
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "severity": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "terraformCliRepair": {
+            "type": "object",
+            "properties": {
+              "attempted": {
+                "type": "boolean"
+              },
+              "succeeded": {
+                "type": "boolean"
+              }
+            }
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "fileName": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "fileName",
+                "content"
+              ]
+            }
+          }
+        },
+        "required": [
+          "success",
+          "files"
+        ]
+      },
+      "TerraformCliRepairBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "TerraformCicdRepairResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "TerraformCicdRepairBody": {
+        "type": "object",
+        "properties": {
+          "planLogs": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "planLogs"
+        ]
+      },
+      "DockerScanResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "results": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "GenerateDockerfileResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "GenerateDockerfileBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "framework": {
+            "type": "string"
+          }
+        }
+      },
+      "ScanDockerResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "nullable": true
+          }
+        }
+      },
+      "DockerBestPracticesResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "results"
+        ]
+      },
+      "DockerFixBPResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "fixedFiles": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "DockerFixBPBody": {
+        "type": "object",
+        "properties": {
+          "ruleId": {
+            "type": "string"
+          }
+        }
+      },
+      "GenerateComposeResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "compose": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "ImageSizeEstimateResponse": {
+        "type": "object",
+        "properties": {
+          "estimates": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "estimates"
+        ]
+      },
+      "CommitDockerResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "commitMessage": {
+            "type": "string"
+          },
+          "result": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "GenerateDockerDiagramResponse": {
+        "type": "object",
+        "properties": {
+          "mermaidSyntax": {
+            "type": "string"
+          },
+          "metadata": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "mermaidSyntax"
+        ]
+      },
+      "GenerateK8sManifestsResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "GenerateK8sManifestsBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "manifests": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        }
+      },
+      "CommitK8sResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "commitMessage": {
+            "type": "string"
+          },
+          "result": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "ScanK8sResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "nullable": true
+          }
+        }
+      },
+      "ValidateK8sResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "results"
+        ]
+      },
+      "ValidateK8sBody": {
+        "type": "object",
+        "properties": {
+          "manifests": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        }
+      },
+      "FixK8sValidationResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "ValidateHelmResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "results"
+        ]
+      },
+      "GenerateK8sDiagramResponse": {
+        "type": "object",
+        "properties": {
+          "mermaidSyntax": {
+            "type": "string"
+          },
+          "metadata": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "mermaidSyntax"
+        ]
+      },
+      "K8sFixResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "fixedFiles": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "K8sFixBody": {
+        "type": "object",
+        "properties": {
+          "findingId": {
+            "type": "string"
+          }
+        }
+      },
+      "K8sFixVerifyResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "results": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "K8sFixBatchResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "success",
+          "results"
+        ]
+      },
+      "K8sFixBatchBody": {
+        "type": "object",
+        "properties": {
+          "findingIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ScanRepoForHelmResponse": {
+        "type": "object",
+        "properties": {
+          "hasHelm": {
+            "type": "boolean"
+          },
+          "charts": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "hasHelm"
+        ]
+      },
+      "AnalyzeRepoResponse": {
+        "type": "object",
+        "properties": {
+          "analysis": {
+            "nullable": true
+          }
+        }
+      },
+      "GenerateHelmChartResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          },
+          "lintResults": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "GenerateHelmChartBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "options": {
+            "nullable": true
+          }
+        }
+      },
+      "UploadHelmChartResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "BuildKustomizeResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "output": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "SecurityScoreResponse": {
+        "type": "object",
+        "properties": {
+          "score": {
+            "type": "number"
+          },
+          "details": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "score"
+        ]
+      },
+      "PolicyHintsResponse": {
+        "type": "object",
+        "properties": {
+          "hints": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "hints"
+        ]
+      },
+      "PolicyCheckResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "results"
+        ]
+      },
+      "RightsizeK8sResponse": {
+        "type": "object",
+        "properties": {
+          "recommendations": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "recommendations"
+        ]
+      },
+      "EstimateK8sCostResponse": {
+        "type": "object",
+        "properties": {
+          "estimate": {
+            "nullable": true
+          }
+        }
+      },
+      "ArchMeTemplates": {
+        "type": "array",
+        "items": {
+          "nullable": true
+        }
+      },
+      "ArchMeTemplate": {
+        "nullable": true
+      },
+      "CompliancePresets": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "shortName": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "shortName",
+            "description"
+          ]
+        }
+      },
+      "CompliancePreset": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "shortName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "requiredComponents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "forbiddenPatterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "additionalRequirements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "regionConstraints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "shortName",
+          "description",
+          "requiredComponents",
+          "forbiddenPatterns",
+          "additionalRequirements"
+        ]
+      },
+      "ArchVersionsList": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "version": {
+              "type": "number"
+            },
+            "label": {
+              "type": "string",
+              "nullable": true
+            },
+            "diagramType": {
+              "type": "string",
+              "nullable": true
+            },
+            "createdAt": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          "required": [
+            "id",
+            "sessionId",
+            "version",
+            "label",
+            "diagramType",
+            "createdAt"
+          ]
+        }
+      },
+      "RestoreVersionResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "analysis": {
+            "nullable": true
+          },
+          "mermaidSyntax": {
+            "type": "string",
+            "nullable": true
+          },
+          "diagramType": {
+            "type": "string",
+            "nullable": true
+          },
+          "components": {
+            "nullable": true
+          },
+          "code": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success",
+          "mermaidSyntax",
+          "diagramType"
+        ]
+      },
+      "RestoreVersionBody": {
+        "type": "object",
+        "properties": {
+          "versionId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "versionId"
+        ]
+      },
+      "AnalyzeArchResponse": {
+        "type": "object",
+        "properties": {
+          "analysis": {
+            "nullable": true
+          },
+          "versionNumber": {
+            "type": "number"
+          }
+        }
+      },
+      "AnalyzeArchBody": {
+        "type": "object",
+        "properties": {
+          "requirements": {
+            "type": "string",
+            "minLength": 1
+          },
+          "compliancePresets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "requirements"
+        ]
+      },
+      "ValidateEmptyRepoResponse": {
+        "type": "object",
+        "properties": {
+          "isEmpty": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "isEmpty"
+        ]
+      },
+      "GenerateArchDiagramResponse": {
+        "type": "object",
+        "properties": {
+          "mermaidSyntax": {
+            "type": "string"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          },
+          "relationships": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          },
+          "metadata": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "mermaidSyntax"
+        ]
+      },
+      "GenerateArchDiagramBody": {
+        "type": "object",
+        "properties": {
+          "diagramType": {
+            "type": "string"
+          }
+        }
+      },
+      "DiagramImageResponse": {
+        "type": "object",
+        "properties": {
+          "image": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "image",
+          "format"
+        ]
+      },
+      "DiagramImageBody": {
+        "type": "object",
+        "properties": {
+          "mermaidSyntax": {
+            "type": "string",
+            "minLength": 1
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "png",
+              "svg",
+              "jpeg"
+            ],
+            "default": "png"
+          }
+        },
+        "required": [
+          "mermaidSyntax"
+        ]
+      },
+      "ExtractComponentsResponse": {
+        "type": "object",
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "components"
+        ]
+      },
+      "GenerateComponentCodeResponse": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          }
+        },
+        "required": [
+          "files"
+        ]
+      },
+      "GenerateComponentCodeBody": {
+        "type": "object",
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        }
+      },
+      "ScanArchMeCodeResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "nullable": true
+          }
+        }
+      },
+      "GenerateReadmeResponse": {
+        "type": "object",
+        "properties": {
+          "readme": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "readme"
+        ]
+      },
+      "CommitArchMeResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "commitMessage": {
+            "type": "string"
+          },
+          "result": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "RegenerateComponentResponse": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          }
+        },
+        "required": [
+          "files"
+        ]
+      },
+      "RegenerateComponentBody": {
+        "type": "object",
+        "properties": {
+          "componentName": {
+            "type": "string"
+          }
+        }
+      },
+      "ValidateArchMeTfResponse": {
+        "type": "object",
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "valid"
+        ]
+      },
+      "GenerateAutomationResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "GenerateAutomationBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          }
+        }
+      },
+      "CommitAutomationResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "commitMessage": {
+            "type": "string"
+          },
+          "result": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "ValuationConnectResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "subscriptionId": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "ValuationConnectBody": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "clientId": {
+            "type": "string"
+          },
+          "clientSecret": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "subscriptionId": {
+            "type": "string"
+          }
+        }
+      },
+      "ResourceGroupsResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "resourceGroups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "location": {
+                  "type": "string"
+                },
+                "resourceCount": {
+                  "type": "number"
+                },
+                "tags": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "location"
+              ]
+            }
+          }
+        },
+        "required": [
+          "success",
+          "resourceGroups"
+        ]
+      },
+      "ValuationScanResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "scannedCount": {
+            "type": "number"
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "success",
+          "scannedCount",
+          "resources"
+        ]
+      },
+      "ValuationScanBody": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "resourceGroupIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "ValuationAnalyzeResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "totalMonthlyCost": {
+                "type": "number"
+              },
+              "totalYearlyCost": {
+                "type": "number"
+              },
+              "potentialSavings": {
+                "type": "number"
+              },
+              "savingsPercent": {
+                "type": "number"
+              },
+              "resourceCount": {
+                "type": "number"
+              },
+              "recommendationCount": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "totalMonthlyCost",
+              "totalYearlyCost",
+              "potentialSavings",
+              "savingsPercent",
+              "resourceCount",
+              "recommendationCount"
+            ]
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string"
+                },
+                "azureType": {
+                  "type": "string"
+                },
+                "terraformType": {
+                  "type": "string"
+                },
+                "location": {
+                  "type": "string"
+                },
+                "resourceGroup": {
+                  "type": "string"
+                },
+                "currentSku": {
+                  "type": "string"
+                },
+                "currentTier": {
+                  "type": "string"
+                },
+                "monthlyCost": {
+                  "type": "number"
+                },
+                "yearlyCost": {
+                  "type": "number"
+                },
+                "currency": {
+                  "type": "string",
+                  "default": "INR"
+                },
+                "remediation": {
+                  "type": "object",
+                  "properties": {
+                    "recommended_sku": {
+                      "type": "string"
+                    },
+                    "recommended_tier": {
+                      "type": "string"
+                    },
+                    "savings_monthly": {
+                      "type": "number"
+                    },
+                    "savings_percent": {
+                      "type": "number"
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "confidence": {
+                      "type": "string",
+                      "enum": [
+                        "high",
+                        "medium",
+                        "low"
+                      ]
+                    },
+                    "action_required": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "recommended_sku",
+                    "savings_monthly",
+                    "savings_percent",
+                    "reason",
+                    "confidence",
+                    "action_required"
+                  ]
+                },
+                "pricingDetails": {
+                  "nullable": true
+                },
+                "usageMetrics": {
+                  "nullable": true
+                },
+                "metricsAvailable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "type",
+                "azureType",
+                "location",
+                "resourceGroup",
+                "currentSku",
+                "monthlyCost",
+                "yearlyCost",
+                "metricsAvailable"
+              ]
+            }
+          }
+        },
+        "required": [
+          "success",
+          "summary",
+          "resources"
+        ]
+      },
+      "ValuationAnalyzeBody": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "fetchMetrics": {
+            "type": "boolean",
+            "default": true
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "USD",
+              "INR",
+              "EUR",
+              "GBP",
+              "JPY",
+              "AUD",
+              "CAD",
+              "CHF",
+              "CNY",
+              "KRW",
+              "BRL",
+              "MXN",
+              "SGD",
+              "HKD",
+              "NOK",
+              "SEK",
+              "DKK",
+              "NZD",
+              "ZAR",
+              "AED"
+            ],
+            "default": "INR"
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "ReservedInstancesResponse": {
+        "type": "object",
+        "properties": {
+          "recommendations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "resourceName": {
+                  "type": "string"
+                },
+                "resourceType": {
+                  "type": "string"
+                },
+                "region": {
+                  "type": "string"
+                },
+                "currentSku": {
+                  "type": "string"
+                },
+                "onDemandMonthly": {
+                  "type": "number"
+                },
+                "reservedMonthly1Yr": {
+                  "type": "number"
+                },
+                "reservedMonthly3Yr": {
+                  "type": "number"
+                },
+                "saving1YrMonthly": {
+                  "type": "number"
+                },
+                "saving1YrAnnual": {
+                  "type": "number"
+                },
+                "saving1YrPercent": {
+                  "type": "number"
+                },
+                "saving3YrMonthly": {
+                  "type": "number"
+                },
+                "saving3YrAnnual": {
+                  "type": "number"
+                },
+                "saving3YrPercent": {
+                  "type": "number"
+                },
+                "commitmentType": {
+                  "type": "string"
+                },
+                "recommendation": {
+                  "type": "string",
+                  "enum": [
+                    "strong",
+                    "moderate",
+                    "review"
+                  ]
+                },
+                "rationale": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "resourceName",
+                "resourceType",
+                "region",
+                "currentSku",
+                "onDemandMonthly",
+                "reservedMonthly1Yr",
+                "reservedMonthly3Yr",
+                "saving1YrMonthly",
+                "saving1YrAnnual",
+                "saving1YrPercent",
+                "saving3YrMonthly",
+                "saving3YrAnnual",
+                "saving3YrPercent",
+                "commitmentType",
+                "recommendation",
+                "rationale"
+              ]
+            }
+          },
+          "totalOnDemandMonthly": {
+            "type": "number"
+          },
+          "totalReservedMonthly": {
+            "type": "number"
+          },
+          "totalSavingMonthly": {
+            "type": "number"
+          },
+          "totalSavingAnnual": {
+            "type": "number"
+          },
+          "eligibleCount": {
+            "type": "number"
+          },
+          "skippedCount": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "recommendations",
+          "totalOnDemandMonthly",
+          "totalReservedMonthly",
+          "totalSavingMonthly",
+          "totalSavingAnnual",
+          "eligibleCount",
+          "skippedCount"
+        ]
+      },
+      "BudgetAlertsResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "budgetName": {
+            "type": "string"
+          },
+          "budgetId": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "thresholds": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "emailCount": {
+            "type": "number"
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "portalUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success",
+          "budgetName",
+          "amount",
+          "scope",
+          "thresholds",
+          "emailCount",
+          "emails"
+        ]
+      },
+      "MulticloudCompareResponse": {
+        "type": "object",
+        "properties": {
+          "lineItems": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "resourceName": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "azureSku": {
+                  "type": "string"
+                },
+                "azureMonthly": {
+                  "type": "number"
+                },
+                "awsEquivalent": {
+                  "type": "string"
+                },
+                "awsMonthly": {
+                  "type": "number"
+                },
+                "gcpEquivalent": {
+                  "type": "string"
+                },
+                "gcpMonthly": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "resourceName",
+                "role",
+                "azureSku",
+                "azureMonthly",
+                "awsEquivalent",
+                "awsMonthly",
+                "gcpEquivalent",
+                "gcpMonthly"
+              ]
+            }
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "azure": {
+                "type": "number"
+              },
+              "aws": {
+                "type": "number"
+              },
+              "gcp": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "azure",
+              "aws",
+              "gcp"
+            ]
+          },
+          "annualTotals": {
+            "type": "object",
+            "properties": {
+              "azure": {
+                "type": "number"
+              },
+              "aws": {
+                "type": "number"
+              },
+              "gcp": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "azure",
+              "aws",
+              "gcp"
+            ]
+          },
+          "cheapestProvider": {
+            "type": "string",
+            "enum": [
+              "azure",
+              "aws",
+              "gcp"
+            ]
+          },
+          "savingVsAzure": {
+            "type": "object",
+            "properties": {
+              "aws": {
+                "type": "number"
+              },
+              "gcp": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "aws",
+              "gcp"
+            ]
+          },
+          "insights": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "resourceCount": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "lineItems",
+          "totals",
+          "annualTotals",
+          "cheapestProvider",
+          "savingVsAzure",
+          "insights",
+          "resourceCount"
+        ]
+      },
+      "CommitResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "commitMessage": {
+            "type": "string"
+          },
+          "result": {
+            "nullable": true
+          },
+          "commitSha": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "filesCommitted": {
+            "type": "number"
+          },
+          "sessionReset": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success",
+          "commitMessage",
+          "filesCommitted"
+        ]
+      },
+      "ScanResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "nullable": true
+          }
+        }
+      },
+      "ScanBody": {
+        "type": "object",
+        "properties": {
+          "scanType": {
+            "type": "string"
+          }
+        }
+      },
+      "FixIssuesResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "fixedFiles": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          },
+          "results": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "FixIssuesBody": {
+        "type": "object",
+        "properties": {
+          "selectedChecks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AnalyzeCostResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "monthlyTotalExact": {
+                "type": "number"
+              },
+              "monthlyTotalEstimated": {
+                "type": "number"
+              },
+              "monthlyGrandTotal": {
+                "type": "number"
+              },
+              "yearlyGrandTotal": {
+                "type": "number"
+              },
+              "currency": {
+                "type": "string"
+              },
+              "exactCount": {
+                "type": "number"
+              },
+              "estimatedCount": {
+                "type": "number"
+              },
+              "needsInputCount": {
+                "type": "number"
+              },
+              "freeCount": {
+                "type": "number"
+              },
+              "resourceCount": {
+                "type": "number"
+              },
+              "profile": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "custom"
+                ]
+              }
+            },
+            "required": [
+              "monthlyTotalExact",
+              "monthlyTotalEstimated",
+              "monthlyGrandTotal",
+              "yearlyGrandTotal",
+              "currency",
+              "exactCount",
+              "estimatedCount",
+              "needsInputCount",
+              "freeCount",
+              "resourceCount",
+              "profile"
+            ]
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "resourceName": {
+                  "type": "string"
+                },
+                "resourceType": {
+                  "type": "string"
+                },
+                "serviceName": {
+                  "type": "string"
+                },
+                "monthlyCost": {
+                  "type": "number"
+                },
+                "yearlyCost": {
+                  "type": "number"
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "exact",
+                    "estimated",
+                    "needs_input"
+                  ]
+                },
+                "pricingMatchType": {
+                  "type": "string",
+                  "enum": [
+                    "config_exact",
+                    "config_broad",
+                    "fallback",
+                    "free",
+                    "parent",
+                    "unsupported"
+                  ]
+                },
+                "confidenceScore": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "confidenceLabel": {
+                  "type": "string",
+                  "enum": [
+                    "high",
+                    "medium",
+                    "low"
+                  ]
+                },
+                "assumptionsUsed": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "usageDimensions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string"
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "unit": {
+                        "type": "string"
+                      },
+                      "defaultValue": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "label",
+                      "unit",
+                      "defaultValue"
+                    ]
+                  }
+                },
+                "providedUsage": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "number"
+                  }
+                },
+                "unresolvedVariables": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "details": {
+                  "nullable": true
+                },
+                "reservedPricing": {
+                  "type": "object",
+                  "properties": {
+                    "oneYear": {
+                      "type": "object",
+                      "properties": {
+                        "monthlyCost": {
+                          "type": "number"
+                        },
+                        "savingsPercent": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "monthlyCost",
+                        "savingsPercent"
+                      ]
+                    },
+                    "threeYear": {
+                      "type": "object",
+                      "properties": {
+                        "monthlyCost": {
+                          "type": "number"
+                        },
+                        "savingsPercent": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "monthlyCost",
+                        "savingsPercent"
+                      ]
+                    }
+                  }
+                }
+              },
+              "required": [
+                "resourceName",
+                "resourceType",
+                "serviceName",
+                "monthlyCost",
+                "yearlyCost",
+                "currency",
+                "status",
+                "pricingMatchType",
+                "confidenceScore",
+                "confidenceLabel",
+                "assumptionsUsed"
+              ]
+            }
+          },
+          "skippedResources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "resourceType": {
+                  "type": "string"
+                },
+                "resourceName": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "resourceType",
+                "resourceName",
+                "reason"
+              ]
+            }
+          },
+          "logs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "environmentComparison": {
+            "type": "object",
+            "properties": {
+              "dev": {
+                "type": "object",
+                "properties": {
+                  "monthlyTotal": {
+                    "type": "number"
+                  },
+                  "yearlyTotal": {
+                    "type": "number"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "monthlyTotal",
+                  "yearlyTotal",
+                  "description"
+                ]
+              },
+              "test": {
+                "type": "object",
+                "properties": {
+                  "monthlyTotal": {
+                    "type": "number"
+                  },
+                  "yearlyTotal": {
+                    "type": "number"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "monthlyTotal",
+                  "yearlyTotal",
+                  "description"
+                ]
+              },
+              "prod": {
+                "type": "object",
+                "properties": {
+                  "monthlyTotal": {
+                    "type": "number"
+                  },
+                  "yearlyTotal": {
+                    "type": "number"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "monthlyTotal",
+                  "yearlyTotal",
+                  "description"
+                ]
+              },
+              "activeProfile": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "dev",
+              "test",
+              "prod",
+              "activeProfile"
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "summary",
+          "resources"
+        ]
+      },
+      "AnalyzeCostBody": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "custom"
+            ],
+            "default": "medium"
+          },
+          "customUsage": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "ScoreMeRunResponse": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "github",
+              "azure"
+            ]
+          },
+          "inventory": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "terraform",
+                    "kubernetes",
+                    "helm",
+                    "automation",
+                    "bicep",
+                    "arm",
+                    "dockerfile",
+                    "docker-compose",
+                    "cicd"
+                  ]
+                },
+                "path": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "files": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fileDetails": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "resources": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "description"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "path",
+                "summary"
+              ]
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "critical",
+                    "high",
+                    "medium",
+                    "low",
+                    "info"
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "remediation": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "category",
+                "severity",
+                "message",
+                "remediation"
+              ]
+            }
+          },
+          "pillarScores": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "score": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "weight": {
+                  "type": "number"
+                },
+                "details": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "name",
+                "score",
+                "weight",
+                "details"
+              ]
+            }
+          },
+          "finalScore": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "Production-ready",
+              "Needs minor fixes",
+              "Risky",
+              "Not recommended",
+              "Empty Repository",
+              "Application Code Only"
+            ]
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "provider",
+          "inventory",
+          "findings",
+          "pillarScores",
+          "finalScore",
+          "confidence",
+          "updatedAt"
+        ]
+      },
+      "ScoreMeRunBody": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "github",
+              "azure"
+            ]
+          },
+          "repositoryId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repositoryName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repositoryFullName": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "repositoryId",
+          "repositoryName"
+        ]
+      },
+      "CheckovStatusResponse": {
+        "type": "object",
+        "properties": {
+          "installed": {
+            "type": "boolean"
+          },
+          "recommended": {
+            "type": "string",
+            "nullable": true
+          },
+          "version": {
+            "type": "string",
+            "nullable": true
+          },
+          "allResults": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "method",
+                "status"
+              ]
+            }
+          }
+        },
+        "required": [
+          "installed",
+          "recommended",
+          "version",
+          "allResults"
+        ]
+      },
+      "MetricsPerformanceResponse": {
+        "nullable": true
+      },
+      "MetricsRecentResponse": {
+        "nullable": true
+      },
+      "MetricsCacheResponse": {
+        "nullable": true
+      },
+      "MetricsAiUsageResponse": {
+        "nullable": true
+      },
+      "MetricsDashboardResponse": {
+        "nullable": true
+      },
+      "MetricsResetResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ]
+      },
+      "MetricsBaselineResponse": {
+        "nullable": true
+      },
+      "MetricsFeatureFlagsResponse": {
+        "nullable": true
+      },
+      "DebugAzureMcpResponse": {
+        "nullable": true
+      },
+      "DebugTerraformMcpResponse": {
+        "nullable": true
+      },
+      "DebugCredentialsResponse": {
+        "nullable": true
+      },
+      "DebugToolsResponse": {
+        "nullable": true
+      },
+      "HistoryResponse": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          },
+          "activities": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          },
+          "totalSessions": {
+            "type": "number"
+          },
+          "totalActivities": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "sessions",
+          "activities",
+          "totalSessions",
+          "totalActivities"
+        ]
+      },
+      "UserSecretsResponse": {
+        "type": "object",
+        "properties": {
+          "hasAzureDevOps": {
+            "type": "boolean"
+          },
+          "hasAzureCloud": {
+            "type": "boolean"
+          },
+          "hasGithub": {
+            "type": "boolean"
+          },
+          "hasAws": {
+            "type": "boolean"
+          },
+          "hasGcp": {
+            "type": "boolean"
+          },
+          "azureDevOps": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "org": {
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "userId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "org",
+              "project"
+            ]
+          },
+          "azureCloud": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "clientId": {
+                "type": "string"
+              },
+              "tenantId": {
+                "type": "string"
+              },
+              "subscriptionId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "clientId",
+              "tenantId",
+              "subscriptionId"
+            ]
+          },
+          "github": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "owner": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner"
+            ]
+          },
+          "aws": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "accessKeyId": {
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "accessKeyId",
+              "region"
+            ]
+          },
+          "gcp": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "projectId": {
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "projectId",
+              "region"
+            ]
+          }
+        },
+        "required": [
+          "hasAzureDevOps",
+          "hasAzureCloud",
+          "hasGithub",
+          "hasAws",
+          "hasGcp",
+          "azureDevOps",
+          "azureCloud",
+          "github",
+          "aws",
+          "gcp"
+        ]
+      },
+      "SaveSecretResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "SaveSecretBody": {
+        "type": "object",
+        "properties": {}
+      },
+      "FixPreference": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "checkId": {
+            "type": "string"
+          },
+          "resourceType": {
+            "type": "string"
+          },
+          "fixSnippet": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "timesUsed": {
+            "type": "number"
+          },
+          "successCount": {
+            "type": "number"
+          },
+          "failureCount": {
+            "type": "number"
+          },
+          "source": {
+            "type": "string"
+          },
+          "lastUsedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "userId",
+          "checkId",
+          "resourceType",
+          "fixSnippet",
+          "confidence",
+          "timesUsed",
+          "successCount",
+          "failureCount",
+          "source",
+          "lastUsedAt",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "FixPreferencesList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/FixPreference"
+        }
+      },
+      "FixPreferencesStats": {
+        "nullable": true
+      },
+      "TopFixPreferences": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/FixPreference"
+        }
+      },
+      "SearchPreferencesResult": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/FixPreference"
+        }
+      },
+      "CreateFixPreferenceBody": {
+        "type": "object",
+        "properties": {
+          "checkId": {
+            "type": "string"
+          },
+          "resourceType": {
+            "type": "string"
+          },
+          "fixSnippet": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "user_verified",
+              "checkov",
+              "ai_generated",
+              "user_preference"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "checkId",
+          "resourceType",
+          "fixSnippet"
+        ]
+      },
+      "UpdateFixPreferenceBody": {
+        "type": "object",
+        "properties": {
+          "fixSnippet": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "DeleteFixPreferenceResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "BulkDeletePreferencesResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "deleted": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "success",
+          "deleted"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/signup": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "User created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Logged out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Current user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSessionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/reset": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetSessionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetSessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/messages": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Messages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessagesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/files-debug": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Debug info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilesDebugResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/messages/system": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemMessageBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "System message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemMessageResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/chat": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/files": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Files",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilesResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateFileBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "File created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneratedFile"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/files/bulk": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkFilesBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bulk update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkFilesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/files/{id}": {
+      "patch": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "File ID (UUID)"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFileBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeneratedFile"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/repositories/{provider}/prewarm": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "github",
+                "azure"
+              ],
+              "description": "Repository provider"
+            },
+            "required": true,
+            "name": "provider",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pre-warming",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrewarmResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/repositories/{provider}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "github",
+                "azure"
+              ],
+              "description": "Repository provider"
+            },
+            "required": true,
+            "name": "provider",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repositories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "github",
+                "azure"
+              ],
+              "description": "Repository provider"
+            },
+            "required": true,
+            "name": "provider",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRepoBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Repository created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Repository"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/branches": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Branches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/scan-repository": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanRepoBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Scan result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanRepoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/validate-aggregated-resources": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateAggregatedBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateAggregatedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/scan-child-module": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanChildModuleBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Child module resources",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanChildModuleResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/configure-backend": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigureBackendBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backend configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigureBackendResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/refactor": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefactorBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Refactored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefactorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/refactor-fix": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefactorFixBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fix applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefactorFixResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-diagram": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateDiagramBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Diagram",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateDiagramResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/terraform/validate-policy": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidatePolicyBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Policy validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidatePolicyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/rightsizing-recommendations": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RightsizingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rightsizing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RightsizingResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/apply-rightsizing": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplyRightsizingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyRightsizingResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/terraform/analyze-plan-diff": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzePlanDiffBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plan diff",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyzePlanDiffResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-terraform": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateTerraformBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateTerraformResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/terraform-cli-repair": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TerraformCliRepairBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "CLI repair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerraformCliRepairResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Cannot repair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/terraform-cicd-repair": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TerraformCicdRepairBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "CI/CD repair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerraformCicdRepairResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/docker-scan": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DockerScanResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-dockerfile": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateDockerfileBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dockerfile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateDockerfileResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/scan-docker": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Docker scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanDockerResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/docker-best-practices": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Best practices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DockerBestPracticesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/docker-fix-best-practices": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DockerFixBPBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fixed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DockerFixBPResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-compose": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Compose",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateComposeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/image-size-estimate": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Estimates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageSizeEstimateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/commit-docker": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitDockerResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-docker-diagram": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diagram",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateDockerDiagramResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-kubernetes-manifests": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateK8sManifestsBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Manifests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateK8sManifestsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/commit-kubernetes": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitK8sResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/scan-kubernetes": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scan results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanK8sResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/validate-kubernetes": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateK8sBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateK8sResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/fix-kubernetes-validation": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fixed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixK8sValidationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/validate-helm-chart": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Helm validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateHelmResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-kubernetes-diagram": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diagram",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateK8sDiagramResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/kubernetes-fix": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/K8sFixBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fix applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K8sFixResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/kubernetes-fix/verify": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K8sFixVerifyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/kubernetes-fixes/batch": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/K8sFixBatchBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch fix",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K8sFixBatchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/scan-repo-for-helm": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Helm scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanRepoForHelmResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/analyze-repo": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyzeRepoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-helm-chart": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateHelmChartBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Helm chart",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateHelmChartResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/upload-helm-chart": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Uploaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadHelmChartResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/build-kustomize": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Built",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildKustomizeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/security-score": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Score",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityScoreResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/kubernetes/policy-hints": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Hints",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyHintsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/policy-check": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyCheckResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/rightsize-kubernetes": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recommendations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RightsizeK8sResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/estimate-k8s-cost": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cost estimate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EstimateK8sCostResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/archme/templates": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Templates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchMeTemplates"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/archme/templates/{id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchMeTemplate"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/archme/compliance-presets": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Presets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompliancePresets"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/archme/compliance-presets/{id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Preset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompliancePreset"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/architecture-versions": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchVersionsList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/restore-architecture-version": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreVersionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreVersionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/analyze-architecture": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeArchBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyzeArchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/validate-empty-repo": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateEmptyRepoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-architecture-diagram": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateArchDiagramBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Diagram",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateArchDiagramResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/diagram-image": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiagramImageBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagramImageResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/extract-components": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Components",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtractComponentsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-component-code": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateComponentCodeBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateComponentCodeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/scan-archme-code": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanArchMeCodeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-archme-readme": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "README",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateReadmeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/commit-archme-code": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitArchMeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/regenerate-component": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegenerateComponentBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Regenerated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegenerateComponentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/validate-archme-terraform": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateArchMeTfResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/generate-automation": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateAutomationBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateAutomationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/commit-automation": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitAutomationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/valuation/connect": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValuationConnectBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValuationConnectResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/valuation/resource-groups": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Resource groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceGroupsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/valuation/scan": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValuationScanBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Scanned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValuationScanResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/valuation/analyze": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValuationAnalyzeBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValuationAnalyzeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/valuation/reserved-instances": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Recommendations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservedInstancesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/valuation/budget-alerts": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Alerts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetAlertsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/valuation/multicloud-compare": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Comparison",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MulticloudCompareResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/commit": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/scan": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Scan results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/fix-issues": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FixIssuesBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fixed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixIssuesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/analyze-cost": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session ID (UUID)",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeCostBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cost analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyzeCostResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/scoreme/run": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScoreMeRunBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreMeRunResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/checkov/status": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckovStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/performance": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Performance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsPerformanceResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/performance/recent": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Recent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsRecentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/cache": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Cache",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsCacheResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/ai-usage": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "AI usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsAiUsageResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/dashboard": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsDashboardResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/reset": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsResetResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/baseline": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Baseline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsBaselineResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/feature-flags": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Flags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsFeatureFlagsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/azure-mcp": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Azure MCP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugAzureMcpResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/terraform-mcp": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Terraform MCP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugTerraformMcpResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/credentials": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugCredentialsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/tools/{provider}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "provider",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tools",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugToolsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user/history": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "module",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0,
+              "default": 0
+            },
+            "required": false,
+            "name": "offset",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user/secrets": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Secrets config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserSecretsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user/secrets/{type}": {
+      "put": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "azure-devops",
+                "azure-cloud",
+                "github",
+                "aws",
+                "gcp"
+              ],
+              "description": "Secret provider type"
+            },
+            "required": true,
+            "name": "type",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSecretBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveSecretResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/me/fix-preferences": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Preferences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixPreferencesList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateFixPreferenceBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixPreference"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Bulk deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkDeletePreferencesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/me/fix-preferences/stats": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixPreferencesStats"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/me/fix-preferences/top": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Top",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopFixPreferences"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/me/fix-preferences/search": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "checkId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "resourceType",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchPreferencesResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/me/fix-preferences/{id}": {
+      "put": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "File ID (UUID)"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFixPreferenceBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixPreference"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "File ID (UUID)"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteFixPreferenceResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

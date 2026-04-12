@@ -1,10 +1,10 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { writeFile, unlink, mkdtemp, rmdir } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface ValidationIssue {
   severity: 'error' | 'warning';
@@ -128,30 +128,30 @@ export async function validateKubernetesYAML(
 
     // Try different kubeval command variations
     const isWindows = process.platform === 'win32';
-    const commands: string[] = [];
-    
-    // Build base command
-    const fileArgs = filePaths.map(f => `"${f}"`).join(' ');
-    const versionArg = k8sVersion ? ` --kubernetes-version ${k8sVersion}` : '';
-    
-    if (isWindows) {
-      commands.push(`kubeval ${fileArgs}${versionArg}`);
-      commands.push(`npx kubeval ${fileArgs}${versionArg}`);
-      commands.push(`py -m kubeval ${fileArgs}${versionArg}`);
-    } else {
-      commands.push(`kubeval ${fileArgs}${versionArg}`);
-      commands.push(`npx kubeval ${fileArgs}${versionArg}`);
-      commands.push(`python3 -m kubeval ${fileArgs}${versionArg}`);
-    }
+
+    // Build base args
+    const baseArgs = [...filePaths, ...(k8sVersion ? ['--kubernetes-version', k8sVersion] : [])];
+
+    const commands: [string, string[]][] = isWindows
+      ? [
+          ['kubeval', baseArgs],
+          ['npx', ['kubeval', ...baseArgs]],
+          ['py', ['-m', 'kubeval', ...baseArgs]],
+        ]
+      : [
+          ['kubeval', baseArgs],
+          ['npx', ['kubeval', ...baseArgs]],
+          ['python3', ['-m', 'kubeval', ...baseArgs]],
+        ];
 
     let stdout = '';
     let stderr = '';
     let commandWorked = false;
 
-    for (const command of commands) {
+    for (const [cmd, args] of commands) {
       try {
-        console.log(`   Trying: ${command.substring(0, 80)}...`);
-        const result = await execAsync(command, {
+        console.log(`   Trying: ${cmd} ${args.join(' ').substring(0, 80)}...`);
+        const result = await execFileAsync(cmd, args, {
           timeout: 30000, // 30 second timeout
           cwd: tempDir,
         });

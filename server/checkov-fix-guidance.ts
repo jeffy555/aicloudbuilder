@@ -5,6 +5,11 @@
  * Helps users understand why checks fail and how to fix them.
  */
 
+export interface ComplianceStandard {
+  framework: string;   // e.g. 'CIS Azure', 'NIST 800-53', 'SOC 2', 'PCI DSS', 'HIPAA', 'ISO 27001'
+  control: string;     // e.g. '5.1.4', 'SC-28', 'CC6.1'
+}
+
 export interface FixGuidance {
   checkId: string;
   checkName: string;
@@ -18,6 +23,7 @@ export interface FixGuidance {
   costImplication?: string;
   canIgnore?: boolean;
   ignoreReason?: string;
+  complianceStandards?: ComplianceStandard[];
 }
 
 /**
@@ -38,7 +44,13 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add or modify: `public_network_access_enabled = false`',
       'This disables public access to the storage account'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.7' },
+      { framework: 'NIST 800-53', control: 'SC-7' },
+      { framework: 'SOC 2', control: 'CC6.1' },
+      { framework: 'PCI DSS', control: '1.3.1' },
+    ]
   },
 
   'CKV_AZURE_33': {
@@ -55,7 +67,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Example: `queue_properties { logging { delete = true, read = true, write = true } }`'
     ],
     prerequisites: ['Storage account must be StorageV2 (not Storage)'],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.3' },
+      { framework: 'NIST 800-53', control: 'AU-3' },
+      { framework: 'SOC 2', control: 'CC7.2' },
+    ]
   },
 
   'CKV_AZURE_206': {
@@ -72,7 +89,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'ZRS = Zone-Redundant Storage (for better performance)'
     ],
     costImplication: 'GRS/ZRS costs more than LRS but provides redundancy',
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.1' },
+      { framework: 'NIST 800-53', control: 'CP-9' },
+      { framework: 'ISO 27001', control: 'A.12.3.1' },
+    ]
   },
 
   'CKV_AZURE_190': {
@@ -87,7 +109,13 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add: `allow_nested_items_to_be_public = false`',
       'This prevents blobs and containers from being publicly accessible'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.5' },
+      { framework: 'NIST 800-53', control: 'AC-3' },
+      { framework: 'PCI DSS', control: '7.1' },
+      { framework: 'HIPAA', control: '164.312(a)(1)' },
+    ]
   },
 
   'CKV2_AZURE_40': {
@@ -104,7 +132,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Note: Existing applications using Shared Keys will need to migrate to Azure AD'
     ],
     canIgnore: true,
-    ignoreReason: 'If you have legacy applications that require Shared Key authentication'
+    ignoreReason: 'If you have legacy applications that require Shared Key authentication',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.9' },
+      { framework: 'NIST 800-53', control: 'IA-2' },
+    ]
   },
 
   'CKV2_AZURE_47': {
@@ -119,7 +151,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add: `allow_nested_items_to_be_public = false`',
       'This prevents anonymous access to blobs'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.5' },
+      { framework: 'NIST 800-53', control: 'AC-3' },
+      { framework: 'PCI DSS', control: '7.1' },
+    ]
   },
 
   'CKV2_AZURE_38': {
@@ -136,7 +173,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'This enables soft-delete for 7 days (adjust as needed)'
     ],
     prerequisites: ['Storage account must be StorageV2'],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.8' },
+      { framework: 'NIST 800-53', control: 'CP-9' },
+      { framework: 'SOC 2', control: 'CC9.1' },
+    ]
   },
 
   'CKV2_AZURE_41': {
@@ -151,7 +193,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add: `sas_policy { expiration_period = "P365D" }` (1 year expiration)',
       'Adjust expiration period as needed (P30D = 30 days, P365D = 1 year)'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'NIST 800-53', control: 'IA-5' },
+      { framework: 'SOC 2', control: 'CC6.1' },
+    ]
   },
 
   'CKV2_AZURE_33': {
@@ -177,7 +223,13 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     ],
     costImplication: 'Private endpoints have minimal cost but require VNet infrastructure',
     canIgnore: true,
-    ignoreReason: 'If storage account needs to be publicly accessible for your use case'
+    ignoreReason: 'If storage account needs to be publicly accessible for your use case',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.10' },
+      { framework: 'NIST 800-53', control: 'SC-7' },
+      { framework: 'PCI DSS', control: '1.3' },
+      { framework: 'HIPAA', control: '164.312(e)(1)' },
+    ]
   },
 
   'CKV2_AZURE_1': {
@@ -203,7 +255,14 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     ],
     costImplication: 'Key Vault has minimal cost, but provides better security and compliance',
     canIgnore: true,
-    ignoreReason: 'If Microsoft-managed keys are acceptable for your compliance requirements'
+    ignoreReason: 'If Microsoft-managed keys are acceptable for your compliance requirements',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '3.12' },
+      { framework: 'NIST 800-53', control: 'SC-28' },
+      { framework: 'PCI DSS', control: '3.4' },
+      { framework: 'HIPAA', control: '164.312(a)(2)(iv)' },
+      { framework: 'ISO 27001', control: 'A.10.1.1' },
+    ]
   },
 
   // Function App Checks
@@ -220,7 +279,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add or modify: `http2_enabled = true`',
       'This enables HTTP/2 for better performance'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '9.9' },
+      { framework: 'NIST 800-53', control: 'SC-8' },
+    ]
   },
 
   'CKV_AZURE_70': {
@@ -236,7 +299,13 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add: `https_only = true`',
       'This forces all traffic to use HTTPS'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '9.2' },
+      { framework: 'NIST 800-53', control: 'SC-8' },
+      { framework: 'PCI DSS', control: '4.1' },
+      { framework: 'HIPAA', control: '164.312(e)(1)' },
+    ]
   },
 
   'CKV_AZURE_56': {
@@ -259,7 +328,13 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Identity provider configuration'
     ],
     canIgnore: true,
-    ignoreReason: 'If function app is behind API Management or other authentication layer'
+    ignoreReason: 'If function app is behind API Management or other authentication layer',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '9.1' },
+      { framework: 'NIST 800-53', control: 'IA-2' },
+      { framework: 'SOC 2', control: 'CC6.1' },
+      { framework: 'PCI DSS', control: '8.1' },
+    ]
   },
 
   // Container Registry Checks
@@ -279,7 +354,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     prerequisites: ['Container Registry must be Premium SKU'],
     costImplication: 'Premium SKU costs significantly more than Basic/Standard',
     canIgnore: true,
-    ignoreReason: 'If cost is a concern and vulnerability scanning is handled elsewhere'
+    ignoreReason: 'If cost is a concern and vulnerability scanning is handled elsewhere',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '8.4' },
+      { framework: 'NIST 800-53', control: 'RA-5' },
+      { framework: 'PCI DSS', control: '6.1' },
+    ]
   },
 
   'CKV_AZURE_237': {
@@ -298,7 +378,10 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     prerequisites: ['Container Registry must be Premium SKU'],
     costImplication: 'Premium SKU required',
     canIgnore: true,
-    ignoreReason: 'If Standard SKU is sufficient for your needs'
+    ignoreReason: 'If Standard SKU is sufficient for your needs',
+    complianceStandards: [
+      { framework: 'NIST 800-53', control: 'SC-7' },
+    ]
   },
 
   'CKV_AZURE_166': {
@@ -317,7 +400,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     prerequisites: ['Container Registry must be Premium SKU'],
     costImplication: 'Premium SKU required',
     canIgnore: true,
-    ignoreReason: 'If cost is a concern'
+    ignoreReason: 'If cost is a concern',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '8.5' },
+      { framework: 'NIST 800-53', control: 'SI-7' },
+    ]
   },
 
   'CKV_AZURE_167': {
@@ -336,7 +423,10 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     prerequisites: ['Container Registry must be Premium SKU'],
     costImplication: 'Premium SKU required',
     canIgnore: true,
-    ignoreReason: 'If cost is a concern'
+    ignoreReason: 'If cost is a concern',
+    complianceStandards: [
+      { framework: 'NIST 800-53', control: 'SI-12' },
+    ]
   },
 
   'CKV_AZURE_233': {
@@ -355,7 +445,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     prerequisites: ['Container Registry must be Premium SKU', 'Region must support availability zones'],
     costImplication: 'Premium SKU required',
     canIgnore: true,
-    ignoreReason: 'If single-zone deployment is acceptable for your use case'
+    ignoreReason: 'If single-zone deployment is acceptable for your use case',
+    complianceStandards: [
+      { framework: 'NIST 800-53', control: 'CP-10' },
+      { framework: 'ISO 27001', control: 'A.17.1.2' },
+    ]
   },
 
   'CKV_AZURE_165': {
@@ -375,7 +469,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     prerequisites: ['Container Registry must be Premium SKU'],
     costImplication: 'Premium SKU + additional costs for geo-replication',
     canIgnore: true,
-    ignoreReason: 'If single-region deployment is sufficient'
+    ignoreReason: 'If single-region deployment is sufficient',
+    complianceStandards: [
+      { framework: 'NIST 800-53', control: 'CP-6' },
+      { framework: 'ISO 27001', control: 'A.17.1.2' },
+    ]
   },
 
   'CKV_AZURE_139': {
@@ -390,7 +488,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add: `public_network_access_enabled = false`',
       'This restricts access to private endpoints only'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '8.1' },
+      { framework: 'NIST 800-53', control: 'SC-7' },
+      { framework: 'PCI DSS', control: '1.3' },
+    ]
   },
 
   'CKV_AZURE_164': {
@@ -409,7 +512,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     prerequisites: ['Container Registry must be Premium SKU'],
     costImplication: 'Premium SKU required',
     canIgnore: true,
-    ignoreReason: 'If cost is a concern'
+    ignoreReason: 'If cost is a concern',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '8.6' },
+      { framework: 'NIST 800-53', control: 'SI-7' },
+      { framework: 'SOC 2', control: 'CC7.1' },
+    ]
   },
 
   // Virtual Machine Checks
@@ -426,7 +534,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add or modify: `disable_password_authentication = true`',
       'Ensure SSH keys are configured in the same block'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '7.5' },
+      { framework: 'NIST 800-53', control: 'IA-2' },
+      { framework: 'PCI DSS', control: '8.2.3' },
+    ]
   },
 
   'CKV_AZURE_10': {
@@ -443,7 +556,13 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Modify `source_address_prefix` to specific IP range or remove rule',
       'Example: `source_address_prefix = "203.0.113.0/24"` (your office IP)'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '6.1' },
+      { framework: 'NIST 800-53', control: 'SC-7' },
+      { framework: 'PCI DSS', control: '1.2.1' },
+      { framework: 'HIPAA', control: '164.312(e)(1)' },
+    ]
   },
 
   'CKV2_AZURE_10': {
@@ -463,7 +582,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     ],
     prerequisites: ['Virtual Machine extension resource'],
     canIgnore: true,
-    ignoreReason: 'If using third-party antimalware solution'
+    ignoreReason: 'If using third-party antimalware solution',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '7.6' },
+      { framework: 'NIST 800-53', control: 'SI-3' },
+    ]
   },
 
   'CKV2_AZURE_9': {
@@ -480,7 +603,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Add `managed_disk_type = "Premium_LRS"` or "Standard_LRS"',
       'Managed disks provide better reliability and management'
     ],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '7.2' },
+      { framework: 'NIST 800-53', control: 'SC-28' },
+    ]
   },
 
   'CKV2_AZURE_12': {
@@ -504,7 +631,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
     ],
     costImplication: 'Azure Backup has storage costs based on backup size',
     canIgnore: true,
-    ignoreReason: 'If using alternative backup solution'
+    ignoreReason: 'If using alternative backup solution',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '7.7' },
+      { framework: 'NIST 800-53', control: 'CP-9' },
+      { framework: 'ISO 27001', control: 'A.12.3.1' },
+    ]
   },
 
   // Networking Checks
@@ -522,7 +654,12 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Reference an existing NSG or create one first'
     ],
     prerequisites: ['Network Security Group resource must exist'],
-    canIgnore: false
+    canIgnore: false,
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '6.4' },
+      { framework: 'NIST 800-53', control: 'SC-7' },
+      { framework: 'PCI DSS', control: '1.2' },
+    ]
   },
 
   'CKV_AZURE_119': {
@@ -539,7 +676,11 @@ export const FIX_GUIDANCE_DB: Record<string, FixGuidance> = {
       'Use private IP only or access via load balancer'
     ],
     canIgnore: true,
-    ignoreReason: 'If VM needs direct internet access (not recommended)'
+    ignoreReason: 'If VM needs direct internet access (not recommended)',
+    complianceStandards: [
+      { framework: 'CIS Azure', control: '6.2' },
+      { framework: 'NIST 800-53', control: 'SC-7' },
+    ]
   }
 };
 

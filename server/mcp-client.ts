@@ -2,8 +2,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn, type ChildProcess } from "child_process";
 import { Octokit } from "@octokit/rest";
+import sodium from "libsodium-wrappers";
+import { shouldIncludeFileInStandaloneRepoFetch } from "./terraform-generator-metadata";
 
-export type MCPProvider = 'github' | 'azure' | 'terraform';
+export type MCPProvider = 'github' | 'azure' | 'terraform' | 'aws';
 export type MCPServerType = 'devops' | 'resources' | 'pricing';
 
 export interface RepositoryCredentials {
@@ -84,6 +86,25 @@ export class MCPClientManager {
         env: {
           GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_TOKEN || '',
         }
+      };
+    } else if (provider === 'aws') {
+      const awsMcpCommand = process.env.AWS_MCP_COMMAND;
+      const awsMcpArgs = process.env.AWS_MCP_ARGS;
+      if (!awsMcpCommand) {
+        throw new Error(
+          'AWS MCP server is not configured. Set AWS_MCP_COMMAND and optionally AWS_MCP_ARGS environment variables.'
+        );
+      }
+      return {
+        command: awsMcpCommand,
+        args: awsMcpArgs ? awsMcpArgs.split(' ').filter(Boolean) : [],
+        env: {
+          AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID || '',
+          AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY || '',
+          AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN || '',
+          AWS_REGION: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1',
+          AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION || process.env.AWS_REGION || 'us-east-1',
+        },
       };
     } else if (provider === 'azure' && serverType === 'pricing') {
       // Azure Pricing MCP Server for cost estimation
@@ -567,7 +588,7 @@ Check if the MCP server package is properly installed.`;
           });
           
           // Extract documentation from response
-          if (result.content && Array.isArray(result.content)) {
+        if (result.content && Array.isArray(result.content)) {
             for (const item of result.content) {
               if (item.type === 'text' && item.text) {
                 allDocs += `\n\n## ${resource}\n${item.text}\n`;
@@ -704,7 +725,7 @@ Check if the MCP server package is properly installed.`;
                          props.prompt ? 'prompt' : 
                          props.query ? 'query' : 'input';
           args[descKey] = description;
-        } else {
+      } else {
           // Default: use description
           args.description = description;
         }
@@ -755,7 +776,7 @@ Check if the MCP server package is properly installed.`;
       // Parse the response
       let files: Array<{ path: string; content: string }> = [];
       
-      if (result.content && Array.isArray(result.content)) {
+        if (result.content && Array.isArray(result.content)) {
         for (const item of result.content) {
           if (item.type === 'text' && item.text) {
             try {
@@ -965,9 +986,9 @@ Check if the MCP server package is properly installed.`;
           try {
             const { data } = await octokit.rest.repos.createInOrg({
               org: owner,
-              name,
-              description: description || '',
-              private: false,
+          name,
+          description: description || '',
+          private: false,
               auto_init: false,
             });
             createdRepo = data;
@@ -1130,26 +1151,15 @@ Check if the MCP server package is properly installed.`;
     provider: MCPProvider,
     repoName: string,
     files: { path: string; content: string }[],
-    message: string
+    message: string,
+    credentials?: RepositoryCredentials,
+    preferredBranch?: string | null
   ): Promise<any> {
     try {
       if (provider === 'github') {
         console.log(`Committing ${files.length} files to ${repoName}...`);
-        
-        // Parse repository name: could be "owner/repo" or just "repo"
-        let owner = process.env.GITHUB_OWNER || '';
-        let repo = repoName;
-        
-        if (repoName.includes('/')) {
-          // Repository name is in format "owner/repo"
-          const parts = repoName.split('/');
-          owner = parts[0];
-          repo = parts[1];
-          console.log(`📦 Parsed repository for commit: owner=${owner}, repo=${repo}`);
-        } else {
-          // Just repo name, use owner from env
-          console.log(`📦 Using repository for commit: owner=${owner} (from env), repo=${repo}`);
-        }
+        const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+        console.log(`📦 Parsed repository for commit: owner=${owner}, repo=${repo}`);
         
         // Always use GitHub REST API for commits
         // REST API handles both create and update correctly
@@ -1164,7 +1174,7 @@ Check if the MCP server package is properly installed.`;
           console.log(`      ${i + 1}. ${f.path} (${f.content.length} chars)`);
         });
         
-        return await this.commitFilesViaGitHubAPI(repo, files, message, owner);
+        return await this.commitFilesViaGitHubAPI(repo, files, message, owner, credentials, preferredBranch);
         
         /* OLD LOGIC - Keeping for reference but not using
         // Check if repository has existing files
@@ -1303,98 +1313,330 @@ Check if the MCP server package is properly installed.`;
     }
   }
 
+  /**
+   * Single atomic commit for all files (Git Data API). Avoids N separate commits from Contents API.
+   */
   private async commitFilesViaGitHubAPI(
     repo: string,
     files: { path: string; content: string }[],
     message: string,
-    owner: string
+    owner: string,
+    credentials?: RepositoryCredentials,
+    preferredBranch?: string | null
   ): Promise<any> {
     const octokit = new Octokit({
-      auth: process.env.GITHUB_TOKEN,
+      auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
     });
 
-    try {
-      console.log(`\n📤 Committing ${files.length} file(s) via GitHub REST API...`);
-      console.log(`   Repository: ${owner}/${repo}`);
-      console.log(`   Commit message: "${message}"`);
-      console.log(`   Method: createOrUpdateFileContents (handles both create and update)`);
-      
-      // Get file SHAs for existing files (required for updates)
-      const fileSHAs = new Map<string, string>();
-      const branch = 'main';
-      
-      for (const file of files) {
-        try {
-          const { data } = await octokit.rest.repos.getContent({
-            owner,
-            repo: repo,
-            path: file.path,
-            ref: branch,
-          });
-          
-          if ('sha' in data && data.sha) {
-            fileSHAs.set(file.path, data.sha);
-            console.log(`   📄 ${file.path}: Existing file (SHA: ${data.sha.substring(0, 7)}...) - will UPDATE`);
-          }
-        } catch (error: any) {
-          if (error.status === 404) {
-            // File doesn't exist - will create new
-            console.log(`   📄 ${file.path}: New file - will CREATE`);
-          } else {
-            console.warn(`   ⚠️  Could not check ${file.path}: ${error.message}`);
-          }
-        }
-      }
-      
-      // Commit files one by one (REST API requires this)
-      const results = [];
-      for (const file of files) {
-        const existingSHA = fileSHAs.get(file.path);
-        const isUpdate = !!existingSHA;
-        
-        console.log(`\n   ${isUpdate ? '📝 Updating' : '➕ Creating'}: ${file.path}`);
-        
-        try {
-        const result = await octokit.repos.createOrUpdateFileContents({
+    const deduped: { path: string; content: string }[] = [];
+    const seen = new Set<string>();
+    for (let i = files.length - 1; i >= 0; i--) {
+      const p = files[i].path.replace(/\\/g, '/');
+      if (seen.has(p)) continue;
+      seen.add(p);
+      deduped.unshift({ path: p, content: files[i].content });
+    }
+
+    if (deduped.length === 0) {
+      throw new Error('No files to commit after path deduplication.');
+    }
+
+    /**
+     * Empty-repo path: GitHub's Git Data API (trees/commits/blobs) all return 409 when
+     * the repository has no commits. Use the Contents API instead, which is designed for
+     * initialising repos and works file-by-file on an empty repo.
+     * Files are pushed sequentially so each one builds on the previous commit SHA.
+     */
+    const initializeEmptyRepo = async (
+      batch: { path: string; content: string }[],
+      branch: string
+    ): Promise<{ branch: string; commitSha: string }> => {
+      console.log(`   📂 Empty repo detected — using Contents API to initialize ${branch}...`);
+      let lastCommitSha = '';
+      let fileSha: string | undefined;
+
+      for (const f of batch) {
+        const encoded = Buffer.from(f.content, 'utf8').toString('base64');
+        const params: Parameters<typeof octokit.rest.repos.createOrUpdateFileContents>[0] = {
           owner,
-            repo: repo,
-          path: file.path,
-            message: message, // Use same commit message for all files
-          content: Buffer.from(file.content).toString('base64'),
-            branch: branch,
-            ...(isUpdate ? { sha: existingSHA } : {}), // Include SHA for updates
-        });
-          
-        results.push(result.data);
-          console.log(`   ✅ ${isUpdate ? 'Updated' : 'Created'} successfully`);
-        } catch (fileError: any) {
-          console.error(`   ❌ Failed to ${isUpdate ? 'update' : 'create'} ${file.path}: ${fileError.message}`);
-          if (fileError.response?.data) {
-            console.error(`   Error details:`, JSON.stringify(fileError.response.data, null, 2));
+          repo,
+          path: f.path,
+          message,
+          content: encoded,
+          branch,
+        };
+        if (fileSha) {
+          // Only needed for updates; on empty repo first push has no sha
+          (params as any).sha = fileSha;
+        }
+        try {
+          const { data } = await octokit.rest.repos.createOrUpdateFileContents(params);
+          lastCommitSha = data.commit.sha ?? lastCommitSha;
+          fileSha = undefined; // each file is new, no existing SHA
+        } catch (e: any) {
+          // If the file already exists (shouldn't happen on empty repo but handle it)
+          if (e.status === 422) {
+            const existing = await octokit.rest.repos.getContent({ owner, repo, path: f.path, ref: branch });
+            const existingData = existing.data as any;
+            (params as any).sha = existingData.sha;
+            const { data } = await octokit.rest.repos.createOrUpdateFileContents(params);
+            lastCommitSha = data.commit.sha ?? lastCommitSha;
+          } else {
+            throw e;
           }
-          throw fileError;
         }
       }
 
-      console.log(`\n✅ Successfully committed ${results.length} file(s) via GitHub REST API`);
-      console.log(`   Method: createOrUpdateFileContents`);
-      console.log(`   Branch: ${branch}`);
-      
-      // Get the commit SHA from the last file operation
-      const lastResult = results[results.length - 1];
-      const commitSha = lastResult?.commit?.sha || lastResult?.content?.sha || null;
-      
+      console.log(`   ✅ Initialized repo via Contents API, final commit: ${lastCommitSha.slice(0, 7)}`);
+      return { branch, commitSha: lastCommitSha };
+    };
+
+    const tryCommitOnce = async (batch: { path: string; content: string }[]): Promise<{
+      branch: string;
+      commitSha: string;
+    }> => {
+      let branch = 'main';
+
+      const { data: repoMeta } = await octokit.rest.repos.get({ owner, repo });
+      const defaultBranch = repoMeta.default_branch || 'main';
+      branch = defaultBranch;
+
+      const candidates = [
+        ...new Set(
+          [preferredBranch, defaultBranch, 'main', 'master'].filter(
+            (b): b is string => typeof b === 'string' && b.trim().length > 0
+          )
+        ),
+      ];
+
+      let refName: string | null = null;
+      let parentSha: string | null = null;
+      let isEmptyRepo = false;
+
+      for (const candidate of candidates) {
+        try {
+          const { data: ref } = await octokit.rest.git.getRef({
+            owner,
+            repo,
+            ref: `heads/${candidate}`,
+          });
+          refName = candidate;
+          parentSha = ref.object.sha;
+          branch = candidate;
+          break;
+        } catch (e: any) {
+          if (e.status === 409 || e.message?.includes('Git Repository is empty')) {
+            isEmptyRepo = true;
+            break; // Every candidate will fail — no point trying others
+          }
+          if (e.status === 404) continue;
+          throw e;
+        }
+      }
+
+      // Empty repo: Git Data API (trees, blobs, commits) all 409 — use Contents API instead
+      if (isEmptyRepo || (!refName && !parentSha)) {
+        const targetBranch = (preferredBranch?.trim()) || defaultBranch;
+        if (isEmptyRepo) {
+          return initializeEmptyRepo(batch, targetBranch);
+        }
+        // Non-empty but no matching branch — fall through to create new branch via Git Data API
+        branch = targetBranch;
+      }
+
+      let baseTreeSha: string | null = null;
+      if (parentSha) {
+        const { data: parentCommit } = await octokit.rest.git.getCommit({
+          owner,
+          repo,
+          commit_sha: parentSha,
+        });
+        baseTreeSha = parentCommit.tree.sha;
+      }
+
+      const treeEntries = await Promise.all(
+        batch.map(async (f) => {
+          const buf = Buffer.from(f.content, 'utf8');
+          if (buf.length > 900_000) {
+            const { data: blob } = await octokit.rest.git.createBlob({
+              owner,
+              repo,
+              content: buf.toString('base64'),
+              encoding: 'base64',
+            });
+            return {
+              path: f.path,
+              mode: '100644' as const,
+              type: 'blob' as const,
+              sha: blob.sha,
+            };
+          }
+          return {
+            path: f.path,
+            mode: '100644' as const,
+            type: 'blob' as const,
+            content: f.content,
+          };
+        })
+      );
+
+      const { data: newTree } = await octokit.rest.git.createTree({
+        owner,
+        repo,
+        ...(baseTreeSha ? { base_tree: baseTreeSha } : {}),
+        tree: treeEntries,
+      });
+
+      const { data: newCommit } = await octokit.rest.git.createCommit({
+        owner,
+        repo,
+        message,
+        tree: newTree.sha,
+        parents: parentSha ? [parentSha] : [],
+      });
+
+      const refPath = `heads/${branch}`;
+      if (refName) {
+        try {
+          await octokit.rest.git.updateRef({
+            owner,
+            repo,
+            ref: refPath,
+            sha: newCommit.sha,
+          });
+        } catch (updateErr: any) {
+          // Non-fast-forward: another client pushed; caller will retry with a fresh parent.
+          if (updateErr?.status === 422) {
+            throw Object.assign(
+              new Error(
+                `GitHub refused ref update (not a fast-forward) for ${owner}/${repo}@${branch}. Will retry with latest branch tip.`
+              ),
+              { retryableRefRace: true, cause: updateErr }
+            );
+          }
+          throw updateErr;
+        }
+      } else {
+        try {
+          await octokit.rest.git.createRef({
+            owner,
+            repo,
+            ref: `refs/${refPath}`,
+            sha: newCommit.sha,
+          });
+        } catch (createErr: any) {
+          if (createErr.status === 422) {
+            await octokit.rest.git.updateRef({
+              owner,
+              repo,
+              ref: refPath,
+              sha: newCommit.sha,
+              force: true,
+            });
+          } else {
+            throw createErr;
+          }
+        }
+      }
+
+      // Poll: GitHub can briefly lag after updateRef; concurrent pushes can race the tip.
+      const maxPoll = 45;
+      const pollMs = 200;
+      for (let t = 0; t < maxPoll; t++) {
+        const { data: verifyRef } = await octokit.rest.git.getRef({
+          owner,
+          repo,
+          ref: `heads/${branch}`,
+        });
+        if (verifyRef.object.sha === newCommit.sha) {
+          return { branch, commitSha: newCommit.sha };
+        }
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
+
+      const { data: lastRef } = await octokit.rest.git.getRef({
+        owner,
+        repo,
+        ref: `heads/${branch}`,
+      });
+      throw Object.assign(
+        new Error(
+          `Ref verification failed for ${owner}/${repo}@${branch}: expected commit ${newCommit.sha}, ref points to ${lastRef.object.sha}`
+        ),
+        { retryableRefRace: true }
+      );
+    };
+
+    const tryCommit = async (batch: { path: string; content: string }[]): Promise<{
+      branch: string;
+      commitSha: string;
+    }> => {
+      const maxAttempts = 5;
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          return await tryCommitOnce(batch);
+        } catch (e: any) {
+          lastErr = e;
+          const retryable =
+            e?.retryableRefRace === true ||
+            e?.status === 422 ||
+            String(e?.message || '').includes('not a fast-forward') ||
+            String(e?.message || '').includes('Ref verification failed');
+          if (!retryable || attempt === maxAttempts - 1) {
+            throw e;
+          }
+          const waitMs = 450 + attempt * 300;
+          console.warn(
+            `[GitHub] Commit attempt ${attempt + 1}/${maxAttempts} failed (${String(e?.message || e).slice(0, 200)}); retrying after ${waitMs}ms with fresh branch tip...`
+          );
+          await new Promise((r) => setTimeout(r, waitMs));
+        }
+      }
+      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+    };
+
+    try {
+      console.log(`\n📤 Committing ${deduped.length} file(s) in ONE commit (Git Data API)...`);
+      console.log(`   Repository: ${owner}/${repo}`);
+      console.log(`   Commit message: "${message}"`);
+
+      try {
       return {
         success: true,
-        files: results,
-        method: 'github-contents-api',
-        branch: branch,
-        commitSha: commitSha,
-        updated: fileSHAs.size,
-        created: files.length - fileSHAs.size
-      };
+          method: 'github-git-data-api',
+          ...(await tryCommit(deduped)),
+          skippedWorkflowFiles: [] as string[],
+          files: deduped.map((f) => ({ path: f.path })),
+        };
+      } catch (firstErr: any) {
+        const workflowPaths = deduped.filter((f) => f.path.startsWith('.github/workflows/'));
+        if (workflowPaths.length === 0) throw firstErr;
+        const msg = String(firstErr?.message || firstErr);
+        const isLikelyWorkflow =
+          msg.includes('workflow') ||
+          firstErr?.status === 403 ||
+          firstErr?.status === 404;
+        if (!isLikelyWorkflow) throw firstErr;
+
+        const rest = deduped.filter((f) => !f.path.startsWith('.github/workflows/'));
+        console.warn(
+          `⚠️  Full commit failed (${msg}). Retrying without workflow files (token may lack workflow scope).`
+        );
+        if (rest.length === 0) throw firstErr;
+
+        const skippedWorkflowFiles = workflowPaths.map((f) => f.path);
+        const result = await tryCommit(rest);
+        return {
+          success: true,
+          method: 'github-git-data-api',
+          ...result,
+          skippedWorkflowFiles,
+          files: rest.map((f) => ({ path: f.path })),
+        };
+      }
     } catch (error: any) {
-      console.error('\n❌ Error committing via GitHub REST API:');
+      console.error('\n❌ Error committing via GitHub Git Data API:');
       console.error('   Error:', error.message);
       if (error.response?.data) {
         console.error('   Error response:', JSON.stringify(error.response.data, null, 2));
@@ -1449,10 +1691,12 @@ Check if the MCP server package is properly installed.`;
             octokit.rest.git.getTree({ owner, repo: repo, tree_sha: commitSha, recursive: 'true' })
           );
 
-          // CRITICAL: Include both .tf and .tfvars files (not just .tf)
-          const tfFiles = tree.tree.filter(
-            (item) => (item.path?.endsWith('.tf') || item.path?.endsWith('.tfvars')) && item.type === 'blob'
-          );
+          // Terraform workspace files at repo root (and same rules as standalone append) + generator metadata
+          const tfFiles = tree.tree.filter((item) => {
+            if (item.type !== "blob" || !item.path) return false;
+            const normalized = item.path.replace(/^\/+|\/+$/g, "");
+            return shouldIncludeFileInStandaloneRepoFetch(normalized);
+          });
 
           const fileContents = await Promise.all(
             tfFiles.map(async (file) => {
@@ -1507,7 +1751,7 @@ Check if the MCP server package is properly installed.`;
     repoName: string,
     branch: string = 'main',
     credentials?: RepositoryCredentials
-  ): Promise<{ path: string; content: string; name: string }[]> {
+  ): Promise<{ files: { path: string; content: string; name: string }[]; totalRepoFiles: number }> {
     // Files we care about (exact basename match, case-insensitive)
     const APP_FILENAMES = new Set([
       'dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
@@ -1523,7 +1767,7 @@ Check if the MCP server package is properly installed.`;
 
     const isAppFile = (filePath: string) => {
       const depth = filePath.split('/').length;
-      if (depth > 3) return false; // skip deeply nested files
+      if (depth > 4) return false; // skip deeply nested files
       const basename = filePath.split('/').pop()?.toLowerCase() || '';
       if (APP_FILENAMES.has(basename)) return true;
       // Also catch *.csproj, *.sln
@@ -1537,6 +1781,7 @@ Check if the MCP server package is properly installed.`;
           auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
         });
         const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+        console.log(`   📂 scanRepositoryAppFiles: owner=${owner}, repo=${repo}, branch=${branch}`);
 
         let commitSha = branch;
         try {
@@ -1544,14 +1789,24 @@ Check if the MCP server package is properly installed.`;
             octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` })
           );
           commitSha = refResult.data.object.sha;
-        } catch { /* use branch name as-is */ }
+          console.log(`   ✅ Resolved branch "${branch}" → SHA ${commitSha.substring(0, 8)}`);
+        } catch (e: any) {
+          console.warn(`   ⚠️ Could not resolve branch "${branch}": ${e.message || e}`);
+        }
 
         const { data: tree } = await this.withRetry(() =>
           octokit.rest.git.getTree({ owner, repo, tree_sha: commitSha, recursive: 'true' })
         );
 
+        const totalRepoFiles = tree.tree.filter(i => i.type === 'blob').length;
+        console.log(`   📄 Tree has ${tree.tree.length} entries (blobs: ${totalRepoFiles})`);
+        // Log first 20 file paths for debugging
+        const samplePaths = tree.tree.filter(i => i.type === 'blob').slice(0, 20).map(i => i.path);
+        console.log(`   📄 Sample files: ${samplePaths.join(', ')}`);
+
         const allAppFiles = tree.tree
           .filter(item => item.type === 'blob' && item.path && isAppFile(item.path));
+        console.log(`   🔍 Matched ${allAppFiles.length} app file(s): ${allAppFiles.map(i => i.path).join(', ')}`);
 
         // Deduplicate by basename: keep the shallowest copy (root-level preferred over service subdirs)
         const byBasename = new Map<string, typeof allAppFiles[0]>();
@@ -1564,7 +1819,7 @@ Check if the MCP server package is properly installed.`;
         }
         const appFiles = Array.from(byBasename.values()).slice(0, 15);
 
-        if (appFiles.length === 0) return []; // empty / new repo
+        if (appFiles.length === 0) return { files: [], totalRepoFiles };
 
         const results = await Promise.all(
           appFiles.map(async (file) => {
@@ -1582,21 +1837,25 @@ Check if the MCP server package is properly installed.`;
             } catch { return null; }
           })
         );
-        return results.filter((f): f is { path: string; content: string; name: string } => f !== null);
+        return {
+          files: results.filter((f): f is { path: string; content: string; name: string } => f !== null),
+          totalRepoFiles,
+        };
 
       } else if (provider === 'azure') {
         // Re-use Azure DevOps scanning but post-filter to app files
         const allFiles = await this.scanRepositoryFilesViaAzureDevOpsAPI(repoName, branch, credentials);
-        return allFiles
+        const appFiles = allFiles
           .filter(f => isAppFile(f.path))
           .slice(0, 15)
           .map(f => ({ ...f, name: f.path.split('/').pop() || f.path }));
+        return { files: appFiles, totalRepoFiles: allFiles.length };
       }
-      return [];
+      return { files: [], totalRepoFiles: 0 };
     } catch (error: any) {
-      if (error.status === 409 || error.message?.includes('empty')) return [];
+      if (error.status === 409 || error.message?.includes('empty')) return { files: [], totalRepoFiles: 0 };
       console.error(`Error scanning app files for ${repoName}:`, error.message);
-      return [];
+      return { files: [], totalRepoFiles: 0 };
     }
   }
 
@@ -1612,6 +1871,256 @@ Check if the MCP server package is properly installed.`;
       throw new Error('Unable to resolve GitHub repository owner or name.');
     }
     return { owner, repo };
+  }
+
+  async triggerGitHubWorkflow(
+    repoName: string,
+    workflowFileName: string,
+    ref: string = 'main',
+    inputs?: Record<string, string>,
+    credentials?: RepositoryCredentials
+  ): Promise<{ dispatched: boolean; workflowFileName: string; ref: string }> {
+    const octokit = new Octokit({
+      auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
+    });
+    const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+
+    await octokit.rest.actions.createWorkflowDispatch({
+      owner,
+      repo,
+      workflow_id: workflowFileName,
+      ref,
+      ...(inputs ? { inputs } : {}),
+    });
+
+    return { dispatched: true, workflowFileName, ref };
+  }
+
+  async getLatestGitHubWorkflowRun(
+    repoName: string,
+    workflowFileName: string,
+    branch: string = 'main',
+    credentials?: RepositoryCredentials
+  ): Promise<any | null> {
+    const octokit = new Octokit({
+      auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
+    });
+    const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+
+    const { data } = await octokit.rest.actions.listWorkflowRuns({
+      owner,
+      repo,
+      workflow_id: workflowFileName,
+      branch,
+      per_page: 1,
+    });
+    return data.workflow_runs?.[0] || null;
+  }
+
+  /**
+   * After a push, GitHub may not list the new workflow run immediately; the "latest" run
+   * can still be an older (e.g. failed) run. Poll until a run exists for the given head SHA.
+   */
+  async getWorkflowRunForHeadCommit(
+    repoName: string,
+    workflowFileName: string,
+    branch: string,
+    headSha: string,
+    credentials?: RepositoryCredentials,
+    opts?: { maxAttempts?: number; delayMs?: number }
+  ): Promise<any | null> {
+    const fullSha = String(headSha || '').trim();
+    if (!fullSha) return null;
+
+    const maxAttempts = opts?.maxAttempts ?? 28;
+    const delayMs = opts?.delayMs ?? 500;
+
+    const octokit = new Octokit({
+      auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
+    });
+    const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const { data } = await octokit.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: workflowFileName,
+        branch,
+        per_page: 25,
+      });
+      const runs = data.workflow_runs || [];
+      const match = runs.find((r) => r.head_sha === fullSha);
+      if (match) return match;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return null;
+  }
+
+  async getGitHubWorkflowRunDetails(
+    repoName: string,
+    runId: number,
+    credentials?: RepositoryCredentials
+  ): Promise<any> {
+    const octokit = new Octokit({
+      auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
+    });
+    const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+
+    const [{ data: run }, { data: jobs }, { data: artifacts }] = await Promise.all([
+      octokit.rest.actions.getWorkflowRun({ owner, repo, run_id: runId }),
+      octokit.rest.actions.listJobsForWorkflowRun({ owner, repo, run_id: runId, per_page: 100 }),
+      octokit.rest.actions.listWorkflowRunArtifacts({ owner, repo, run_id: runId, per_page: 100 }),
+    ]);
+
+    return {
+      run: {
+        id: run.id,
+        name: run.name,
+        status: run.status,
+        conclusion: run.conclusion,
+        htmlUrl: run.html_url,
+        headSha: run.head_sha,
+        event: run.event,
+        workflowId: run.workflow_id,
+        runNumber: run.run_number,
+        headBranch: run.head_branch,
+        createdAt: run.created_at,
+        updatedAt: run.updated_at,
+      },
+      jobs: (jobs.jobs || []).map((j: any) => ({
+        id: j.id,
+        name: j.name,
+        status: j.status,
+        conclusion: j.conclusion,
+        startedAt: j.started_at,
+        completedAt: j.completed_at,
+        htmlUrl: j.html_url,
+        steps: (j.steps || []).map((s: any) => ({
+          name: s.name,
+          status: s.status,
+          conclusion: s.conclusion,
+          number: s.number,
+        })),
+      })),
+      artifacts: (artifacts.artifacts || []).map((a: any) => ({
+        id: a.id,
+        name: a.name,
+        sizeInBytes: a.size_in_bytes,
+        expired: a.expired,
+        createdAt: a.created_at,
+        expiresAt: a.expires_at,
+      })),
+      planSummaryAvailable: (artifacts.artifacts || []).some((a: any) => a.name === 'migrateops-plan-artifacts'),
+    };
+  }
+
+  async syncGitHubRepositorySecrets(
+    repoName: string,
+    secrets: Record<string, string>,
+    credentials?: RepositoryCredentials
+  ): Promise<{ synced: string[] }> {
+    const octokit = new Octokit({
+      auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
+    });
+    const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+
+    const { data: publicKey } = await octokit.rest.actions.getRepoPublicKey({ owner, repo });
+    await sodium.ready;
+    const keyBytes = sodium.from_base64(publicKey.key, sodium.base64_variants.ORIGINAL);
+
+    const entries = Object.entries(secrets).filter(([, value]) => String(value || '').length > 0);
+    for (const [secretName, secretValue] of entries) {
+      const encryptedBytes = sodium.crypto_box_seal(String(secretValue), keyBytes);
+      const encryptedValue = sodium.to_base64(encryptedBytes, sodium.base64_variants.ORIGINAL);
+      await octokit.rest.actions.createOrUpdateRepoSecret({
+        owner,
+        repo,
+        secret_name: secretName,
+        encrypted_value: encryptedValue,
+        key_id: publicKey.key_id,
+      });
+    }
+
+    return { synced: entries.map(([name]) => name) };
+  }
+
+  async getGitHubWorkflowPlanLogs(
+    repoName: string,
+    runId: number,
+    credentials?: RepositoryCredentials
+  ): Promise<{ runId: number; jobName: string; logs: string; truncated: boolean }> {
+    const octokit = new Octokit({
+      auth: credentials?.github?.token || process.env.GITHUB_TOKEN,
+    });
+    const { owner, repo } = this.parseGitHubRepoName(repoName, credentials);
+
+    const { data: jobs } = await octokit.rest.actions.listJobsForWorkflowRun({
+      owner,
+      repo,
+      run_id: runId,
+      per_page: 100,
+    });
+
+    if (!jobs.jobs || jobs.jobs.length === 0) {
+      throw new Error('No workflow jobs found yet for this run.');
+    }
+
+    const preferredJob =
+      jobs.jobs.find((j: any) => String(j.name || '').toLowerCase().includes('validate')) ||
+      jobs.jobs.find((j: any) =>
+        (j.steps || []).some((s: any) => String(s.name || '').toLowerCase().includes('terraform plan'))
+      ) ||
+      jobs.jobs[0];
+
+    const response: any = await octokit.request(
+      'GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs',
+      { owner, repo, job_id: preferredJob.id }
+    );
+
+    // GitHub returns 302 + Location to plain-text logs. Some HTTP stacks follow redirects and
+    // deliver the log body on the final response with no Location header — handle both.
+    const h = response?.headers as { get?: (n: string) => string | undefined; location?: string } | undefined;
+    const logsUrl =
+      (typeof h?.get === 'function' ? h.get('location') || h.get('Location') : undefined) ||
+      h?.location ||
+      (response?.headers as any)?.Location;
+
+    let rawLogs = '';
+    if (logsUrl) {
+      const logsResponse = await fetch(logsUrl, {
+        headers: {
+          Authorization: `token ${credentials?.github?.token || process.env.GITHUB_TOKEN || ''}`,
+        },
+      });
+      if (!logsResponse.ok) {
+        throw new Error(`Failed to download workflow logs: ${logsResponse.status} ${logsResponse.statusText}`);
+      }
+      rawLogs = await logsResponse.text();
+    } else {
+      const data = response?.data;
+      if (typeof data === 'string' && data.length > 0) {
+        rawLogs = data;
+      } else if (data != null && typeof Buffer !== 'undefined' && Buffer.isBuffer(data)) {
+        rawLogs = data.toString('utf8');
+      } else if (data instanceof ArrayBuffer) {
+        rawLogs = Buffer.from(data).toString('utf8');
+      } else if (ArrayBuffer.isView(data)) {
+        rawLogs = Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('utf8');
+      }
+      if (!rawLogs.trim()) {
+        throw new Error('GitHub did not return a job log URL yet. The job may still be starting.');
+      }
+    }
+    const maxChars = 120_000;
+    const truncated = rawLogs.length > maxChars;
+    const logs = truncated ? rawLogs.slice(rawLogs.length - maxChars) : rawLogs;
+
+    return {
+      runId,
+      jobName: preferredJob.name || 'validate-migration',
+      logs,
+      truncated,
+    };
   }
 
   private async resolveGitHubCommitSha(
@@ -2009,15 +2518,12 @@ Check if the MCP server package is properly installed.`;
       const items = await response.json();
       const files = items.value || [];
       
-      // Filter for .tf and .tfvars files
-      // Note: Azure DevOps returns isFolder as undefined for files, use gitObjectType instead
+      // Terraform workspace + generator metadata (same rules as GitHub scan)
       const tfFiles = files.filter((item: any) => {
         const path = item.path || '';
-        const isTerraformFile = path.endsWith('.tf') || path.endsWith('.tfvars');
-        // Azure DevOps uses gitObjectType: 'blob' for files, 'tree' for folders
-        // isFolder might be undefined, so check gitObjectType
+        const normalized = path.replace(/^\/+|\/+$/g, "");
         const isNotFolder = item.isFolder === false || item.gitObjectType === 'blob' || item.isFolder !== true;
-        return isTerraformFile && isNotFolder;
+        return isNotFolder && shouldIncludeFileInStandaloneRepoFetch(normalized);
       });
       
       console.log(`   Found ${tfFiles.length} Terraform file(s)`);
@@ -2505,6 +3011,177 @@ Original error: ${errorMsg}`
     }
   }
 
+  private extractMcpJsonPayload(result: any): any[] {
+    const content = result?.content as any[] | undefined;
+    if (!content || content.length === 0) {
+      return [];
+    }
+
+    const payloads: any[] = [];
+    for (const item of content) {
+      if (item?.type === 'text' && item.text) {
+        try {
+          const parsed = JSON.parse(item.text);
+          payloads.push(parsed);
+        } catch {
+          // Ignore non-JSON text payloads from MCP tools
+        }
+      } else if (item?.type === 'application/json' && item.data !== undefined) {
+        try {
+          const parsed = typeof item.data === 'string' ? JSON.parse(item.data) : item.data;
+          payloads.push(parsed);
+        } catch {
+          // Ignore unparseable payloads
+        }
+      }
+    }
+    return payloads;
+  }
+
+  private async callFirstAvailableAwsTool(
+    toolCandidates: string[],
+    argsCandidates: Array<Record<string, any>>
+  ): Promise<any> {
+    const client = await this.getClient('aws', 'resources');
+    const tools = await client.listTools();
+    const availableToolNames = new Set<string>((tools?.tools || []).map((t: any) => t.name));
+    const selectedTool = toolCandidates.find((toolName) => availableToolNames.has(toolName));
+
+    if (!selectedTool) {
+      throw new Error(
+        `No compatible AWS MCP tool found. Tried: ${toolCandidates.join(', ')}. Available: ${Array.from(availableToolNames).join(', ')}`
+      );
+    }
+
+    let lastError: any = null;
+    for (const args of argsCandidates) {
+      try {
+        return await client.callTool({
+          name: selectedTool,
+          arguments: args,
+        });
+      } catch (error: any) {
+        lastError = error;
+      }
+    }
+
+    throw new Error(
+      `AWS MCP tool '${selectedTool}' failed for all argument variants. Last error: ${lastError?.message || 'unknown'}`
+    );
+  }
+
+  async validateAwsS3Bucket(bucketName: string, region: string): Promise<{ exists: boolean; error?: string }> {
+    try {
+      const result = await this.callFirstAvailableAwsTool(
+        ['aws_s3_list_buckets', 'aws_list_s3_buckets', 's3_list_buckets', 'list_s3_buckets'],
+        [{ region }, { aws_region: region }, {}]
+      );
+
+      const payloads = this.extractMcpJsonPayload(result);
+      const buckets: any[] = [];
+      for (const payload of payloads) {
+        if (Array.isArray(payload)) {
+          buckets.push(...payload);
+        } else if (Array.isArray(payload?.Buckets)) {
+          buckets.push(...payload.Buckets);
+        } else if (Array.isArray(payload?.buckets)) {
+          buckets.push(...payload.buckets);
+        } else if (payload && typeof payload === 'object') {
+          buckets.push(payload);
+        }
+      }
+
+      const exists = buckets.some((bucket) => {
+        const name = bucket?.Name || bucket?.name || bucket?.bucketName || bucket?.bucket_name;
+        return typeof name === 'string' && name === bucketName;
+      });
+      return { exists };
+    } catch (error: any) {
+      return { exists: false, error: error?.message || 'Failed to validate S3 bucket via AWS MCP' };
+    }
+  }
+
+  async validateAwsDynamoDbTable(tableName: string, region: string): Promise<{ exists: boolean; error?: string }> {
+    try {
+      const result = await this.callFirstAvailableAwsTool(
+        ['aws_dynamodb_list_tables', 'aws_list_dynamodb_tables', 'dynamodb_list_tables', 'list_dynamodb_tables'],
+        [{ region }, { aws_region: region }, {}]
+      );
+
+      const payloads = this.extractMcpJsonPayload(result);
+      const tableNames: string[] = [];
+      for (const payload of payloads) {
+        if (Array.isArray(payload)) {
+          for (const item of payload) {
+            if (typeof item === 'string') tableNames.push(item);
+            else if (item?.name) tableNames.push(item.name);
+            else if (item?.TableName) tableNames.push(item.TableName);
+          }
+        } else if (Array.isArray(payload?.TableNames)) {
+          tableNames.push(...payload.TableNames);
+        } else if (Array.isArray(payload?.tableNames)) {
+          tableNames.push(...payload.tableNames);
+        } else if (payload?.name) {
+          tableNames.push(payload.name);
+        } else if (payload?.TableName) {
+          tableNames.push(payload.TableName);
+        }
+      }
+
+      return { exists: tableNames.includes(tableName) };
+    } catch (error: any) {
+      return { exists: false, error: error?.message || 'Failed to validate DynamoDB table via AWS MCP' };
+    }
+  }
+
+  async createAwsS3Bucket(bucketName: string, region: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      await this.callFirstAvailableAwsTool(
+        ['aws_s3_create_bucket', 'aws_create_s3_bucket', 's3_create_bucket', 'create_s3_bucket'],
+        [
+          { bucket_name: bucketName, region },
+          { name: bucketName, region },
+          { bucket: bucketName, region },
+        ]
+      );
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message || 'Failed to create S3 bucket via AWS MCP' };
+    }
+  }
+
+  async createAwsDynamoDbLockTable(tableName: string, region: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      await this.callFirstAvailableAwsTool(
+        ['aws_dynamodb_create_table', 'aws_create_dynamodb_table', 'dynamodb_create_table', 'create_dynamodb_table'],
+        [
+          {
+            table_name: tableName,
+            region,
+            key_schema: [{ AttributeName: 'LockID', KeyType: 'HASH' }],
+            attribute_definitions: [{ AttributeName: 'LockID', AttributeType: 'S' }],
+            billing_mode: 'PAY_PER_REQUEST',
+          },
+          {
+            name: tableName,
+            region,
+            hash_key: 'LockID',
+            hash_key_type: 'S',
+            billing_mode: 'PAY_PER_REQUEST',
+          },
+          {
+            tableName,
+            region,
+            partitionKey: 'LockID',
+          },
+        ]
+      );
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message || 'Failed to create DynamoDB table via AWS MCP' };
+    }
+  }
+
   // Verify Service Principal permissions by testing Azure access
   // This is a simple check - we test if the Service Principal can access Azure
   // Role assignment is a CLI task that should be done by administrators manually
@@ -2730,6 +3407,36 @@ The Service Principal needs the following roles assigned at the subscription lev
       'HashiCorp Checkpoint API, HashiCorp Releases API, and GitHub Releases API all failed. ' +
       'Check network connectivity or supply the version manually.'
     );
+  }
+
+  /** Disconnect only the Azure resources client so the next request spawns a fresh subprocess with correct credentials */
+  async disconnectAzureClient(): Promise<void> {
+    const key = 'azure-resources';
+    const entry = this.clients.get(key);
+    if (entry) {
+      try {
+        await entry.client.close();
+        entry.process.kill();
+      } catch {
+        // ignore cleanup errors
+      }
+      this.clients.delete(key);
+    }
+  }
+
+  /** Disconnect only the AWS resources client so the next request spawns a fresh subprocess with current credentials */
+  async disconnectAwsClient(): Promise<void> {
+    const key = 'aws-resources';
+    const entry = this.clients.get(key);
+    if (entry) {
+      try {
+        await entry.client.close();
+        entry.process.kill();
+      } catch {
+        // ignore cleanup errors
+      }
+      this.clients.delete(key);
+    }
   }
 
   async cleanup() {

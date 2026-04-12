@@ -21,6 +21,11 @@ interface ScanSummary {
   passPercentage: number;
 }
 
+interface ComplianceStandard {
+  framework: string;
+  control: string;
+}
+
 interface FailedCheck {
   checkId: string;
   checkName: string;
@@ -30,12 +35,17 @@ interface FailedCheck {
   reason?: string;
   evaluatedKeys?: string[];
   checkResult?: string;
+  severity?: 'critical' | 'high' | 'medium' | 'low' | null;
+  autoFixable?: boolean;
+  fixComplexity?: string;
+  complianceStandards?: ComplianceStandard[];
 }
 
 interface PassedCheck {
   checkId: string;
   checkName: string;
   resource: string;
+  severity?: string | null;
 }
 
 interface FixedCheck {
@@ -59,6 +69,7 @@ interface CheckovScannerProps {
   onScanComplete?: (result: ScanResult) => void;
   onScanStart?: () => void;
   framework?: 'terraform' | 'kubernetes' | 'docker'; // Add framework prop
+  moduleApproach?: 'child-module' | 'standalone-root' | 'aggregated-root' | null;
   onFixesApplied?: (diffs: Array<{ fileName: string; fixedContent: string }>) => void;
   onFixesApproved?: (diffs: Array<{ fileName: string; fixedContent: string }>) => void;
   onFixResult?: (payload: {
@@ -68,6 +79,10 @@ interface CheckovScannerProps {
     failureDetails: Array<{ checkId: string; checkName: string; resource: string; file: string; reason: string }>;
   }) => void;
   showDiffView?: boolean;
+  /** Called when the fix operation starts (so parent can show a loading terminal) */
+  onFixStart?: () => void;
+  /** Called when the fix operation ends (so parent can restore the results view) */
+  onFixComplete?: () => void;
 }
 
 export interface CheckovScannerRef {
@@ -83,13 +98,17 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
     onScanComplete,
     onScanStart,
     framework = 'terraform',
+    moduleApproach,
     onFixesApplied,
     onFixesApproved,
     onFixResult,
     showDiffView = true,
+    onFixStart,
+    onFixComplete,
   }, ref) => {
   const [isScanning, setIsScanning] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [preScanResult, setPreScanResult] = useState<ScanResult | null>(null); // baseline before fixes
   const [isFixing, setIsFixing] = useState(false);
   const [selectedChecks, setSelectedChecks] = useState<Set<string>>(new Set());
   const [fixedChecks, setFixedChecks] = useState<FixedCheck[]>([]);
@@ -97,6 +116,8 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
   const [fileDiffs, setFileDiffs] = useState<Array<{ fileName: string; originalContent: string; fixedContent: string }>>([]);
   const [fixesApproved, setFixesApproved] = useState(false);
   const [hasUnapprovedFixes, setHasUnapprovedFixes] = useState(false);
+  // After the fix→approve→re-scan cycle completes, lock the UI to read-only (no more fixes)
+  const [scanCycleComplete, setScanCycleComplete] = useState(false);
   const [latestFixFailures, setLatestFixFailures] = useState<Array<{ checkId: string; checkName: string; resource: string; file: string; reason: string }>>([]);
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -185,6 +206,8 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
       });
       
       setScanResult(result);
+      // Store the very first scan as the pre-fix baseline for before/after comparison
+      setPreScanResult(prev => prev ?? result);
       onScanComplete?.(result);
       
       // Handle different result scenarios
@@ -249,11 +272,16 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
     setFileDiffs([]);
     await queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
     await queryClient.refetchQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+    // Notify parent for file refresh
+    onFixesApproved?.(diffsToReport);
+    // No re-scan — fixes are approved, mark cycle complete and let pipeline advance
+    setScanCycleComplete(true);
     toast({
       title: "Fixes Approved",
-      description: "You can now commit the code. Please run a security scan before committing.",
+      description: "Security fixes applied to your code. Complete the build when ready.",
     });
-    onFixesApproved?.(diffsToReport);
+    // Signal pipeline that security is done (onScanComplete drives pipeline advancement)
+    onScanComplete?.(scanResult);
   };
 
   useImperativeHandle(ref, () => ({
@@ -283,6 +311,13 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
     return <XCircle className="w-6 h-6 text-red-600" />;
   };
 
+  const severityConfig: Record<string, { label: string; color: string; bg: string; border: string }> = {
+    critical: { label: 'CRITICAL', color: 'text-rose-700 dark:text-rose-300', bg: 'bg-rose-100 dark:bg-rose-950', border: 'border-rose-300 dark:border-rose-700' },
+    high:     { label: 'HIGH',     color: 'text-red-700 dark:text-red-300',   bg: 'bg-red-100 dark:bg-red-950',   border: 'border-red-300 dark:border-red-700' },
+    medium:   { label: 'MEDIUM',   color: 'text-amber-700 dark:text-amber-300', bg: 'bg-amber-100 dark:bg-amber-950', border: 'border-amber-300 dark:border-amber-700' },
+    low:      { label: 'LOW',      color: 'text-blue-700 dark:text-blue-300', bg: 'bg-blue-100 dark:bg-blue-950', border: 'border-blue-300 dark:border-blue-700' },
+  };
+
   const fixIssues = async () => {
     if (!scanResult || scanResult.failedChecks.length === 0) {
       toast({
@@ -308,6 +343,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
     );
 
     setIsFixing(true);
+    onFixStart?.();
     try {
       // Capture pre-fix snapshot so we can build fallback diffs
       // when backend does not return fileDiffs for some frameworks.
@@ -353,9 +389,13 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
         setFixesApproved(false);
         onFixesApplied?.(resolvedDiffs);
       } else if (Array.isArray(result.fixedFiles) && result.fixedFiles.length > 0) {
+        // Even without visual diffs, still require approval so the user
+        // controls when the pipeline-driving re-scan fires.
+        setHasUnapprovedFixes(true);
+        setFixesApproved(false);
         toast({
           title: "Fixes applied",
-          description: "Changes were applied, but no file diff preview is available for approval.",
+          description: "Changes were applied. Click 'Approve Changes' to trigger a verification re-scan.",
         });
       }
       
@@ -600,206 +640,63 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
         );
       }
 
-      // Wait a moment for files to be fully updated, then re-run scan to verify fixes
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Increased delay for Checkov verification
-      
-      // Try to re-run scan to verify fixes (but don't fail if it errors)
-      let newScanResult: ScanResult | null = null;
-      try {
-        const scanEndpoint = framework === 'kubernetes' 
-          ? `/api/sessions/${sessionId}/scan-kubernetes`
-          : `/api/sessions/${sessionId}/scan`;
-        const scanResponse = await apiRequest('POST', scanEndpoint);
-        newScanResult = await scanResponse.json() as ScanResult;
-        
-        // If re-scan succeeded, verify which checks actually pass now
-        if (newScanResult && newScanResult.summary.total > 0) {
-          // Create sets for matching by checkId:resource
-          const newPassedCheckKeys = new Set(
-            newScanResult.passedChecks?.map((c: any) => c.checkId + ':' + c.resource) || []
-          );
-          const newFailedCheckKeys = new Set(
-            newScanResult.failedChecks.map(c => c.checkId + ':' + c.resource)
-          );
-          
-          // Update verification status for fixed checks
-          newlyFixedChecks.forEach((fixedCheck, idx) => {
-            const checkKey = fixedCheck.checkId + ':' + fixedCheck.resource;
-            if (newPassedCheckKeys.has(checkKey) || !newFailedCheckKeys.has(checkKey)) {
-              // Verified as fixed
-              newlyFixedChecks[idx].verified = true;
-            } else if (newFailedCheckKeys.has(checkKey)) {
-              // Still failing - move from successfullyFixed to stillFailing
-              const successIdx = successfullyFixed.indexOf(checkKey);
-              if (successIdx >= 0) {
-                successfullyFixed.splice(successIdx, 1);
-                stillFailing.push(checkKey);
-              }
-            }
-          });
-        }
-      } catch (scanError: any) {
-        // Re-scan failed (e.g., parsing errors) - but we still show fixed checks
-        console.warn('Re-scan after fix failed:', scanError);
-        toast({
-          title: "Fix Applied",
-          description: "Fixes were applied, but re-scan failed. Fixed checks are shown but not yet verified.",
-          variant: "default",
-        });
-      }
-      
-      // Add newly fixed checks to the fixed list
+      // Add newly fixed checks to the fixed list (unverified — will be verified on re-scan after approve)
       if (newlyFixedChecks.length > 0) {
         setFixedChecks(prev => {
-          // Avoid duplicates - check if checkId:resource combination already exists
           const existingKeys = new Set(prev.map(f => f.checkId + ':' + f.resource));
           const uniqueNew = newlyFixedChecks.filter(f => !existingKeys.has(f.checkId + ':' + f.resource));
-          console.log('🟢 Adding to Fixed tab:', uniqueNew.map((check) => `${check.checkId}:${check.resource}`));
+          console.log('🟢 Adding to Fixed tab (unverified):', uniqueNew.map((check) => `${check.checkId}:${check.resource}`));
           return [...prev, ...uniqueNew];
         });
-        
-        // Switch to fixed tab to show the newly fixed checks
         setActiveTab('fixed');
       }
-      
-      // Update scan result with new data (remove fixed checks from failed list)
-      if (newScanResult && newScanResult.summary.total > 0) {
-        // Filter out checks that are now fixed (match by checkId:resource)
-        const remainingFailed = newScanResult.failedChecks.filter(check => {
-          const checkKey = check.checkId + ':' + check.resource;
-          return !successfullyFixed.includes(checkKey);
-        });
-        
-        // IMPORTANT: The new scan result shows the CURRENT state after fixes
-        // So newScanResult.summary.passed already includes the fixed checks
-        // But we need to ensure the total includes all checks (original total)
-        const originalTotal = scanResult?.summary?.total || newScanResult.summary.total;
-        const currentPassed = Number(newScanResult.summary.passed) || 0;
-        const currentFailed = remainingFailed.length;
-        const currentSkipped = Number(newScanResult.summary.skipped) || 0;
-        
-        // Recalculate summary - use the new scan's passed count (which includes fixed checks)
-        const updatedSummary = {
-          ...newScanResult.summary,
-          passed: currentPassed,
-          failed: currentFailed,
-          skipped: currentSkipped,
-          total: originalTotal, // Keep original total to show progress
-          passPercentage: 0 // Will calculate below
-        };
-        
-        // Calculate pass percentage based on original total
-        updatedSummary.passPercentage = originalTotal > 0
-          ? Math.round((currentPassed / originalTotal) * 100)
-          : 0;
-        
-        console.log('🔄 Updated scan result after fixes:', {
-          originalTotal: originalTotal,
-          passed: updatedSummary.passed,
-          failed: updatedSummary.failed,
-          total: updatedSummary.total,
-          passPercentage: updatedSummary.passPercentage,
-          fixedCount: successfullyFixed.length,
-          newScanPassed: currentPassed
-        });
-        
-        setScanResult({
-          ...newScanResult,
-          summary: updatedSummary,
-          failedChecks: remainingFailed
-        });
-        
-        // Update parent component with new summary
-        onScanComplete?.({
-          ...newScanResult,
-          summary: updatedSummary,
-          failedChecks: remainingFailed
-        });
-      } else if (newlyFixedChecks.length > 0 && scanResult) {
-        // If re-scan failed but we have fixed checks, update the failed list and summary
+
+      // Update the local failed list to remove checks that were fixed (optimistic)
+      if (scanResult && successfullyFixed.length > 0) {
         const remainingFailed = scanResult.failedChecks.filter(check => {
           const checkKey = check.checkId + ':' + check.resource;
           return !successfullyFixed.includes(checkKey);
         });
-        
-        // Recalculate summary: add fixed checks to passed count
         const fixedCount = successfullyFixed.length;
         const originalTotal = scanResult.summary.total || 0;
         const originalPassed = Number(scanResult.summary.passed) || 0;
         const originalSkipped = Number(scanResult.summary.skipped) || 0;
-        
-        // Add fixed checks to passed count
         const newPassed = originalPassed + fixedCount;
         const newFailed = remainingFailed.length;
-        // Keep original total to show progress against initial scan
         const newTotal = originalTotal > 0 ? originalTotal : (newPassed + newFailed + originalSkipped);
         const newPassPercentage = newTotal > 0 ? Math.round((newPassed / newTotal) * 100) : 0;
-        
-        console.log('🔄 Updated scan result (re-scan failed):', {
-          originalTotal: originalTotal,
-          originalPassed: originalPassed,
-          fixedCount: fixedCount,
-          newPassed: newPassed,
-          newFailed: newFailed,
-          newTotal: newTotal,
-          passPercentage: newPassPercentage
+
+        console.log('🔄 Updated local scan result after fix (no re-scan yet):', {
+          originalTotal, fixedCount, newPassed, newFailed, newTotal, passPercentage: newPassPercentage
         });
-        
-        const updatedSummary = {
-          ...scanResult.summary,
-          passed: newPassed,
-          failed: newFailed,
-          total: newTotal,
-          passPercentage: newPassPercentage
-        };
-        
+
         setScanResult({
           ...scanResult,
-          summary: updatedSummary,
-          failedChecks: remainingFailed
-        });
-        
-        // Update parent component
-        onScanComplete?.({
-          ...scanResult,
-          summary: updatedSummary,
+          summary: { ...scanResult.summary, passed: newPassed, failed: newFailed, total: newTotal, passPercentage: newPassPercentage },
           failedChecks: remainingFailed
         });
       }
-      
-      // Show detailed feedback
+
+      // NOTE: Do NOT call onScanComplete here — that drives the pipeline.
+      // The user must approve the diffs first, then approveFixes() triggers a proper re-scan
+      // which calls onScanComplete and advances the pipeline.
+
       if (successfullyFixed.length > 0) {
         toast({
-          title: "Fixes Verified",
-          description: successfullyFixed.length + " check(s) were fixed and now pass Checkov validation. View them in the 'Fixed' tab.",
+          title: "Fixes Applied",
+          description: successfullyFixed.length + " check(s) fixed. Review the changes below and approve to trigger a verification re-scan.",
           variant: "default",
         });
       }
-      
+
       if (stillFailing.length > 0) {
-        const stillFailingMsg = stillFailing.length + " check(s) were updated but still fail. The code was modified but the security issue may require manual attention.";
+        const stillFailingMsg = stillFailing.length + " check(s) were updated but may still fail. Review and approve the changes.";
         toast({
           title: "Some Fixes Need Review",
           description: stillFailingMsg,
           variant: "destructive",
         });
         console.warn('Checks that still fail after fix:', stillFailing);
-      }
-      
-      // Show overall scan results
-      if (newScanResult && newScanResult.summary.total === 0) {
-        toast({
-          title: "Scan complete - No resources found",
-          description: framework === 'kubernetes' 
-            ? "Checkov did not find any Kubernetes resources to scan."
-            : "Checkov did not find any Terraform resources to scan.",
-          variant: "destructive",
-        });
-      } else if (newScanResult) {
-        toast({
-          title: "Security scan complete",
-          description: newScanResult.summary.passPercentage + "% of checks passed (" + newScanResult.summary.passed + "/" + newScanResult.summary.total + " total)",
-        });
       }
     } catch (error: any) {
       let errorMessage = error?.message || "Failed to fix issues";
@@ -823,6 +720,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
       });
     } finally {
       setIsFixing(false);
+      onFixComplete?.();
     }
   };
 
@@ -865,6 +763,17 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
         <div className="space-y-4">
           {/* Handle case when no resources were scanned */}
           {scanResult.summary.total === 0 ? (
+            moduleApproach === 'aggregated-root' ? (
+              <Alert className="border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                <AlertTitle className="text-emerald-900 dark:text-emerald-100">Security Scan Complete — No Direct Resources</AlertTitle>
+                <AlertDescription className="text-emerald-800 dark:text-emerald-200">
+                  Aggregated root modules contain <code className="bg-emerald-100 dark:bg-emerald-900 px-1 rounded">module</code> calls
+                  that reference child modules. Security checks are applied when each child module is built individually.
+                  The root orchestration layer has no direct resources to scan.
+                </AlertDescription>
+              </Alert>
+            ) : (
             <Alert variant="destructive">
               <AlertTriangle className="w-4 h-4" />
               <AlertTitle>No Resources Scanned</AlertTitle>
@@ -903,15 +812,52 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                       <li>Files are empty or contain invalid Terraform syntax</li>
                       <li>Files were not generated or saved correctly</li>
                     </ul>
-                    <p className="mt-2 text-sm">
-                      Please ensure you have generated Terraform files before running the scan.
-                    </p>
                   </>
                 )}
               </AlertDescription>
             </Alert>
+            )
           ) : (
             <>
+              {/* Before / After improvement card — shown after a re-scan following fixes */}
+              {preScanResult && scanResult && preScanResult !== scanResult && (
+                <div className="rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                    <h3 className="font-semibold text-emerald-900 dark:text-emerald-100">Security Scan Improvement</h3>
+                  </div>
+                  <div className="grid grid-cols-3 gap-4 text-center text-sm">
+                    <div className="rounded-md bg-white dark:bg-zinc-800 border border-red-200 dark:border-red-800 p-3">
+                      <p className="text-xs text-muted-foreground mb-1">Before Fix</p>
+                      <p className="text-2xl font-bold text-red-600">{Number(preScanResult.summary?.passPercentage) || 0}%</p>
+                      <p className="text-xs text-red-500">{Number(preScanResult.summary?.failed) || 0} issues</p>
+                    </div>
+                    <div className="flex items-center justify-center">
+                      <div className="text-center">
+                        <p className="text-2xl text-emerald-600">→</p>
+                        <p className="text-[10px] text-muted-foreground mt-1">
+                          {(() => {
+                            const gain = (Number(scanResult.summary?.passPercentage) || 0) - (Number(preScanResult.summary?.passPercentage) || 0);
+                            const fixed = (Number(preScanResult.summary?.failed) || 0) - (Number(scanResult.summary?.failed) || 0);
+                            return `+${gain}%  ·  ${fixed} fixed`;
+                          })()}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="rounded-md bg-white dark:bg-zinc-800 border border-emerald-200 dark:border-emerald-800 p-3">
+                      <p className="text-xs text-muted-foreground mb-1">After Fix</p>
+                      <p className="text-2xl font-bold text-emerald-600">{Number(scanResult.summary?.passPercentage) || 0}%</p>
+                      <p className="text-xs text-emerald-500">{Number(scanResult.summary?.failed) || 0} remaining</p>
+                    </div>
+                  </div>
+                  {Number(scanResult.summary?.failed) > 0 && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 text-center">
+                      {Number(scanResult.summary?.failed)} issue(s) still require manual remediation
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Summary Card */}
               <Alert>
                 <div className="flex items-center gap-3">
@@ -945,6 +891,53 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                 </div>
               </Alert>
 
+              {/* Severity + Auto-fix breakdown */}
+              {scanResult.failedChecks.length > 0 && (() => {
+                const autoFixCount = scanResult.failedChecks.filter(c => c.autoFixable).length;
+                const manualCount = scanResult.failedChecks.length - autoFixCount;
+                const sevCounts: Record<string, number> = {};
+                scanResult.failedChecks.forEach(c => {
+                  const s = c.severity || 'medium';
+                  sevCounts[s] = (sevCounts[s] || 0) + 1;
+                });
+                const allStandards = new Set<string>();
+                scanResult.failedChecks.forEach(c => c.complianceStandards?.forEach(s => allStandards.add(s.framework)));
+                return (
+                  <div className="rounded-lg border p-3 space-y-2">
+                    <div className="flex items-center gap-3 flex-wrap text-xs">
+                      <span className="font-semibold text-sm">Breakdown:</span>
+                      {(['critical', 'high', 'medium', 'low'] as const).map(sev => {
+                        const count = sevCounts[sev] || 0;
+                        if (count === 0) return null;
+                        const cfg = severityConfig[sev];
+                        return (
+                          <span key={sev} className={`px-1.5 py-0.5 rounded border font-bold ${cfg.color} ${cfg.bg} ${cfg.border}`}>
+                            {count} {cfg.label}
+                          </span>
+                        );
+                      })}
+                      <span className="text-muted-foreground">|</span>
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700 font-medium">
+                        {autoFixCount} auto-fixable
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-950 text-orange-700 dark:text-orange-300 border border-orange-300 dark:border-orange-700 font-medium">
+                        {manualCount} manual
+                      </span>
+                    </div>
+                    {allStandards.size > 0 && (
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] text-muted-foreground font-medium">Standards:</span>
+                        {Array.from(allStandards).sort().map(fw => (
+                          <span key={fw} className="text-[10px] px-1 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 font-mono">
+                            {fw}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Failed and Fixed Checks with Tabs */}
               <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'failed' | 'fixed')} className="w-full">
                 <TabsList className="grid w-full grid-cols-2">
@@ -964,19 +957,38 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                       <div className="flex items-center justify-between mb-2">
                         <h4 className="text-sm font-semibold flex items-center gap-2">
                           <XCircle className="w-4 h-4 text-red-600" />
-                          Failed Checks ({scanResult.failedChecks.length})
+                          {scanCycleComplete ? 'Remaining Issues (manual remediation)' : `Failed Checks (${scanResult.failedChecks.length})`}
                         </h4>
+                        {!scanCycleComplete && (
                         <div className="flex gap-2">
                           <Button
                             variant="ghost"
                             size="sm"
+                            data-testid="btn-select-all-checks"
                             onClick={() => {
-                              setSelectedChecks(new Set(scanResult.failedChecks.map(c => selectionKey(c))));
+                              const autoFixable = scanResult.failedChecks.filter(c => c.autoFixable);
+                              if (autoFixable.length > 0) {
+                                setSelectedChecks(new Set(autoFixable.map(c => selectionKey(c))));
+                              } else {
+                                setSelectedChecks(new Set(scanResult.failedChecks.map(c => selectionKey(c))));
+                              }
                             }}
                             className="text-xs h-7"
                           >
-                            Select All
+                            {scanResult.failedChecks.some(c => c.autoFixable) ? 'Select Auto-fixable' : 'Select All'}
                           </Button>
+                          {scanResult.failedChecks.some(c => c.autoFixable) && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setSelectedChecks(new Set(scanResult.failedChecks.map(c => selectionKey(c))));
+                              }}
+                              className="text-xs h-7"
+                            >
+                              Select All
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="sm"
@@ -989,6 +1001,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                             <Button
                               variant="outline"
                               size="sm"
+                              data-testid="btn-fix-selected"
                               onClick={fixIssues}
                               disabled={isFixing || isScanning}
                               className="text-xs h-7"
@@ -1004,6 +1017,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                             </Button>
                           )}
                         </div>
+                        )}
                       </div>
                       <ScrollArea className="h-[400px] rounded-md border">
                         <div className="p-4 space-y-3">
@@ -1025,6 +1039,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                                     });
                                   }}
                                 >
+                                  {!scanCycleComplete && (
                                   <Checkbox
                                     checked={moduleSelected ? true : modulePartial ? "indeterminate" : false}
                                     onCheckedChange={(checked) => {
@@ -1037,6 +1052,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                                     }}
                                     onClick={(e) => e.stopPropagation()}
                                   />
+                                  )}
                                   {isExpanded ? (
                                     <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                                   ) : (
@@ -1053,12 +1069,14 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                                     <div className="divide-y">
                                       {checks.map((check, idx) => {
                                         const isSelected = selectedChecks.has(selectionKey(check));
+                                        const sev = check.severity ? severityConfig[check.severity] : null;
                                         return (
                                           <div
                                             key={idx}
                                             className={"p-3 " + (isSelected ? 'bg-blue-50 dark:bg-blue-950' : '')}
                                           >
                                             <div className="flex items-start gap-3">
+                                              {!scanCycleComplete && (
                                               <Checkbox
                                                 checked={isSelected}
                                                 onCheckedChange={(checked) => {
@@ -1069,16 +1087,46 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                                                 }}
                                                 className="mt-0.5"
                                               />
+                                              )}
                                               <div className="flex-1 min-w-0">
                                                 <div className="flex items-start justify-between gap-2">
                                                   <p className="font-medium text-sm">{check.checkName}</p>
-                                                  <Badge variant="destructive" className="text-xs flex-shrink-0">
-                                                    {check.checkId}
-                                                  </Badge>
+                                                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                                                    {sev && (
+                                                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${sev.color} ${sev.bg} ${sev.border}`}>
+                                                        {sev.label}
+                                                      </span>
+                                                    )}
+                                                    <Badge variant="destructive" className="text-xs">
+                                                      {check.checkId}
+                                                    </Badge>
+                                                  </div>
                                                 </div>
                                                 <p className="text-xs text-muted-foreground font-mono mt-0.5">
                                                   {check.resource}
                                                 </p>
+                                                {/* Auto-fix vs Manual label */}
+                                                <div className="flex items-center gap-1.5 mt-1">
+                                                  {check.autoFixable ? (
+                                                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700">
+                                                      Auto-fixable
+                                                    </span>
+                                                  ) : (
+                                                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-950 text-orange-700 dark:text-orange-300 border border-orange-300 dark:border-orange-700">
+                                                      Manual fix {check.fixComplexity ? `(${check.fixComplexity})` : ''}
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                {/* Compliance standards */}
+                                                {check.complianceStandards && check.complianceStandards.length > 0 && (
+                                                  <div className="flex flex-wrap gap-1 mt-1.5">
+                                                    {check.complianceStandards.map((std, si) => (
+                                                      <span key={si} className="text-[9px] px-1 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 font-mono">
+                                                        {std.framework} {std.control}
+                                                      </span>
+                                                    ))}
+                                                  </div>
+                                                )}
                                                 {check.reason && (
                                                   <div className="text-xs mt-2 p-2 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded">
                                                     <p className="font-semibold text-red-700 dark:text-red-400 mb-1">
@@ -1265,6 +1313,7 @@ const CheckovScanner = forwardRef<CheckovScannerRef, CheckovScannerProps>(
                         {!fixesApproved && (
                           <div className="mt-4 flex gap-2">
                             <Button
+                              data-testid="btn-approve-changes"
                               onClick={() => {
                                 void approveFixes();
                               }}

@@ -2,14 +2,15 @@
  * Kustomize Validator
  * Builds and validates Kustomize overlays, returning rendered manifests and errors.
  */
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import yaml from 'js-yaml';
 
-const execAsync = promisify(exec);
+// Use execFile (not exec) so arguments are never passed through a shell — prevents command injection
+const execFileAsync = promisify(execFile);
 
 export interface KustomizeBuildResult {
   success: boolean;
@@ -26,7 +27,7 @@ export interface KustomizeBuildResult {
  */
 async function isKustomizeAvailable(): Promise<boolean> {
   try {
-    await execAsync('kustomize version', { timeout: 5000 });
+    await execFileAsync('kustomize', ['version'], { timeout: 5000 });
     return true;
   } catch {
     return false;
@@ -83,8 +84,10 @@ export async function buildKustomize(
 
   if (kustomizeAvailable) {
     try {
-      const { stdout, stderr } = await execAsync(
-        `kustomize build "${kustomizationDir}"`,
+      // execFileAsync never spawns a shell — kustomizationDir is passed as a plain argument,
+      // so path traversal / shell metacharacters cannot be injected.
+      const { stdout, stderr } = await execFileAsync(
+        'kustomize', ['build', kustomizationDir],
         { timeout: 30000 }
       );
       renderedYAML = stdout;
@@ -95,8 +98,8 @@ export async function buildKustomize(
   } else {
     // Fallback: try kubectl kustomize
     try {
-      const { stdout, stderr } = await execAsync(
-        `kubectl kustomize "${kustomizationDir}"`,
+      const { stdout, stderr } = await execFileAsync(
+        'kubectl', ['kustomize', kustomizationDir],
         { timeout: 30000 }
       );
       renderedYAML = stdout;

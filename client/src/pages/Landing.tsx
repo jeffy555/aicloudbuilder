@@ -11,7 +11,8 @@ import {
   ArrowRight,
   FileChartPie,
   DollarSign,
-  Sparkles
+  Sparkles,
+  RefreshCw
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -205,7 +206,7 @@ export default function Landing() {
                 to="/terraform"
                 icon={<FileCode className="w-6 h-6" />}
                 title="Terraform"
-                description="Generate infrastructure as code for Azure, AWS, or GCP using natural language"
+                description="Plain English → secure, cost-estimated, multi-cloud Terraform — scanned & committed in one workflow"
                 available={true}
                 disabled={!isConfigured}
                 gradient="from-purple-500/10 via-blue-500/10 to-purple-500/10"
@@ -215,7 +216,7 @@ export default function Landing() {
                 to="/kubernetes"
                 icon={<SettingsIcon className="w-6 h-6" />}
                 title="Kubernetes"
-                description="Create Kubernetes manifests and deployment configurations with AI assistance"
+                description="Describe your workload → security-scanned, best-practice validated Kubernetes manifests + Helm charts — committed in one workflow"
                 available={true}
                 disabled={!isConfigured}
                 gradient="from-blue-500/10 via-cyan-500/10 to-blue-500/10"
@@ -225,7 +226,7 @@ export default function Landing() {
                 to="/docker"
                 icon={<Package className="w-6 h-6" />}
                 title="Docker"
-                description="Generate optimized and secure Dockerfiles based on software requirements with AI assistance"
+                description="Scan your repo, detect stack & runtime — generate optimized, security-scanned Dockerfile + Docker Compose and commit in one click"
                 available={true}
                 disabled={!isConfigured}
                 gradient="from-cyan-500/10 via-teal-500/10 to-cyan-500/10"
@@ -247,10 +248,20 @@ export default function Landing() {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 lg:gap-6">
               <FeatureCard
+                to="/migrateops"
+                icon={<RefreshCw className="w-6 h-6" />}
+                title="MigrateOps"
+                description="Reverse-engineer live cloud environments into clean, managed Terraform code with auto-generated state imports"
+                available={true}
+                disabled={!isConfigured}
+                gradient="from-indigo-500/10 via-purple-500/10 to-indigo-500/10"
+                index={0}
+              />
+              <FeatureCard
                 to="/archme"
                 icon={<Network className="w-6 h-6" />}
                 title="ArchMe"
-                description="Generate architecture diagrams from natural language requirements for Azure, AWS, GCP, and multi-cloud"
+                description="Describe your system → cloud-native diagram + full Terraform & K8s code for Azure, AWS, GCP — scanned, priced, and committed"
                 available={true}
                 disabled={!isConfigured}
                 gradient="from-green-500/10 via-emerald-500/10 to-green-500/10"
@@ -284,7 +295,7 @@ export default function Landing() {
                 to="/valuation"
                 icon={<DollarSign className="w-6 h-6" />}
                 title="Valuation"
-                description="Analyze live Azure resources and identify cost optimization opportunities with SKU recommendations"
+                description="Connect your Azure subscription — see live costs for every resource and get specific SKU rightsizing recommendations with % savings"
                 available={true}
                 disabled={!config?.hasAzureCloud}
                 gradient="from-emerald-500/10 via-green-500/10 to-emerald-500/10"
@@ -294,7 +305,7 @@ export default function Landing() {
                 to="/scoreme"
                 icon={<FileChartPie className="w-6 h-6" />}
                 title="ScoreMe"
-                description="Confidence report for IaC/automation files with actionable remediation hints"
+                description="Point at any IaC repo — get a 4-pillar weighted confidence score, Checkov findings, and fix-ready remediation in under 3 minutes"
                 available={true}
                 disabled={!isConfigured}
                 gradient="from-pink-500/10 via-rose-500/10 to-pink-500/10"

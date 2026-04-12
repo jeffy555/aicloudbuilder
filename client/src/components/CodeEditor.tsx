@@ -23,6 +23,15 @@ interface CodeEditorProps {
   onFileSelect?: (fileName: string) => void;
 }
 
+/** One row per path; last occurrence wins (matches server "newest" dedupe). */
+function dedupeFilesByPath(files: CodeFile[]): CodeFile[] {
+  const map = new Map<string, CodeFile>();
+  for (const f of files) {
+    map.set(f.name.toLowerCase(), f);
+  }
+  return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // Group files by folder for better organization
 function groupFilesByFolder(files: CodeFile[]): Map<string, CodeFile[]> {
   const groups = new Map<string, CodeFile[]>();
@@ -42,21 +51,22 @@ function groupFilesByFolder(files: CodeFile[]): Map<string, CodeFile[]> {
 
 export default function CodeEditor({ files, onFileChange, existingFiles = [], activeFile, onFileSelect }: CodeEditorProps) {
   const { toast } = useToast();
-  const [selectedFile, setSelectedFile] = useState<string>(files[0]?.name || '');
+  const filesDeduped = dedupeFilesByPath(files);
+  const [selectedFile, setSelectedFile] = useState<string>(filesDeduped[0]?.name || '');
   const [justCopied, setJustCopied] = useState(false);
   useEffect(() => {
     setSelectedFile((prev) => {
-      if (activeFile && files.some((file) => file.name === activeFile)) {
+      if (activeFile && filesDeduped.some((file) => file.name === activeFile)) {
         return activeFile;
       }
-      if (files.some((file) => file.name === prev)) {
+      if (filesDeduped.some((file) => file.name === prev)) {
         return prev;
       }
-      return files[0]?.name || '';
+      return filesDeduped[0]?.name || '';
     });
-  }, [activeFile, files]);
-  const fileGroups = groupFilesByFolder(files);
-  const currentFile = files.find(f => f.name === selectedFile);
+  }, [activeFile, filesDeduped]);
+  const fileGroups = groupFilesByFolder(filesDeduped);
+  const currentFile = filesDeduped.find(f => f.name === selectedFile);
   const isExistingFile = currentFile ? existingFiles.includes(currentFile.name) : false;
 
   const handleCopyCurrentFile = async () => {

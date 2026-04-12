@@ -42,29 +42,52 @@ async function getAzureAccessToken(): Promise<string> {
 }
 
 /**
+ * Azure REST api-version per resource provider — generic versions often return 400 or empty template.
+ * MigrateOps needs full `properties` (e.g. Container Apps template.containers[].resources).
+ */
+function apiVersionForResourceType(resourceType: string | undefined): string {
+  const t = (resourceType || '').toLowerCase();
+  if (t.includes('microsoft.app/containerapps')) return '2024-03-01';
+  if (t.includes('microsoft.app/managedenvironments')) return '2024-03-01';
+  if (t.includes('microsoft.app/managedenvironments/certificates')) return '2024-03-01';
+  if (t.includes('microsoft.containerregistry')) return '2023-07-01';
+  if (t.includes('microsoft.operationalinsights')) return '2022-10-01';
+  if (t.includes('microsoft.network')) return '2023-05-01';
+  if (t.includes('microsoft.storage')) return '2023-01-01';
+  if (t.includes('microsoft.resources')) return '2024-03-01';
+  return '2023-01-01';
+}
+
+/**
  * Fetch detailed properties for a specific resource
  */
-async function fetchResourceDetails(resourceId: string, accessToken: string): Promise<any> {
-  // Use a recent API version that works for most resource types
-  const apiVersion = '2023-01-01';
-  const apiUrl = `https://management.azure.com${resourceId}?api-version=${apiVersion}`;
+async function fetchResourceDetails(
+  resourceId: string,
+  accessToken: string,
+  resourceType?: string
+): Promise<any> {
+  const primaryVersion = apiVersionForResourceType(resourceType);
+  const tryVersions = [primaryVersion, '2023-01-01'];
 
-  try {
-    const response = await fetch(apiUrl, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
+  for (const apiVersion of tryVersions) {
+    const apiUrl = `https://management.azure.com${resourceId}?api-version=${apiVersion}`;
+    try {
+      const response = await fetch(apiUrl, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (response.ok) {
+        return await response.json();
       }
-    });
-
-    if (!response.ok) {
-      return null; // Skip resources we can't fetch details for
+    } catch {
+      // try next version
     }
-
-    return await response.json();
-  } catch (error) {
-    return null;
   }
+
+  return null;
 }
 
 /**
@@ -113,6 +136,53 @@ async function loadAzureCredentials(userId?: string): Promise<boolean> {
       process.env.AZURE_TENANT_ID &&
       process.env.AZURE_SUBSCRIPTION_ID
     );
+  }
+}
+
+/**
+ * Azure does not include the resource group resource in .../resourceGroups/{name}/resources.
+ * MigrateOps must read the RG's own location from ARM or inferred location may use a child
+ * resource's region (e.g. centralus) that differs from the RG (e.g. centralindia).
+ */
+export async function fetchResourceGroupLocation(
+  userId: string | undefined,
+  subscriptionId: string,
+  resourceGroupName: string
+): Promise<string | null> {
+  const sub = String(subscriptionId || '').trim();
+  const name = String(resourceGroupName || '').trim();
+  if (!sub || !name) return null;
+
+  try {
+    const hasCredentials = await loadAzureCredentials(userId);
+    if (!hasCredentials) return null;
+
+    const accessToken = await getAzureAccessToken();
+    const enc = encodeURIComponent(name);
+    const apiUrl = `https://management.azure.com/subscriptions/${sub}/resourcegroups/${enc}?api-version=2021-04-01`;
+
+    const response = await fetch(apiUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `[Azure] Resource group metadata GET failed for "${name}": ${response.status} ${response.statusText}`
+      );
+      return null;
+    }
+
+    const data = (await response.json()) as { location?: string };
+    const raw = String(data?.location || '').trim();
+    if (!raw || raw.toLowerCase() === 'global') return null;
+    return raw.toLowerCase().replace(/\s+/g, '');
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[Azure] fetchResourceGroupLocation failed: ${msg}`);
+    return null;
   }
 }
 
@@ -340,8 +410,8 @@ export async function fetchAzureResources(
           try {
             const resourceGroup = azResource.id?.split('/resourceGroups/')[1]?.split('/')[0] || 'unknown';
 
-            // Fetch detailed properties for accurate pricing
-            const details = await fetchResourceDetails(azResource.id, accessToken);
+            // Fetch detailed properties (provider-specific api-version for full template / sku)
+            const details = await fetchResourceDetails(azResource.id, accessToken, azResource.type);
 
             // Get actual cost from Cost Management API
             const resourceIdLower = (azResource.id || '').toLowerCase();

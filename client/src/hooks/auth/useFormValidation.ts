@@ -12,6 +12,7 @@ export interface SignupFormData {
 export interface LoginFormData {
   usernameOrEmail: string;
   password: string;
+  rememberMe: boolean;
 }
 
 /**

@@ -1,10 +1,6 @@
-import OpenAI from 'openai';
+import { aiChatCompletion } from '../utils/ai-client.js';
 import yaml from 'js-yaml';
 import { validateKubernetesInput } from './input-validator';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
 export interface ManifestFile {
   path: string;
@@ -234,7 +230,7 @@ Generate complete, production-ready manifests for ALL requested components.`;
 
   try {
     console.log('\n🤖 Calling OpenAI API...');
-    const completion = await openai.chat.completions.create({
+    const completion = await aiChatCompletion({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt },

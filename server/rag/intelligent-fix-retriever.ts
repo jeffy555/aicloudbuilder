@@ -19,11 +19,7 @@ import { userFixPreferencesStore } from './user-fix-preferences-store';
 import { checkovFetcher } from './checkov-fetcher';
 import { fixSnippetStore, type IaCFramework } from './fix-snippet-store';
 import { featureFlags } from '../middleware/feature-flags';
-import OpenAI from 'openai';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { aiChatCompletion } from '../utils/ai-client.js';
 
 export interface IntelligentFixResult {
   fix: string;
@@ -270,8 +266,8 @@ export class IntelligentFixRetriever {
         ? this.getKubernetesUserPrompt(checkId, checkName, resourceType, guideline, context)
         : this.getTerraformUserPrompt(checkId, checkName, resourceType, guideline, context);
 
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+      const completion = await aiChatCompletion({
+        model: 'gpt-4o-mini',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }

@@ -3,9 +3,11 @@ import bcrypt from "bcrypt";
 import { storage } from "../storage";
 import { requireAuth, optionalAuth, generateToken, type AuthenticatedRequest } from "../middleware/auth";
 import { insertUserSchema } from "@shared/schema";
-import { eq, or } from "drizzle-orm";
+import { eq, or, sql } from "drizzle-orm";
 import { db } from "../db";
 import { users } from "@shared/schema";
+import { validateRequest } from "../middleware/validate";
+import { signupBody, loginBody } from "@shared/api-contracts/auth";
 
 const SALT_ROUNDS = 10;
 
@@ -14,7 +16,7 @@ export function registerAuthRoutes(app: Express) {
    * POST /api/auth/signup
    * Create a new user account
    */
-  app.post("/api/auth/signup", async (req, res) => {
+  app.post("/api/auth/signup", validateRequest({ body: signupBody }), async (req, res) => {
     try {
       // Validate request body
       const validationResult = insertUserSchema.safeParse(req.body);
@@ -80,16 +82,10 @@ export function registerAuthRoutes(app: Express) {
         .limit(1);
 
       if (existingUser.length > 0) {
-        const errors: Record<string, string> = {};
-        if (existingUser[0].username === username) {
-          errors.username = "Username already exists";
-        }
-        if (existingUser[0].email === email) {
-          errors.email = "Email already exists";
-        }
+        // Use a generic message to prevent account/email enumeration by external parties
         return res.status(400).json({
-          error: "User already exists",
-          errors,
+          error: "Registration failed",
+          errors: { username: "An account with this username or email already exists" },
         });
       }
 
@@ -130,7 +126,7 @@ export function registerAuthRoutes(app: Express) {
    * POST /api/auth/login
    * Authenticate user and create session
    */
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", validateRequest({ body: loginBody }), async (req, res) => {
     try {
       const { usernameOrEmail, password, rememberMe } = req.body;
 
@@ -144,22 +140,40 @@ export function registerAuthRoutes(app: Express) {
         });
       }
 
-      // Find user by username or email
-      const user = await db
-        .select()
-        .from(users)
-        .where(or(eq(users.username, usernameOrEmail), eq(users.email, usernameOrEmail)))
-        .limit(1);
+      const trimmedIdentifier = String(usernameOrEmail).trim();
+      const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedIdentifier);
+
+      // Username: exact match. Email: case-insensitive (stored emails may differ in casing)
+      const user = looksLikeEmail
+        ? await db
+            .select()
+            .from(users)
+            .where(sql`lower(${users.email}) = ${trimmedIdentifier.toLowerCase()}`)
+            .limit(1)
+        : await db
+            .select()
+            .from(users)
+            .where(eq(users.username, trimmedIdentifier))
+            .limit(1);
 
       if (user.length === 0) {
+        console.warn(`[SECURITY] Login failed: unknown user "${trimmedIdentifier}" ip=${req.ip}`);
         return res.status(401).json({
           error: "Invalid credentials",
+        });
+      }
+
+      // SSO-only accounts have no local password — direct them to Microsoft sign-in
+      if (!user[0].password) {
+        return res.status(401).json({
+          error: "This account uses Microsoft sign-in. Please use the 'Sign in with Microsoft' button.",
         });
       }
 
       // Verify password
       const isValidPassword = await bcrypt.compare(password, user[0].password);
       if (!isValidPassword) {
+        console.warn(`[SECURITY] Login failed: wrong password for "${trimmedIdentifier}" ip=${req.ip}`);
         return res.status(401).json({
           error: "Invalid credentials",
         });
@@ -174,7 +188,7 @@ export function registerAuthRoutes(app: Express) {
         (req.session as any).userId = user[0].id;
         
         // Set session expiration based on rememberMe
-        if (rememberMe) {
+        if (rememberMe === true) {
           req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 days
         } else {
           req.session.cookie.maxAge = 24 * 60 * 60 * 1000; // 1 day

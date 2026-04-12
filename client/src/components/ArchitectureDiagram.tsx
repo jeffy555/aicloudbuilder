@@ -8,7 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Network, AlertCircle, Loader2, Copy, Download, RefreshCw, Search, ImageIcon } from "lucide-react";
+import { Network, AlertCircle, Loader2, Copy, RefreshCw, Search, ImageIcon } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import mermaid from "mermaid";
@@ -53,6 +53,7 @@ interface ArchitectureDiagramProps {
 
 export interface ArchitectureDiagramRef {
   triggerGenerate: () => void;
+  invalidateCache: () => void;
 }
 
 const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagramProps>(
@@ -67,18 +68,38 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
     const mermaidInitialized = useRef(false);
     const { toast } = useToast();
     const previousDiagramType = useRef<DiagramType>('flowchart');
+    const diagramCache = useRef<Map<DiagramType, DiagramResult>>(new Map());
     const [enlargedSvg, setEnlargedSvg] = useState<string>("");
   const [isViewerOpen, setIsViewerOpen] = useState(false);
   const [isDownloadingJpg, setIsDownloadingJpg] = useState(false);
 
   const sanitizeMermaidSyntax = (input: string): string => {
     let syntax = String(input || '').trim();
+    // Strip markdown code fences
     syntax = syntax
       .replace(/^```mermaid\s*/i, '')
       .replace(/^```\s*/i, '')
       .replace(/\s*```$/i, '')
       .trim();
     syntax = syntax.replace(/^mermaid\s+/i, '').trim();
+
+    // For graph/flowchart diagrams, remove any `class nodeId styleName` directives
+    // that reference node IDs not defined in the diagram. Stale class directives
+    // cause Mermaid to throw in strict security mode.
+    if (/^(graph|flowchart)\s/i.test(syntax)) {
+      // Collect defined node IDs (identifiers followed by [ or ( or { )
+      const definedIds = new Set<string>();
+      for (const m of syntax.matchAll(/^\s{0,8}(\w+)\s*[\[({]/gm)) {
+        if (m[1] !== 'subgraph' && m[1] !== 'classDef') definedIds.add(m[1]);
+      }
+      // Strip `class` directives that reference undefined node IDs
+      syntax = syntax.replace(/^\s*class\s+(\S+)\s+\S+\s*$/gm, (line, nodeId) => {
+        return definedIds.has(nodeId) ? line : '';
+      });
+      // Collapse consecutive blank lines left by removed directives
+      syntax = syntax.replace(/\n{3,}/g, '\n\n').trim();
+    }
+
     return syntax;
   };
 
@@ -101,11 +122,15 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
       mermaid.initialize({
         startOnLoad: false,
         theme: 'default',
-        securityLevel: 'loose',
+        securityLevel: 'strict',
         flowchart: {
           useMaxWidth: true,
-          htmlLabels: true,
-          curve: 'basis'
+          htmlLabels: false,
+          curve: 'basis',
+          nodeSpacing: 60,
+          rankSpacing: 80,
+          padding: 20,
+          wrappingWidth: 200,
         }
       });
       mermaidInitialized.current = true;
@@ -127,8 +152,17 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
         console.log('[DiagramType] Already generating, will regenerate after current generation completes');
         return;
       }
-      console.log(`[DiagramType] Type changed from ${previousDiagramType.current} to ${diagramType}, regenerating...`);
       previousDiagramType.current = diagramType;
+
+      // Check cache first — instant switch if available
+      const cached = diagramCache.current.get(diagramType);
+      if (cached) {
+        console.log(`[DiagramType] Cache hit for ${diagramType}, using cached result`);
+        setDiagramResult(cached);
+        return;
+      }
+
+      console.log(`[DiagramType] Cache miss for ${diagramType}, regenerating...`);
       // Use setTimeout to avoid state update during render
       setTimeout(() => {
         generateDiagram();
@@ -137,11 +171,6 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
       // Update previous type even if we're not regenerating
       if (diagramType !== previousDiagramType.current) {
         previousDiagramType.current = diagramType;
-      }
-      if (diagramType === previousDiagramType.current) {
-        console.log('[DiagramType] Type unchanged, skipping regeneration');
-      } else if (!diagramResult) {
-        console.log('[DiagramType] No diagram result yet, skipping regeneration');
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -153,25 +182,31 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
     const renderDiagram = async () => {
         try {
           setRenderError(null);
+          // Guard: ref must still be mounted
+          if (!diagramRef.current) return;
           // Clear previous content
-          diagramRef.current!.innerHTML = '';
-          
+          diagramRef.current.innerHTML = '';
+
           // Generate unique ID for this diagram
           const diagramId = `diagram-${Date.now()}`;
           const sanitizedSyntax = sanitizeMermaidSyntax(diagramResult.mermaidSyntax);
           if (!sanitizedSyntax) {
             throw new Error('Empty Mermaid syntax received from diagram generator.');
           }
-          
+
           // Render the diagram
           const { svg } = await mermaid.render(diagramId, sanitizedSyntax);
           if (/Syntax error in text/i.test(svg)) {
             throw new Error('Generated Mermaid syntax is invalid for the selected diagram type.');
           }
-          diagramRef.current!.innerHTML = svg;
+          // Guard: component may have unmounted while mermaid.render() was running
+          if (!diagramRef.current) return;
+          diagramRef.current.innerHTML = svg;
           setEnlargedSvg(svg);
         } catch (error: any) {
           console.error('Mermaid rendering error:', error);
+          // Suppress null-ref errors that are benign race conditions
+          if (error?.message?.includes('null') && error?.message?.includes('innerHTML')) return;
           setRenderError(error.message || 'Failed to render diagram');
           toast({
             title: "Diagram rendering failed",
@@ -224,9 +259,11 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
         ...result,
         mermaidSyntax: sanitizeMermaidSyntax(result.mermaidSyntax || ''),
       };
+      // Cache the result for this diagram type
+      diagramCache.current.set(diagramType, sanitizedResult);
       setDiagramResult(sanitizedResult);
       
-      const resourceCount = result.metadata.totalResources || result.metadata.totalComponents || 0;
+      const resourceCount = result.metadata.totalResources || (result.metadata as any).totalComponents || 0;
       const relationshipCount = result.metadata.totalRelationships || 0;
       
       toast({
@@ -397,7 +434,8 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
   };
 
   useImperativeHandle(ref, () => ({
-    triggerGenerate: generateDiagram
+    triggerGenerate: generateDiagram,
+    invalidateCache: () => { diagramCache.current.clear(); },
   }));
 
   // Copy Mermaid syntax to clipboard
@@ -674,8 +712,9 @@ const ArchitectureDiagram = forwardRef<ArchitectureDiagramRef, ArchitectureDiagr
             ) : (
               <div className="border rounded-lg p-4 bg-white dark:bg-gray-900 overflow-auto">
                 <div 
-                  ref={diagramRef} 
+                  ref={diagramRef}
                   className="mermaid-diagram flex justify-center items-center min-h-[400px]"
+                  style={{ minWidth: '100%', overflow: 'auto' }}
                 />
               </div>
             )}

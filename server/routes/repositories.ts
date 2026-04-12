@@ -9,13 +9,31 @@ import { openaiService } from "../openai-service";
 import { type InsertSession } from "@shared/schema";
 import { type GeneratedFile } from "@shared/schema";
 import { resolveRepositoryCredentials } from "../utils/credentials";
+import { validateRequest } from "../middleware/validate";
+import { sessionIdParams, providerParams } from "@shared/api-contracts/common";
+import { createRepoBody, scanRepoBody, validateAggregatedBody, scanChildModuleBody } from "@shared/api-contracts/repositories";
+import {
+  isTerraformGeneratorMetadataPath,
+  parseTerraformGeneratorMetadata,
+  type TerraformGeneratorMetadata,
+} from "../terraform-generator-metadata";
+
+/** Map metadata `moduleApproach` to the same coarse labels as regex/AI scan (`child` vs `root`). */
+function moduleApproachFromMetadata(
+  approach: string | null | undefined
+): "child" | "root" | null {
+  if (!approach || typeof approach !== "string") return null;
+  if (approach === "child-module") return "child";
+  if (approach === "standalone-root" || approach === "aggregated-root") return "root";
+  return null;
+}
 
 /**
  * Repository operations routes
  */
 export function registerRepositoryRoutes(app: Express): void {
   // Pre-warm MCP connection for a provider (optional, called when provider is selected)
-  app.post("/api/repositories/:provider/prewarm", async (req, res) => {
+  app.post("/api/repositories/:provider/prewarm", validateRequest({ params: providerParams }), async (req, res) => {
     try {
       const provider = req.params.provider as MCPProvider;
       const serverType = (req.query.serverType as MCPServerType) || 'devops';
@@ -34,7 +52,7 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // List repositories
-  app.get("/api/repositories/:provider", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.get("/api/repositories/:provider", optionalAuth, validateRequest({ params: providerParams }), async (req: AuthenticatedRequest, res) => {
     const requestStart = Date.now();
     try {
       // Note: optionalAuth sets req.userId if token is valid, leaves it undefined if not.
@@ -131,12 +149,16 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // List branches for the currently selected session repository
-  app.get("/api/sessions/:id/branches", async (req, res) => {
+  app.get("/api/sessions/:id/branches", optionalAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Branch list session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       if (!session.provider || !session.repositoryName) {
@@ -167,7 +189,7 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // Create repository
-  app.post("/api/repositories/:provider", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/repositories/:provider", optionalAuth, validateRequest({ params: providerParams, body: createRepoBody }), async (req: AuthenticatedRequest, res) => {
     const provider = req.params.provider as MCPProvider;
     const { name, description } = req.body;
     
@@ -208,7 +230,7 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // Validate requested resources against child module resources (for aggregated-root modules)
-  app.post("/api/sessions/:id/validate-aggregated-resources", async (req, res) => {
+  app.post("/api/sessions/:id/validate-aggregated-resources", optionalAuth, validateRequest({ params: sessionIdParams, body: validateAggregatedBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { description, childModuleResources } = req.body;
@@ -223,6 +245,10 @@ export function registerRepositoryRoutes(app: Express): void {
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Validate-aggregated session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       if (session.moduleApproach !== 'aggregated-root') {
@@ -294,7 +320,7 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // Scan child module repository to extract available resources
-  app.post("/api/sessions/:id/scan-child-module", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/scan-child-module", optionalAuth, validateRequest({ params: sessionIdParams, body: scanChildModuleBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { repositoryId, provider } = req.body;
@@ -306,6 +332,10 @@ export function registerRepositoryRoutes(app: Express): void {
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Scan-child-module session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       const { credentials } = await resolveRepositoryCredentials(provider as MCPProvider, req.userId);
@@ -379,7 +409,7 @@ export function registerRepositoryRoutes(app: Express): void {
   });
 
   // Scan repository for existing Terraform configuration
-  app.post("/api/sessions/:id/scan-repository", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/scan-repository", optionalAuth, validateRequest({ params: sessionIdParams, body: scanRepoBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { refresh = false } = req.body || {}; // Option to clear existing files first
@@ -387,6 +417,10 @@ export function registerRepositoryRoutes(app: Express): void {
 
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Scan-repository session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       if (!session.provider || !session.repositoryName) {
@@ -470,9 +504,30 @@ export function registerRepositoryRoutes(app: Express): void {
         aiDetectedResources: aiAnalysis?.detectedResources || []
       };
 
+      let generatorMetadata: TerraformGeneratorMetadata | null = null;
+      for (const f of files) {
+        if (isTerraformGeneratorMetadataPath(f.path)) {
+          generatorMetadata = parseTerraformGeneratorMetadata(f.content);
+          break;
+        }
+      }
+
+      const metaCloud =
+        generatorMetadata?.cloudProvider &&
+        ["azure", "aws", "gcp"].includes(generatorMetadata.cloudProvider.toLowerCase())
+          ? (generatorMetadata.cloudProvider.toLowerCase() as "azure" | "aws" | "gcp")
+          : null;
+      const metaModuleType = moduleApproachFromMetadata(generatorMetadata?.moduleApproach ?? null);
+
+      const mergedCloudProvider = metaCloud ?? analysis.cloudProvider;
+      const mergedModuleType = metaModuleType ?? analysis.moduleType;
+
       console.log('\n📊 Combined Analysis Results:');
-      console.log(`   Cloud Provider: ${analysis.cloudProvider || 'Not detected'} ${aiAnalysis ? '(AI)' : '(Regex)'}`);
-      console.log(`   Module Type: ${analysis.moduleType || 'Not detected'} ${aiAnalysis ? '(AI)' : '(Regex)'}`);
+      console.log(`   Cloud Provider: ${mergedCloudProvider || 'Not detected'} ${aiAnalysis ? '(AI)' : '(Regex)'}${metaCloud ? ' + .aicloudbuilder.json' : ''}`);
+      console.log(`   Module Type: ${mergedModuleType || 'Not detected'} ${aiAnalysis ? '(AI)' : '(Regex)'}${metaModuleType ? ' + .aicloudbuilder.json' : ''}`);
+      if (generatorMetadata) {
+        console.log(`   Generator metadata: AICloudBuilder moduleApproach=${generatorMetadata.moduleApproach ?? "null"}`);
+      }
       if (aiAnalysis?.summary) {
         console.log(`   AI Summary: ${aiAnalysis.summary.substring(0, 150)}...`);
       }
@@ -496,8 +551,8 @@ export function registerRepositoryRoutes(app: Express): void {
 
       const updates: Partial<InsertSession> = {
         isExistingRepo: files.length > 0 ? 'true' : 'false',
-        detectedCloudProvider: analysis.cloudProvider,
-        detectedModuleType: analysis.moduleType,
+        detectedCloudProvider: mergedCloudProvider,
+        detectedModuleType: mergedModuleType,
         detectedTerraformFiles: files.map(f => f.path),
         // Backend configuration tracking
         hasBackend: analysis.backend.hasBackend ? 'true' : 'false',
@@ -508,8 +563,8 @@ export function registerRepositoryRoutes(app: Express): void {
         backendStateKey: analysis.backend.stateFileKey,
       };
 
-      if (analysis.cloudProvider) {
-        updates.cloudProvider = analysis.cloudProvider;
+      if (mergedCloudProvider) {
+        updates.cloudProvider = mergedCloudProvider;
       }
 
       await storage.updateSession(sessionId, updates);
@@ -583,8 +638,8 @@ export function registerRepositoryRoutes(app: Express): void {
 
       const result = {
         isExisting: files.length > 0,
-        cloudProvider: analysis.cloudProvider,
-        moduleType: analysis.moduleType,
+        cloudProvider: mergedCloudProvider,
+        moduleType: mergedModuleType,
         terraformFiles: files.map(f => f.path),
         terraformFilesWithContent: files, // Include full file contents for review
         existingResources: existingResources, // Include extracted resources
@@ -593,7 +648,9 @@ export function registerRepositoryRoutes(app: Express): void {
         providerBlocks: analysis.providerBlocks,
         backend: analysis.backend,
         refreshed: refresh, // Indicate if this was a refresh operation
-        filesStored: (await storage.getFilesBySession(sessionId)).length
+        filesStored: (await storage.getFilesBySession(sessionId)).length,
+        createdByAICloudBuilder: Boolean(generatorMetadata),
+        generatorMetadata: generatorMetadata ?? undefined,
       };
 
       res.json(result);

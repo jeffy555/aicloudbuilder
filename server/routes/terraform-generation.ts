@@ -4,6 +4,29 @@ import { mcpClient, type MCPProvider } from "../mcp-client";
 import { openaiService } from "../openai-service";
 import { type GeneratedFile } from "@shared/schema";
 import { validateTerraformRequest, formatValidationErrors } from "../terraform-validator";
+import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { sessionIdParams } from "@shared/api-contracts/common";
+import {
+  generateTerraformBody,
+  terraformCliRepairBody,
+  terraformCicdRepairBody,
+} from "@shared/api-contracts/terraform-generation";
+import { ensureVariablesTfFromMainTf } from "../terraform-variable-sync";
+import { validateStandaloneRootMainTf } from "../terraform-standalone-root-validation";
+import { fileBasenameKey } from "../utils/generated-files-dedupe";
+import { runTerraformWorkspaceValidation } from "../terraform-cli-validate";
+import {
+  repairSessionTerraformAfterCliFailure,
+  repairSessionTerraformFromCiPlanLogs,
+  shouldAttemptTerraformCliRepair,
+} from "../terraform-module-cli-repair";
+import {
+  buildTerraformGeneratorMetadata,
+  isTerraformGeneratorMetadataPath,
+  shouldIncludeFileInStandaloneRepoFetch,
+  TERRAFORM_GENERATOR_METADATA_FILENAME,
+} from "../terraform-generator-metadata";
 
 // Helper function to repair JSON (same as in openai-service.ts)
 function repairJson(jsonText: string): string {
@@ -22,14 +45,14 @@ function repairJson(jsonText: string): string {
 }
 
 export function registerTerraformGenerationRoutes(app: Express): void {
-  app.post("/api/sessions/:id/generate-terraform", async (req, res) => {
+  app.post("/api/sessions/:id/generate-terraform", optionalAuth, validateRequest({ params: sessionIdParams, body: generateTerraformBody }), async (req: AuthenticatedRequest, res) => {
     console.log('\n🚀 ========== GENERATE TERRAFORM ENDPOINT CALLED ==========');
     console.log(`   Timestamp: ${new Date().toISOString()}`);
     console.log(`   Session ID: ${req.params.id}`);
     console.log(`   Request body keys: ${Object.keys(req.body).join(', ')}`);
 
     try {
-      const { description, childModuleResources } = req.body;
+      const { description, childModuleResources, childModuleRepoName, childModuleProvider } = req.body;
       const sessionId = req.params.id;
 
       // CRITICAL: Validate description immediately
@@ -51,6 +74,10 @@ export function registerTerraformGenerationRoutes(app: Express): void {
       if (!session) {
         console.error(`❌ Session ${sessionId} not found!`);
         return res.status(404).json({ error: 'Session not found' });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Terraform generation session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       console.log(`✅ Session found: ${sessionId}`);
@@ -220,22 +247,15 @@ export function registerTerraformGenerationRoutes(app: Express): void {
             'main'
           );
 
-          repoFilesForAppend = repoFiles.filter(file => {
-            // Normalize path: remove leading/trailing slashes (Azure DevOps returns paths with leading slash)
-            const normalizedPath = file.path.replace(/^\/+|\/+$/g, '');
-            const fileName = (normalizedPath.split('/').pop() || normalizedPath).toLowerCase();
-            const isTerraformFile = fileName.endsWith('.tf') || fileName.endsWith('.tfvars');
-            const isBackendConfig = ['backend.tf', 'provider.tf', 'terraform.tf'].includes(fileName);
-            // Root level: no slashes after normalization, or only one segment
-            const isRootLevel = !normalizedPath.includes('/') || normalizedPath.split('/').length === 1;
-            const shouldInclude = isTerraformFile && !isBackendConfig && isRootLevel;
-
-            // Debug logging for tfvars files
-            if (fileName.includes('tfvars')) {
-              console.log(`      🔍 Checking tfvars file: "${file.path}" → normalized: "${normalizedPath}" → fileName: "${fileName}"`);
-              console.log(`         isTerraformFile: ${isTerraformFile}, isBackendConfig: ${isBackendConfig}, isRootLevel: ${isRootLevel}, shouldInclude: ${shouldInclude}`);
+          repoFilesForAppend = repoFiles.filter((file) => {
+            const normalizedPath = file.path.replace(/^\/+|\/+$/g, "");
+            const shouldInclude = shouldIncludeFileInStandaloneRepoFetch(normalizedPath);
+            const fileName = (normalizedPath.split("/").pop() || normalizedPath).toLowerCase();
+            if (fileName.includes("tfvars")) {
+              console.log(
+                `      🔍 Checking tfvars file: "${file.path}" → normalized: "${normalizedPath}" → shouldInclude: ${shouldInclude}`
+              );
             }
-
             return shouldInclude;
           });
 
@@ -287,11 +307,9 @@ export function registerTerraformGenerationRoutes(app: Express): void {
           console.log(`   - ${f.fileName} (ID: ${f.id})`);
         });
 
-        const sessionTerraformFiles = sessionFiles.filter(file => {
-          const fileName = file.fileName.toLowerCase();
-          return (fileName.endsWith('.tf') || fileName.endsWith('.tfvars')) &&
-                 !['backend.tf', 'provider.tf', 'terraform.tf'].includes(fileName) &&
-                 !file.fileName.includes('/'); // Only root-level files for standalone root
+        const sessionTerraformFiles = sessionFiles.filter((file) => {
+          const normalized = file.fileName.replace(/^\/+|\/+$/g, "");
+          return shouldIncludeFileInStandaloneRepoFetch(normalized);
         });
         console.log(`   📄 Terraform resource files in session: ${sessionTerraformFiles.length}`);
 
@@ -337,24 +355,9 @@ export function registerTerraformGenerationRoutes(app: Express): void {
               'main'
             );
 
-            // Filter to get only Terraform resource files (exclude backend config)
-            const repoTerraformFiles = repoFiles.filter(file => {
-              // Normalize path: remove leading/trailing slashes (Azure DevOps returns paths with leading slash)
-              const normalizedPath = file.path.replace(/^\/+|\/+$/g, '');
-              const fileName = (normalizedPath.split('/').pop() || normalizedPath).toLowerCase();
-              const isTerraformFile = fileName.endsWith('.tf') || fileName.endsWith('.tfvars');
-              const isBackendConfig = ['backend.tf', 'provider.tf', 'terraform.tf'].includes(fileName);
-              // Root level: no slashes after normalization, or only one segment
-              const isRootLevel = !normalizedPath.includes('/') || normalizedPath.split('/').length === 1;
-              const shouldInclude = isTerraformFile && !isBackendConfig && isRootLevel;
-
-              // Debug logging for tfvars files
-              if (fileName.includes('tfvars')) {
-                console.log(`      🔍 Checking tfvars file: "${file.path}" → normalized: "${normalizedPath}" → fileName: "${fileName}"`);
-                console.log(`         isTerraformFile: ${isTerraformFile}, isBackendConfig: ${isBackendConfig}, isRootLevel: ${isRootLevel}, shouldInclude: ${shouldInclude}`);
-              }
-
-              return shouldInclude;
+            const repoTerraformFiles = repoFiles.filter((file) => {
+              const normalizedPath = file.path.replace(/^\/+|\/+$/g, "");
+              return shouldIncludeFileInStandaloneRepoFetch(normalizedPath);
             });
 
             console.log(`   ✅ Found ${repoTerraformFiles.length} file(s) in repository`);
@@ -506,6 +509,23 @@ export function registerTerraformGenerationRoutes(app: Express): void {
         backendConfig,
         filesForGeneration
       );
+
+      if (session.moduleApproach === "standalone-root") {
+        const mainTfFile = result.files.find((f) => {
+          const base = f.path.split("/").pop() || f.path;
+          return base === "main.tf";
+        });
+        if (mainTfFile) {
+          const violation = validateStandaloneRootMainTf(mainTfFile.content);
+          if (violation) {
+            console.error(`❌ Standalone root validation failed: ${violation}`);
+            return res.status(400).json({
+              error: "Invalid standalone root module",
+              details: [violation],
+            });
+          }
+        }
+      }
 
       // CRITICAL: Log what AI actually generated
       console.log(`\n📥 [AI RESPONSE] AI generated ${result.files.length} file(s):`);
@@ -779,7 +799,11 @@ This infrastructure was generated using natural language descriptions and AI ass
 
       const allFiles = [
         ...filteredFiles,
-        { path: 'README.md', content: readmeContent }
+        { path: 'README.md', content: readmeContent },
+        {
+          path: TERRAFORM_GENERATOR_METADATA_FILENAME,
+          content: buildTerraformGeneratorMetadata(session),
+        },
       ];
 
       console.log(`   Total files to save (including README): ${allFiles.length}`);
@@ -818,15 +842,9 @@ This infrastructure was generated using natural language descriptions and AI ass
             'main'
           );
 
-          const terraformResourceFiles = repoFiles.filter(file => {
-            // Normalize path: remove leading/trailing slashes (Azure DevOps returns paths with leading slash)
-            const normalizedPath = file.path.replace(/^\/+|\/+$/g, '');
-            const fileName = (normalizedPath.split('/').pop() || normalizedPath).toLowerCase();
-            const isTerraformFile = fileName.endsWith('.tf') || fileName.endsWith('.tfvars');
-            const isBackendConfig = ['backend.tf', 'provider.tf', 'terraform.tf'].includes(fileName);
-            // Root level: no slashes after normalization, or only one segment
-            const isRootLevel = !normalizedPath.includes('/') || normalizedPath.split('/').length === 1;
-            return isTerraformFile && !isBackendConfig && isRootLevel;
+          const terraformResourceFiles = repoFiles.filter((file) => {
+            const normalizedPath = file.path.replace(/^\/+|\/+$/g, "");
+            return shouldIncludeFileInStandaloneRepoFetch(normalizedPath);
           });
 
           console.log(`   💾 Storing ${terraformResourceFiles.length} file(s) in session storage...`);
@@ -924,15 +942,9 @@ This infrastructure was generated using natural language descriptions and AI ass
               'main'
             );
 
-            const terraformResourceFiles = repoFiles.filter(file => {
-              // Normalize path: remove leading/trailing slashes
-              const normalizedPath = file.path.replace(/^\/+|\/+$/g, '');
-              const fileName = (normalizedPath.split('/').pop() || normalizedPath).toLowerCase();
-              const isTerraformFile = fileName.endsWith('.tf') || fileName.endsWith('.tfvars');
-              const isBackendConfig = ['backend.tf', 'provider.tf', 'terraform.tf'].includes(fileName);
-              // Root level: no slashes after normalization, or only one segment
-              const isRootLevel = !normalizedPath.includes('/') || normalizedPath.split('/').length === 1;
-              return isTerraformFile && !isBackendConfig && isRootLevel;
+            const terraformResourceFiles = repoFiles.filter((file) => {
+              const normalizedPath = file.path.replace(/^\/+|\/+$/g, "");
+              return shouldIncludeFileInStandaloneRepoFetch(normalizedPath);
             });
 
             console.error(`   💾 Storing ${terraformResourceFiles.length} file(s) in session storage...`);
@@ -993,15 +1005,46 @@ This infrastructure was generated using natural language descriptions and AI ass
         console.log(`\n📝 Processing ${allFiles.length} generated file(s):`);
 
         for (const file of allFiles) {
-          // Skip README.md - it's always new
-          if (file.path.toLowerCase() === 'readme.md') {
-            console.log(`\n   📄 ${file.path} - Skipping (always create new)`);
-            const created = await storage.createFile({
-              sessionId,
-              fileName: file.path,
-              content: file.content,
-            });
-            savedFiles.push(created);
+          // README: upsert like other files so repeat runs do not duplicate rows
+          if (file.path.toLowerCase() === "readme.md") {
+            const existingReadme = allSessionFilesNow.find(
+              (f) => fileBasenameKey(f.fileName) === "readme.md"
+            );
+            if (existingReadme) {
+              console.log(`\n   📄 ${file.path} - Updating existing README (ID: ${existingReadme.id})`);
+              const updated = await storage.updateFile(existingReadme.id, file.content);
+              savedFiles.push(updated);
+            } else {
+              console.log(`\n   📄 ${file.path} - Creating README`);
+              const created = await storage.createFile({
+                sessionId,
+                fileName: file.path,
+                content: file.content,
+              });
+              savedFiles.push(created);
+            }
+            continue;
+          }
+
+          // Generator metadata: always replace whole file (no Terraform merge)
+          if (isTerraformGeneratorMetadataPath(file.path)) {
+            const metaKey = fileBasenameKey(TERRAFORM_GENERATOR_METADATA_FILENAME);
+            const existingMeta = allSessionFilesNow.find(
+              (f) => fileBasenameKey(f.fileName) === metaKey
+            );
+            if (existingMeta) {
+              console.log(`\n   📄 ${file.path} - Updating ${TERRAFORM_GENERATOR_METADATA_FILENAME} (ID: ${existingMeta.id})`);
+              const updated = await storage.updateFile(existingMeta.id, file.content);
+              savedFiles.push(updated);
+            } else {
+              console.log(`\n   📄 ${file.path} - Creating ${TERRAFORM_GENERATOR_METADATA_FILENAME}`);
+              const created = await storage.createFile({
+                sessionId,
+                fileName: TERRAFORM_GENERATOR_METADATA_FILENAME,
+                content: file.content,
+              });
+              savedFiles.push(created);
+            }
             continue;
           }
 
@@ -1243,12 +1286,9 @@ This infrastructure was generated using natural language descriptions and AI ass
                       }
                     });
                   } else if (newResources.length > 0) {
-                    // If duplicate detection filtered everything out, add all resources anyway
-                    // This is a safety net - better to have duplicates than missing resources
-                    console.error(`         ⚠️⚠️⚠️  [MERGE] WARNING: Duplicate detection filtered out all resources!`);
-                    console.error(`         🔧 [MERGE] Adding all ${newResources.length} resource(s) anyway (safety net)...`);
-                    finalContent = existingContent.trim() + '\n\n' + newResources.join('\n\n');
-                    console.error(`         ✅ Merged: Added ${newResources.length} resource(s) (safety net - may include duplicates)`);
+                    // Do not re-inject all resources — that duplicates blocks and breaks plans.
+                    console.error(`         ⚠️  [MERGE] Duplicate filter removed every resource from AI output — keeping existing file unchanged`);
+                    finalContent = existingContent;
                   } else {
                     // No resources found in AI response at all
                     finalContent = existingContent;
@@ -1473,6 +1513,10 @@ This infrastructure was generated using natural language descriptions and AI ass
 
         savedFiles = [];
 
+        const existingByPath = new Map(
+          existingFiles.map((f) => [f.fileName.toLowerCase(), f] as const),
+        );
+
         // For aggregated-root: Preserve existing backend files
         if (session.moduleApproach === 'aggregated-root' && existingBackendFiles.length > 0) {
           console.log(`\n   🔒 Preserving ${existingBackendFiles.length} existing backend file(s):`);
@@ -1492,13 +1536,25 @@ This infrastructure was generated using natural language descriptions and AI ass
             }
           }
 
+          const pathKey = file.path.toLowerCase();
+          const existingSameName = existingByPath.get(pathKey);
+
           try {
+            if (existingSameName) {
+              console.log(`\n   💾 Updating existing file: ${file.path} (ID: ${existingSameName.id})...`);
+              const updated = await storage.updateFile(existingSameName.id, file.content);
+              savedFiles.push(updated);
+              console.log(`   ✅ Updated: ${file.path} (${updated.content.length} chars)`);
+              continue;
+            }
+
             console.log(`\n   💾 Creating file: ${file.path}...`);
             const created = await storage.createFile({
               sessionId,
               fileName: file.path,
               content: file.content,
             });
+            existingByPath.set(pathKey, created);
             console.log(`   ✅ Successfully created: ${file.path} (ID: ${created.id}, ${created.content.length} chars, sessionId: ${created.sessionId})`);
 
             // Verify the file was saved correctly by fetching it back
@@ -1532,6 +1588,62 @@ This infrastructure was generated using natural language descriptions and AI ass
         });
       }
 
+      // For aggregated-root: Store child module main.tf files for Checkov security scanning.
+      // We only store files for modules actually referenced by source = "./XYZ" in the root main.tf,
+      // and only the main.tf from each module dir (not variables/outputs) to keep check count minimal.
+      if (session.moduleApproach === 'aggregated-root' && childModuleRepoName && childModuleProvider) {
+        try {
+          // Parse root main.tf to discover which module source directories are referenced
+          const rootMainTf = allFiles.find(f => f.path === 'main.tf' || f.path.endsWith('/main.tf'));
+          const referencedDirs = new Set<string>();
+          if (rootMainTf) {
+            const sourceRe = /source\s*=\s*["']\.\/([^"'/\\]+)/g;
+            let m: RegExpExecArray | null;
+            while ((m = sourceRe.exec(rootMainTf.content)) !== null) {
+              referencedDirs.add(m[1].toLowerCase()); // e.g. "appservice", "appserviceplan"
+            }
+            console.log(`\n📦 Root main.tf references ${referencedDirs.size} module dir(s): ${[...referencedDirs].join(', ')}`);
+          }
+
+          console.log(`   Fetching child module files from "${childModuleRepoName}"...`);
+          const childFiles = await mcpClient.scanRepositoryFiles(
+            childModuleProvider as MCPProvider,
+            childModuleRepoName,
+            'main'
+          );
+
+          // Normalise a dir name for loose matching (strip separators, lowercase)
+          const normDir = (s: string) => s.toLowerCase().replace(/[_\-\s]/g, '');
+          const normRefs = new Set([...referencedDirs].map(normDir));
+
+          // Only keep main.tf from referenced module directories (minimises Checkov check count)
+          const childTfFiles = childFiles.filter(f => {
+            if (!f.content || f.content.trim().length === 0) return false;
+            const parts = f.path.replace(/\\/g, '/').split('/');
+            if (parts.length < 2) return false; // skip top-level files
+            const dirName = parts[0];
+            const fileName = parts[parts.length - 1].toLowerCase();
+            // Accept only main.tf from directories referenced in root main.tf
+            // If no sources were detected, fall back to all main.tf files (safety)
+            const dirMatches = normRefs.size === 0 || normRefs.has(normDir(dirName));
+            return fileName === 'main.tf' && dirMatches;
+          });
+
+          console.log(`   Storing ${childTfFiles.length} child module file(s)`);
+          for (const file of childTfFiles) {
+            const created = await storage.createFile({
+              sessionId,
+              fileName: file.path,  // e.g. "AppService/main.tf" — preserves directory structure
+              content: file.content,
+            });
+            console.log(`   ✅ Stored: ${file.path} (${file.content.length} bytes, ID: ${created.id})`);
+          }
+        } catch (childErr: any) {
+          // Non-fatal: child module files are best-effort for scanning
+          console.warn(`   ⚠️  Could not fetch child module files (scan will use root module only): ${childErr.message}`);
+        }
+      }
+
       // For aggregated-root: Ensure backend files are included in savedFiles response
       // Backend files are already preserved in savedFiles, so we don't need to recreate them
       if (session.moduleApproach === 'aggregated-root') {
@@ -1562,117 +1674,7 @@ This infrastructure was generated using natural language descriptions and AI ass
         console.log(`Preserved ${preservedFiles.length} backend configuration file(s): ${preservedFiles.map(f => f.fileName).join(', ')}`);
       }
 
-      // CRITICAL FIX: Post-process to ensure variables.tf and .tfvars are created/updated
-      // when main.tf references new variables
-      console.log(`\n🔍 Post-processing: Checking for missing variable declarations...`);
-      const allFilesAfterSave = await storage.getFilesBySession(sessionId);
-      const mainTfFile = allFilesAfterSave.find(f => f.fileName.toLowerCase() === 'main.tf');
-      const variablesTfFile = allFilesAfterSave.find(f => f.fileName.toLowerCase() === 'variables.tf');
-      const tfvarsFile = allFilesAfterSave.find(f =>
-        f.fileName.toLowerCase() === 'dev.terraform.tfvars' ||
-        f.fileName.toLowerCase() === 'terraform.tfvars'
-      );
-
-      if (mainTfFile) {
-        // Extract all variable references from main.tf (var.variable_name)
-        const varPattern = /var\.([a-zA-Z_][a-zA-Z0-9_]*)/g;
-        const referencedVars = new Set<string>();
-        let match;
-        while ((match = varPattern.exec(mainTfFile.content)) !== null) {
-          referencedVars.add(match[1]);
-        }
-
-        console.log(`   Found ${referencedVars.size} variable reference(s) in main.tf: ${Array.from(referencedVars).join(', ')}`);
-
-        if (referencedVars.size > 0) {
-          // Check which variables are missing from variables.tf
-          const declaredVars = new Set<string>();
-          if (variablesTfFile) {
-            const varDeclPattern = /variable\s+"([^"]+)"/g;
-            let declMatch;
-            while ((declMatch = varDeclPattern.exec(variablesTfFile.content)) !== null) {
-              declaredVars.add(declMatch[1]);
-            }
-          }
-
-          const missingVars = Array.from(referencedVars).filter(v => !declaredVars.has(v));
-
-          if (missingVars.length > 0) {
-            console.log(`   ⚠️  Missing ${missingVars.length} variable declaration(s): ${missingVars.join(', ')}`);
-            console.log(`   🔧 Creating/updating variables.tf with missing declarations...`);
-
-            // Use AI to generate proper variable declarations
-            const varDeclarations = await openaiService.generateVariableDeclarations(
-              missingVars,
-              mainTfFile.content
-            );
-
-            if (variablesTfFile) {
-              // Update existing variables.tf
-              const updatedContent = variablesTfFile.content.trim() + '\n\n' + varDeclarations;
-              await storage.updateFile(variablesTfFile.id, updatedContent);
-              console.log(`   ✅ Updated variables.tf with ${missingVars.length} new declaration(s)`);
-            } else {
-              // Create new variables.tf
-              await storage.createFile({
-                sessionId,
-                fileName: 'variables.tf',
-                content: varDeclarations,
-              });
-              console.log(`   ✅ Created variables.tf with ${missingVars.length} declaration(s)`);
-            }
-
-            // Also ensure .tfvars file has these variables
-            const tfvarsFileName = tfvarsFile?.fileName || 'dev.terraform.tfvars';
-            const tfvarsValues = await openaiService.generateTfvarsValues(
-              missingVars,
-              mainTfFile.content,
-              description
-            );
-
-            if (tfvarsFile) {
-              // Update existing .tfvars
-              const existingKeys = new Set<string>();
-              tfvarsFile.content.split('\n').forEach(line => {
-                const trimmed = line.trim();
-                if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
-                  const keyMatch = trimmed.match(/^([^=]+?)\s*=/);
-                  if (keyMatch) {
-                    existingKeys.add(keyMatch[1].trim());
-                  }
-                }
-              });
-
-              const newTfvarsLines = tfvarsValues.split('\n').filter(line => {
-                const trimmed = line.trim();
-                if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
-                  const keyMatch = trimmed.match(/^([^=]+?)\s*=/);
-                  if (keyMatch && !existingKeys.has(keyMatch[1].trim())) {
-                    return true;
-                  }
-                }
-                return false;
-              });
-
-              if (newTfvarsLines.length > 0) {
-                const updatedTfvars = tfvarsFile.content.trim() + '\n\n' + newTfvarsLines.join('\n');
-                await storage.updateFile(tfvarsFile.id, updatedTfvars);
-                console.log(`   ✅ Updated ${tfvarsFileName} with ${newTfvarsLines.length} new value(s)`);
-              }
-            } else {
-              // Create new .tfvars
-              await storage.createFile({
-                sessionId,
-                fileName: tfvarsFileName,
-                content: tfvarsValues,
-              });
-              console.log(`   ✅ Created ${tfvarsFileName} with ${missingVars.length} value(s)`);
-            }
-          } else {
-            console.log(`   ✅ All variables are declared in variables.tf`);
-          }
-        }
-      }
+      await ensureVariablesTfFromMainTf(sessionId, description);
 
       // For aggregated-root: Get all files (backend + resource) to return in response
       if (session.moduleApproach === 'aggregated-root') {
@@ -1707,8 +1709,45 @@ This infrastructure was generated using natural language descriptions and AI ass
       });
       console.log(`\n📝 Updated session to step ${reviewStep} (moduleApproach: ${session.moduleApproach})`);
 
+      const filesForCliCheck = await storage.getFilesBySession(sessionId);
+      let terraformCliCheck = await runTerraformWorkspaceValidation(
+        filesForCliCheck.map((f) => ({ fileName: f.fileName, content: f.content })),
+      );
+      if (terraformCliCheck.ran) {
+        console.log(
+          `\n🔧 Terraform CLI: init=${terraformCliCheck.initOk} validate=${terraformCliCheck.validateOk} diagnostics=${terraformCliCheck.diagnostics.length}`,
+        );
+      } else if (terraformCliCheck.skippedReason) {
+        console.log(`\n🔧 Terraform CLI check skipped: ${terraformCliCheck.skippedReason}`);
+      }
+
+      let terraformCliRepair: { attempted: boolean; succeeded?: boolean } = { attempted: false };
+      if (shouldAttemptTerraformCliRepair(terraformCliCheck)) {
+        terraformCliRepair.attempted = true;
+        try {
+          const { check, succeeded } = await repairSessionTerraformAfterCliFailure(
+            sessionId,
+            description,
+            session,
+            terraformCliCheck,
+          );
+          terraformCliCheck = check;
+          terraformCliRepair.succeeded = succeeded;
+          if (succeeded) {
+            console.log("\n✅ Terraform CLI AI repair: validate passed after fix");
+            savedFiles = await storage.getFilesBySession(sessionId);
+          } else {
+            console.warn("\n⚠️ Terraform CLI AI repair: validate still failing — review diagnostics or Fix/Scan");
+            savedFiles = await storage.getFilesBySession(sessionId);
+          }
+        } catch (repairErr: unknown) {
+          console.error("Terraform CLI AI repair failed:", repairErr);
+          terraformCliRepair.succeeded = false;
+        }
+      }
+
       console.log(`\n✅ Sending response with ${savedFiles.length} file(s)`);
-      res.json(savedFiles);
+      res.json({ files: savedFiles, terraformCliCheck, terraformCliRepair });
     } catch (error: any) {
       const sessionIdForError = req.params.id || 'unknown';
       console.error('\n❌ ========== GENERATE TERRAFORM ERROR ==========');
@@ -1749,4 +1788,108 @@ This infrastructure was generated using natural language descriptions and AI ass
       });
     }
   });
+
+  /** AI repair after failed terraform validate (same engine as post-generate repair; for manual retry before commit). */
+  app.post(
+    "/api/sessions/:id/terraform-cli-repair",
+    optionalAuth,
+    validateRequest({ params: sessionIdParams, body: terraformCliRepairBody }),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const sessionId = req.params.id;
+        const session = await storage.getSession(sessionId);
+        if (!session) {
+          return res.status(404).json({ error: "Session not found" });
+        }
+        if (!session.userId || session.userId !== req.userId) {
+          return res.status(403).json({ error: "Access denied to this session" });
+        }
+
+        const description =
+          typeof req.body?.description === "string" ? req.body.description : "";
+
+        const sessionFiles = await storage.getFilesBySession(sessionId);
+        let terraformCliCheck = await runTerraformWorkspaceValidation(
+          sessionFiles.map((f) => ({ fileName: f.fileName, content: f.content })),
+        );
+
+        if (terraformCliCheck.validateOk) {
+          return res.json({
+            success: true,
+            message: "Terraform validate already passed; nothing to repair.",
+            terraformCliCheck,
+            terraformCliRepair: { attempted: false, succeeded: true },
+            files: sessionFiles,
+          });
+        }
+
+        if (!shouldAttemptTerraformCliRepair(terraformCliCheck)) {
+          return res.status(400).json({
+            error: "Cannot repair",
+            details: terraformCliCheck.skippedReason || "CLI check did not run or repair is disabled",
+            terraformCliCheck,
+          });
+        }
+
+        const { check, succeeded } = await repairSessionTerraformAfterCliFailure(
+          sessionId,
+          description,
+          session,
+          terraformCliCheck,
+        );
+        const files = await storage.getFilesBySession(sessionId);
+
+        return res.json({
+          success: succeeded,
+          message: succeeded
+            ? "Terraform files updated; validate passed after AI repair."
+            : "Terraform files were updated but validate may still report issues.",
+          terraformCliCheck: check,
+          terraformCliRepair: { attempted: true, succeeded },
+          files,
+        });
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error("terraform-cli-repair:", error);
+        return res.status(500).json({ error: msg || "CLI repair failed" });
+      }
+    },
+  );
+
+  /** AI repair from GitHub Actions terraform plan/validate logs (CI/CD card “Review and Fix”). */
+  app.post(
+    "/api/sessions/:id/terraform-cicd-repair",
+    optionalAuth,
+    validateRequest({ params: sessionIdParams, body: terraformCicdRepairBody }),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const sessionId = req.params.id;
+        const session = await storage.getSession(sessionId);
+        if (!session) {
+          return res.status(404).json({ error: "Session not found" });
+        }
+        if (!session.userId || session.userId !== req.userId) {
+          return res.status(403).json({ error: "Access denied to this session" });
+        }
+
+        const planLogs = String(req.body?.planLogs || "").trim();
+        if (!planLogs) {
+          return res.status(400).json({ error: "planLogs is required" });
+        }
+        const description =
+          typeof req.body?.description === "string" ? req.body.description : "";
+
+        await repairSessionTerraformFromCiPlanLogs(sessionId, description, session, planLogs);
+
+        return res.json({
+          success: true,
+          message: "Terraform updated from CI logs. Commit again to re-run validation.",
+        });
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error("terraform-cicd-repair:", error);
+        return res.status(500).json({ error: msg || "CI repair failed" });
+      }
+    },
+  );
 }

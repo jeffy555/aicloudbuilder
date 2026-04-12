@@ -12,6 +12,20 @@ export interface LoginRequest {
   rememberMe?: boolean;
 }
 
+/**
+ * Store JWT in exactly one place. getCurrentUser reads localStorage before sessionStorage,
+ * so we must clear the other store when logging in — otherwise a stale token wins.
+ */
+export function persistAuthToken(token: string, rememberMe: boolean): void {
+  if (rememberMe) {
+    sessionStorage.removeItem('token');
+    localStorage.setItem('token', token);
+  } else {
+    localStorage.removeItem('token');
+    sessionStorage.setItem('token', token);
+  }
+}
+
 export interface AuthResponse {
   message: string;
   user: Omit<User, 'password'>;
@@ -51,12 +65,19 @@ export async function login(data: LoginRequest): Promise<AuthResponse> {
     headers: {
       'Content-Type': 'application/json',
     },
+    credentials: 'include',
     body: JSON.stringify(data),
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Login failed');
+    const error = await response.json().catch(() => ({}));
+    let msg = (error as { error?: string }).error || 'Login failed';
+    const fieldErrors = (error as { errors?: { body?: Record<string, string[] | undefined> } }).errors?.body;
+    if (fieldErrors && typeof fieldErrors === 'object') {
+      const first = Object.values(fieldErrors).flat().find(Boolean);
+      if (first) msg = String(first);
+    }
+    throw new Error(msg);
   }
 
   return response.json();
@@ -89,22 +110,32 @@ export async function logout(): Promise<{ message: string }> {
  */
 export async function getCurrentUser(): Promise<CurrentUserResponse> {
   const token = localStorage.getItem('token') || sessionStorage.getItem('token');
-  
+
+  if (!token) {
+    throw new Error('No auth token');
+  }
+
   const response = await fetch('/api/auth/me', {
     method: 'GET',
     headers: {
       'Content-Type': 'application/json',
-      ...(token && { Authorization: `Bearer ${token}` }),
+      Authorization: `Bearer ${token}`,
     },
   });
 
   if (!response.ok) {
     if (response.status === 401) {
-      // Clear invalid token
-      localStorage.removeItem('token');
-      sessionStorage.removeItem('token');
+      // Only clear token if server explicitly says the JWT is invalid/expired,
+      // not on transient errors (e.g. server restart with MemStorage losing users).
+      // The JWT itself may still be valid — the user record just needs to be re-created.
+      const body = await response.json().catch(() => ({}));
+      if (body?.error === 'Invalid or expired token' || body?.error === 'Token verification failed') {
+        localStorage.removeItem('token');
+        sessionStorage.removeItem('token');
+      }
+      throw new Error(body?.error || 'Authentication check failed');
     }
-    const error = await response.json();
+    const error = await response.json().catch(() => ({ error: 'Failed to get user' }));
     throw new Error(error.error || 'Failed to get user');
   }
 

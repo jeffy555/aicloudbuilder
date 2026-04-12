@@ -1,7 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import mermaid from "mermaid";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { generateBuildId, saveBuildHistory } from "@/lib/build-history";
 import { useSecretsConfig } from "@/hooks/useSecretsConfig";
 import Header from "@/components/Header";
 import ChatInput from "@/components/ChatInput";
@@ -12,8 +14,10 @@ import CodeEditor from "@/components/CodeEditor";
 import StepIndicator from "@/components/StepIndicator";
 import ActionButtons from "@/components/ActionButtons";
 import ActivityPanel from "@/components/ActivityPanel";
+import BuildHistoryPanel from "@/components/BuildHistoryPanel";
+import { TerraformModuleCicdCard } from "@/components/TerraformModuleCicdCard";
 import { CodeIcon } from "@radix-ui/react-icons";
-import { Cloud, CloudCog, Package, Home, FileText, X, RefreshCw, Loader2, Box, Layers, Network, FileCode, CheckCircle2, Clock3, PlayCircle, BarChart3, Hash, FolderOpen, ChevronRight, Cpu, Database, Globe, Shield, Lock, Activity } from "lucide-react";
+import { Cloud, CloudCog, Package, Home, FileText, X, RefreshCw, Loader2, Box, Layers, Network, FileCode, CheckCircle2, Clock3, PlayCircle, BarChart3, Hash, FolderOpen, ChevronRight, ChevronDown, Cpu, Database, Globe, Shield, Lock, Activity, DollarSign, Download } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,7 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import type { Session, GeneratedFile, Repository, RepositoryScanResult } from "@shared/schema";
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 
 // ── Terraform resource type → friendly label ─────────────────────────────────
 const TF_RESOURCE_LABELS: Record<string, { label: string; icon: any }> = {
@@ -79,6 +83,169 @@ type Provider = 'github' | 'azure' | null;
 type CloudProvider = 'azure' | 'aws' | 'gcp' | null;
 type ModuleApproach = 'child-module' | 'standalone-root' | 'aggregated-root' | null;
 
+type TerraformCliCheckResult = {
+  ran?: boolean;
+  skippedReason?: string;
+  initOk?: boolean;
+  validateOk?: boolean;
+  diagnostics?: Array<{ summary?: string; detail?: string }>;
+};
+
+type TerraformCliRepairResult = {
+  attempted?: boolean;
+  succeeded?: boolean;
+};
+
+const TERRAFORM_MODULE_CICD_STORAGE_PREFIX = 'terraform_module_cicd_v1:';
+
+function readStoredTerraformModuleCicd(sessionId: string): {
+  terraformCicdInfo: Record<string, unknown> | null;
+  expectedWorkflowHeadSha: string | null;
+  isCommitted: boolean;
+  moduleApproach: ModuleApproach;
+} | null {
+  try {
+    const raw = localStorage.getItem(`${TERRAFORM_MODULE_CICD_STORAGE_PREFIX}${sessionId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      terraformCicdInfo?: Record<string, unknown>;
+      expectedWorkflowHeadSha?: string | null;
+      isCommitted?: boolean;
+      moduleApproach?: ModuleApproach;
+    };
+    return {
+      terraformCicdInfo: parsed.terraformCicdInfo ?? null,
+      expectedWorkflowHeadSha: parsed.expectedWorkflowHeadSha ?? null,
+      isCommitted: Boolean(parsed.isCommitted),
+      moduleApproach: parsed.moduleApproach ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredTerraformModuleCicd(
+  sessionId: string,
+  payload: {
+    terraformCicdInfo: Record<string, unknown> | null;
+    expectedWorkflowHeadSha: string | null;
+    isCommitted: boolean;
+    moduleApproach: ModuleApproach;
+  }
+) {
+  try {
+    localStorage.setItem(`${TERRAFORM_MODULE_CICD_STORAGE_PREFIX}${sessionId}`, JSON.stringify(payload));
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+function clearStoredTerraformModuleCicd(sessionId: string) {
+  try {
+    localStorage.removeItem(`${TERRAFORM_MODULE_CICD_STORAGE_PREFIX}${sessionId}`);
+  } catch {
+    // ignore
+  }
+}
+
+/** Renders a Mermaid diagram from stored syntax — used in the build report */
+function ArchitectureDiagramPreview({ mermaidSyntax }: { mermaidSyntax: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current || !mermaidSyntax) return;
+    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+    const id = `report-diagram-${Math.random().toString(36).slice(2)}`;
+    mermaid.render(id, mermaidSyntax)
+      .then(({ svg }) => {
+        if (containerRef.current) containerRef.current.innerHTML = svg;
+      })
+      .catch((err) => setError(err?.message ?? 'Diagram render error'));
+  }, [mermaidSyntax]);
+
+  if (error) return <p className="text-xs text-rose-600 p-4">{error}</p>;
+  return <div ref={containerRef} className="overflow-auto max-h-[500px] flex justify-center" />;
+}
+
+// ─── Terraform generation animated loader ─────────────────────────────────────
+const TF_GEN_STEPS = [
+  'Parsing your infrastructure description…',
+  'Selecting Azure resource types…',
+  'Writing provider and variable blocks…',
+  'Generating resource configurations…',
+  'Adding outputs and dependencies…',
+  'Applying Terraform best practices…',
+  'Finalising configuration files…',
+];
+
+function TerraformGeneratingLoader() {
+  const [stepIdx, setStepIdx] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setStepIdx(i => (i + 1) % TF_GEN_STEPS.length), 2800);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div className="rounded-2xl border border-primary/20 bg-primary/5 p-8 space-y-6 text-center">
+      {/* Animated indeterminate bar */}
+      <div className="relative h-2 w-full rounded-full bg-primary/15 overflow-hidden">
+        <div
+          className="absolute inset-y-0 rounded-full bg-gradient-to-r from-primary/60 via-primary to-primary/60"
+          style={{
+            width: '45%',
+            animation: 'tfbar 1.6s ease-in-out infinite',
+          }}
+        />
+      </div>
+
+      {/* Bouncing dots */}
+      <div className="flex items-center justify-center gap-1.5">
+        {[0, 1, 2].map(i => (
+          <span
+            key={i}
+            className="block w-2 h-2 rounded-full bg-primary"
+            style={{ animation: `tfbounce 1.2s ease-in-out ${i * 0.2}s infinite` }}
+          />
+        ))}
+      </div>
+
+      {/* Headline */}
+      <div className="space-y-1">
+        <p className="text-base font-semibold text-foreground">Generating Terraform configuration…</p>
+        <p className="text-sm text-primary font-medium min-h-[1.25rem] transition-opacity">{TF_GEN_STEPS[stepIdx]}</p>
+      </div>
+
+      {/* Step pill indicators */}
+      <div className="flex justify-center gap-1.5 flex-wrap">
+        {TF_GEN_STEPS.map((_, i) => (
+          <div
+            key={i}
+            className={`h-1.5 w-8 rounded-full transition-all duration-500 ${
+              i < stepIdx ? 'bg-primary' : i === stepIdx ? 'bg-primary/60' : 'bg-muted'
+            }`}
+          />
+        ))}
+      </div>
+
+      <p className="text-xs text-muted-foreground">This typically takes 15–30 seconds</p>
+
+      {/* Keyframe styles injected once */}
+      <style>{`
+        @keyframes tfbar {
+          0%   { left: -45%; }
+          100% { left: 100%; }
+        }
+        @keyframes tfbounce {
+          0%, 80%, 100% { transform: translateY(0); opacity: 0.6; }
+          40%            { transform: translateY(-8px); opacity: 1; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
 export default function TerraformWorkflow() {
   const { toast } = useToast();
   const [, setLocation] = useLocation();
@@ -88,6 +255,7 @@ export default function TerraformWorkflow() {
   const [provider, setProvider] = useState<Provider>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>('');
   const [childModuleRepoId, setChildModuleRepoId] = useState<string>('');
+  const [childModuleRepoName, setChildModuleRepoName] = useState<string>('');
   const [childModuleResources, setChildModuleResources] = useState<Array<{ type: string; name: string; description?: string }>>([]);
   const [childModuleReviewed, setChildModuleReviewed] = useState<boolean>(false);
   const [resourceValidationResult, setResourceValidationResult] = useState<{ valid: boolean; message?: string; requestedResources?: string[]; availableResources?: string[]; unavailableResources?: string[] } | null>(null);
@@ -95,9 +263,21 @@ export default function TerraformWorkflow() {
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>(null);
   const [moduleApproach, setModuleApproach] = useState<ModuleApproach>(null);
   const [isCommitted, setIsCommitted] = useState<boolean>(false);
+  /** Post-commit GitHub CI/CD (standalone-root / aggregated-root only) — from commit response `cicd` */
+  const [terraformCicdInfo, setTerraformCicdInfo] = useState<Record<string, unknown> | null>(null);
+  const [expectedWorkflowHeadSha, setExpectedWorkflowHeadSha] = useState<string | null>(null);
   const [scanCompleted, setScanCompleted] = useState<boolean>(false);
   const [buildId, setBuildId] = useState<string | null>(null);
-  const [activityViewMode, setActivityViewMode] = useState<'overview' | 'build' | 'code'>('overview');
+  const [buildCompletedAt, setBuildCompletedAt] = useState<string | null>(null);
+  const [completedPipelineStages, setCompletedPipelineStages] = useState<string[]>([]);
+  const [buildDiagramResult, setBuildDiagramResult] = useState<any | null>(null);
+  const [buildScanResult, setBuildScanResult] = useState<any | null>(null);
+  const [buildCostResult, setBuildCostResult] = useState<any | null>(null);
+  const [buildAutoRun, setBuildAutoRun] = useState(false);
+  const [activityViewMode, setActivityViewMode] = useState<'overview' | 'build' | 'code' | 'report'>('overview');
+  const [workflowNotice, setWorkflowNotice] = useState<{ tone: 'info' | 'success'; text: string } | null>(null);
+  const [showChildResourceCatalog, setShowChildResourceCatalog] = useState(false);
+  const [showValidationDetails, setShowValidationDetails] = useState(false);
   const [repositoryScanResult, setRepositoryScanResult] = useState<RepositoryScanResult | null>(null);
   const [backendConfigured, setBackendConfigured] = useState<boolean>(false);
   // Azure backend fields
@@ -166,7 +346,21 @@ export default function TerraformWorkflow() {
           if (session.backendContainer) setBackendContainer(session.backendContainer);
           if (session.isExistingRepo === 'true') setScanCompleted(true);
 
+          const storedCicd = readStoredTerraformModuleCicd(session.id);
+          if (
+            storedCicd?.isCommitted &&
+            storedCicd.terraformCicdInfo &&
+            session.provider === 'github' &&
+            (session.moduleApproach === 'standalone-root' || session.moduleApproach === 'aggregated-root') &&
+            storedCicd.moduleApproach === session.moduleApproach
+          ) {
+            setIsCommitted(true);
+            setTerraformCicdInfo(storedCicd.terraformCicdInfo);
+            setExpectedWorkflowHeadSha(storedCicd.expectedWorkflowHeadSha);
+          }
+
           console.log('Restored existing session:', session.id, 'at step', session.currentStep);
+          setWorkflowNotice({ tone: 'info', text: `Session restored at step ${session.currentStep || '1'}.` });
           return; // Session exists, no need to create new one
         } catch (error) {
           // Session doesn't exist anymore, create new one
@@ -183,6 +377,7 @@ export default function TerraformWorkflow() {
       // Save session ID to localStorage for persistence
       localStorage.setItem('terraform_workflow_session_id', session.id);
       console.log('Created new session:', session.id);
+      setWorkflowNotice({ tone: 'success', text: 'New Terraform session initialized.' });
 
       // Tag session with module type for history tracking
       await apiRequest('PATCH', `/api/sessions/${session.id}`, { activeModule: 'terraform' });
@@ -231,6 +426,27 @@ export default function TerraformWorkflow() {
       }
     }
   }, [session?.currentStep, hasInitialized]);
+
+  // Persist post-commit Terraform root-module CI/CD payload so refresh keeps GitHub validate/apply UI
+  useEffect(() => {
+    if (!sessionId) return;
+    if (!isCommitted || !terraformCicdInfo) return;
+    if (provider !== 'github') return;
+    if (moduleApproach !== 'standalone-root' && moduleApproach !== 'aggregated-root') return;
+    writeStoredTerraformModuleCicd(sessionId, {
+      terraformCicdInfo,
+      expectedWorkflowHeadSha,
+      isCommitted,
+      moduleApproach,
+    });
+  }, [
+    sessionId,
+    isCommitted,
+    terraformCicdInfo,
+    expectedWorkflowHeadSha,
+    moduleApproach,
+    provider,
+  ]);
 
   // Re-fetch child module resources when entering Step 7 if they're empty
   useEffect(() => {
@@ -314,6 +530,11 @@ export default function TerraformWorkflow() {
       setActivityViewMode('overview');
       setScanCompleted(false);
       setBuildId(null);
+      setBuildCompletedAt(null);
+      setCompletedPipelineStages([]);
+      setBuildDiagramResult(null);
+      setBuildScanResult(null);
+      setBuildCostResult(null);
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
     }
   }, [currentStep]);
@@ -501,7 +722,10 @@ export default function TerraformWorkflow() {
       const requestBody: any = { description };
       if (moduleApproach === 'aggregated-root' && childModuleResources.length > 0) {
         requestBody.childModuleResources = childModuleResources.map(r => r.type);
+        requestBody.childModuleRepoName = childModuleRepoName;
+        requestBody.childModuleProvider = provider;
         console.log('📋 Child module resources:', requestBody.childModuleResources);
+        console.log('📋 Child module repo:', childModuleRepoName, '(provider:', provider, ')');
       }
       
       console.log('📤 Sending request to backend...');
@@ -510,10 +734,27 @@ export default function TerraformWorkflow() {
       const res = await apiRequest('POST', `/api/sessions/${sessionId}/generate-terraform`, requestBody);
       const result = await res.json();
       console.log('✅ Backend response received:', result);
-      return result;
+
+      const payload = result as
+        | GeneratedFile[]
+        | {
+            files?: GeneratedFile[];
+            terraformCliCheck?: TerraformCliCheckResult;
+            terraformCliRepair?: TerraformCliRepairResult;
+          };
+      const fileList: GeneratedFile[] = Array.isArray(payload)
+        ? payload
+        : (payload.files ?? []);
+      const cli = Array.isArray(payload) ? undefined : payload.terraformCliCheck;
+      const cliRepair = Array.isArray(payload) ? undefined : payload.terraformCliRepair;
+
+      return { files: fileList, terraformCliCheck: cli, terraformCliRepair: cliRepair };
     },
     onSuccess: async (data) => {
-      console.log('✅ Generation successful, response:', data);
+      const fileList = data.files;
+      const cli = data.terraformCliCheck;
+      const cliRepair = data.terraformCliRepair;
+      console.log('✅ Generation successful, files:', fileList?.length, 'cli:', cli, 'repair:', cliRepair);
       
       // Refetch session to get updated currentStep from backend
       console.log('🔄 Refreshing session to sync step...');
@@ -601,10 +842,47 @@ export default function TerraformWorkflow() {
         // The useEffect will sync currentStep to 8 when session updates
       }
       setScanCompleted(false); // Reset scan state for new files
-      toast({
-        title: "Success",
-        description: "Terraform files generated successfully",
-      });
+
+      if (cliRepair?.attempted && cliRepair.succeeded === true) {
+        toast({
+          title: "Terraform validate fixed",
+          description:
+            "AI repair updated your files after a failed validate. You can commit and run CI again.",
+        });
+      } else if (cliRepair?.attempted && cli?.validateOk === false) {
+        const diag = cli?.diagnostics?.length
+          ? cli.diagnostics
+              .map((d) => d.detail || d.summary || "")
+              .filter(Boolean)
+              .slice(0, 3)
+              .join(" · ")
+          : "Try Fix / Scan, or POST /api/sessions/.../terraform-cli-repair to retry.";
+        toast({
+          title: "Terraform validate still failing after AI repair",
+          description: diag.slice(0, 500) + (diag.length > 500 ? "…" : ""),
+          variant: "destructive",
+          duration: 14_000,
+        });
+      } else if (cli?.ran && cli.validateOk === false) {
+        const diag = cli.diagnostics?.length
+          ? cli.diagnostics
+              .map((d) => d.detail || d.summary || "")
+              .filter(Boolean)
+              .slice(0, 3)
+              .join(" · ")
+          : "Run terraform validate locally or use Fix / Scan in the app.";
+        toast({
+          title: "Terraform validate reported issues (plan may still fail in CI)",
+          description: diag.slice(0, 500) + (diag.length > 500 ? "…" : ""),
+          variant: "destructive",
+          duration: 14_000,
+        });
+      } else {
+        toast({
+          title: "Success",
+          description: "Terraform files generated successfully",
+        });
+      }
     },
     onError: async (error: any) => {
       console.error('\n❌ ========== FRONTEND: Generate Terraform Error ==========');
@@ -677,6 +955,7 @@ export default function TerraformWorkflow() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
       setScanCompleted(false); // Reset scan state when files are edited
+      setWorkflowNotice({ tone: 'success', text: 'Code changes saved. Build status reset for re-validation.' });
     }
   });
 
@@ -711,18 +990,42 @@ export default function TerraformWorkflow() {
     },
     onSuccess: (data: any) => {
       setIsCommitted(true);
-      toast({
-        title: "Success!",
-        description: `Your Terraform configuration has been committed: ${data.commitMessage}`,
-      });
-      
+      const sha = String(data?.commitSha || data?.cicd?.commitSha || '').trim();
+      setExpectedWorkflowHeadSha(sha || null);
+
+      const rootGithubCicd =
+        provider === 'github' &&
+        (moduleApproach === 'standalone-root' || moduleApproach === 'aggregated-root') &&
+        data?.cicd;
+
+      if (rootGithubCicd) {
+        setTerraformCicdInfo(data.cicd as Record<string, unknown>);
+        toast({
+          title: 'Code committed successfully',
+          description: data?.cicd?.validateWorkflowTriggered
+            ? 'Terraform pushed; GitHub validate workflow triggered.'
+            : `Your Terraform configuration has been committed: ${data.commitMessage}`,
+        });
+        if (Array.isArray(data?.skippedWorkflowFiles) && data.skippedWorkflowFiles.length > 0) {
+          toast({
+            title: 'Workflow files skipped',
+            description:
+              'Terraform was committed, but GitHub workflow files need a token with workflow scope.',
+            variant: 'destructive',
+          });
+        }
+      } else {
+        toast({
+          title: 'Success!',
+          description: `Your Terraform configuration has been committed: ${data.commitMessage}`,
+        });
+        // Navigate to home after a short delay — child-module / non-GitHub / no CI metadata
+        setTimeout(() => {
+          setLocation('/');
+        }, 2000);
+      }
+
       chatMutation.mutate(`Files committed successfully with message: "${data.commitMessage}"`);
-      
-      // Navigate to home after a short delay to show the success message
-      // Session is automatically reset on server side, so we can start fresh
-      setTimeout(() => {
-        setLocation('/');
-      }, 2000);
     },
     onError: (error: any) => {
       const errorMessage = error?.message || "Failed to commit files. Please try again.";
@@ -742,6 +1045,8 @@ export default function TerraformWorkflow() {
   // Handle refresh - reset session and state
   const handleRefresh = async () => {
     try {
+      const prevSessionId = localStorage.getItem('terraform_workflow_session_id');
+      if (prevSessionId) clearStoredTerraformModuleCicd(prevSessionId);
       localStorage.removeItem('terraform_workflow_session_id');
       setSessionId('');
       setCurrentStep(1);
@@ -761,7 +1066,15 @@ export default function TerraformWorkflow() {
       setExistingFiles([]);
       setSelectedFileToReview(null);
       setIsCommitted(false);
+      setTerraformCicdInfo(null);
+      setExpectedWorkflowHeadSha(null);
       setScanCompleted(false);
+      setBuildId(null);
+      setBuildCompletedAt(null);
+      setCompletedPipelineStages([]);
+      setBuildDiagramResult(null);
+      setBuildScanResult(null);
+      setBuildCostResult(null);
       setRepositoryScanResult(null);
       
       queryClient.invalidateQueries({ queryKey: ['/api/sessions'] });
@@ -783,6 +1096,7 @@ export default function TerraformWorkflow() {
         title: "Refreshed",
         description: "Started a new session. You can now begin a new Terraform workflow.",
       });
+      setWorkflowNotice({ tone: 'success', text: 'Workflow refreshed. A new session is ready.' });
     } catch (error: any) {
       console.error('Failed to refresh:', error);
       toast({
@@ -899,7 +1213,7 @@ export default function TerraformWorkflow() {
           if (scanResult.terraformFilesWithContent && scanResult.terraformFilesWithContent.length > 0) {
             setExistingFiles(scanResult.terraformFilesWithContent);
           } else {
-            setExistingFiles(scanResult.terraformFiles.map(path => ({ path, content: '' })));
+            setExistingFiles(scanResult.terraformFiles.map((path: string) => ({ path, content: '' })));
           }
           setExistingFilesReviewed(false);
 
@@ -944,7 +1258,7 @@ export default function TerraformWorkflow() {
           hasResources: false,
           hasModules: false,
           providerBlocks: [],
-          backend: { hasBackend: false }
+          backend: { hasBackend: false, backendType: null }
         } as RepositoryScanResult);
         setExistingFiles([]);
         setExistingFilesReviewed(true);
@@ -966,9 +1280,10 @@ export default function TerraformWorkflow() {
     if (moduleApproach === 'aggregated-root' && currentStep === 4 && !childModuleReviewed) {
       setChildModuleRepoId(repoId);
       const repo = repositories.find(r => r.id === repoId);
-      
-      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-        message: `Selected child module repository: ${repo?.name}` 
+      setChildModuleRepoName(repo?.name || '');
+
+      await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+        message: `Selected child module repository: ${repo?.name}`
       });
 
       // Scan the child module repository to extract resources
@@ -1059,7 +1374,7 @@ export default function TerraformWorkflow() {
           hasResources: false,
           hasModules: false,
           providerBlocks: [],
-          backend: { hasBackend: false }
+          backend: { hasBackend: false, backendType: null }
         } as RepositoryScanResult);
         await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
           message: 'Unable to scan repository. Backend configuration will be required.' 
@@ -1097,7 +1412,7 @@ export default function TerraformWorkflow() {
       if (scanResult.terraformFilesWithContent && scanResult.terraformFilesWithContent.length > 0) {
         setExistingFiles(scanResult.terraformFilesWithContent);
       } else {
-        setExistingFiles(scanResult.terraformFiles.map(path => ({ path, content: '' })));
+        setExistingFiles(scanResult.terraformFiles.map((path: string) => ({ path, content: '' })));
       }
       setExistingFilesReviewed(false);
 
@@ -1148,7 +1463,7 @@ export default function TerraformWorkflow() {
         hasResources: false,
         hasModules: false,
         providerBlocks: [],
-        backend: { hasBackend: false }
+        backend: { hasBackend: false, backendType: null }
       } as RepositoryScanResult);
       setExistingFiles([]);
       setExistingFilesReviewed(true);
@@ -1184,7 +1499,7 @@ export default function TerraformWorkflow() {
         hasResources: false,
         hasModules: false,
         providerBlocks: [],
-        backend: { hasBackend: false }
+        backend: { hasBackend: false, backendType: null }
       } as RepositoryScanResult);
 
       // Single consolidated message
@@ -1274,9 +1589,10 @@ export default function TerraformWorkflow() {
         message: `Module approach selected: ${approachName}. Describe the infrastructure components to generate.`
       });
     } else if (selectedApproach === 'aggregated-root') {
-      // Reset repository selection state for child module selection
-      setSelectedRepo('');
+      // Keep selectedRepo — the repo chosen in Step 2 is the root module repo
+      // Only reset the child module state
       setChildModuleRepoId('');
+      setChildModuleRepoName('');
       setChildModuleResources([]);
       setChildModuleReviewed(false);
 
@@ -1469,14 +1785,15 @@ export default function TerraformWorkflow() {
     }
     
     try {
-      console.log('📤 Step 1: Calling chatMutation...');
-      await chatMutation.mutateAsync(message);
-      console.log('✅ Step 1: chatMutation completed');
-      
-      console.log('📤 Step 2: Calling generateTerraformMutation...');
+      // Save chat message in background — don't block generation on it
+      chatMutation.mutateAsync(message).catch((e: any) =>
+        console.warn('Chat save failed (non-blocking):', e?.message)
+      );
+
+      console.log('📤 Calling generateTerraformMutation...');
       await generateTerraformMutation.mutateAsync(message);
-      console.log('✅ Step 2: generateTerraformMutation completed');
-      
+      console.log('✅ generateTerraformMutation completed');
+
       console.log('✅ ========== handleGenerateRequest COMPLETE ==========');
     } catch (error: any) {
       console.error('❌ Error in handleGenerateRequest:', error);
@@ -1516,14 +1833,19 @@ export default function TerraformWorkflow() {
   }
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 via-emerald-50/30 to-white relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-24 -left-20 h-72 w-72 rounded-full bg-emerald-300/20 blur-3xl" />
+        <div className="absolute top-24 -right-24 h-80 w-80 rounded-full bg-cyan-300/20 blur-3xl" />
+        <div className="absolute bottom-0 left-1/3 h-64 w-64 rounded-full bg-violet-300/15 blur-3xl" />
+      </div>
       <Header />
 
-      <main className="container mx-auto px-4 py-6 max-w-7xl">
-        <div className="mb-6">
+      <main className="container mx-auto px-4 py-6 max-w-7xl relative z-10">
+        <div className="mb-6 rounded-2xl border border-emerald-100/70 bg-white/80 backdrop-blur-sm px-4 py-4 shadow-sm">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-primary/10">
+              <div className="p-2 rounded-lg bg-gradient-to-br from-emerald-100 to-cyan-100 border border-emerald-200/60">
                 <Cloud className="w-6 h-6 text-primary" />
               </div>
               <div>
@@ -1539,6 +1861,7 @@ export default function TerraformWorkflow() {
                 size="sm"
                 onClick={handleRefresh}
                 disabled={generateTerraformMutation.isPending}
+                data-testid="terraform-btn-refresh"
               >
                 <RefreshCw className="w-4 h-4 mr-2" />
                 Refresh
@@ -1547,6 +1870,7 @@ export default function TerraformWorkflow() {
                 variant="outline"
                 size="sm"
                 onClick={handleGoHome}
+                data-testid="terraform-btn-home"
               >
                 <Home className="w-4 h-4 mr-2" />
                 Home
@@ -1556,8 +1880,7 @@ export default function TerraformWorkflow() {
         </div>
 
         <StepIndicator steps={steps} currentStep={currentStep} />
-
-        <ScrollArea className="flex-1 px-4 sm:px-6 lg:px-8 mt-6">
+        <ScrollArea className="flex-1 px-4 sm:px-6 lg:px-8 mt-4">
           <div className="max-w-6xl mx-auto pb-8 space-y-6">
             <div className="rounded-xl border bg-card p-5 sm:p-6">
               <div className="flex flex-col gap-4">
@@ -1575,6 +1898,15 @@ export default function TerraformWorkflow() {
                     <span className="font-medium">Next Action: {getNextActionLabel()}</span>
                   </div>
                 </div>
+                {workflowNotice && (
+                  <div className={`rounded-md border px-3 py-2 text-xs ${
+                    workflowNotice.tone === 'success'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300'
+                      : 'border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-300'
+                  }`}>
+                    {workflowNotice.text}
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
                   {workflowSummaryItems.map((item) => (
@@ -1637,7 +1969,7 @@ export default function TerraformWorkflow() {
                   {!config?.hasGithub && !config?.hasAzureDevOps && (
                     <div className="col-span-2 text-center py-12">
                       <p className="text-muted-foreground mb-4">No repository providers configured.</p>
-                      <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                      <Button onClick={() => setLocation('/settings')} data-testid="terraform-btn-settings">Go to Settings</Button>
                     </div>
                   )}
                 </div>
@@ -1661,6 +1993,7 @@ export default function TerraformWorkflow() {
                       setProvider(null);
                       setCurrentStep(1);
                     }}
+                    data-testid="terraform-btn-back-step2"
                   >
                     ← Back
                   </Button>
@@ -1710,6 +2043,7 @@ export default function TerraformWorkflow() {
                         setCloudProvider(null);
                       }}
                       className="text-green-700 dark:text-green-300"
+                      data-testid="terraform-btn-change-repo"
                     >
                       Change
                     </Button>
@@ -1739,6 +2073,7 @@ export default function TerraformWorkflow() {
                           apiRequest('PATCH', `/api/sessions/${sessionId}`, { cloudProvider: null });
                         }}
                         className="text-blue-700 dark:text-blue-300"
+                        data-testid="terraform-btn-change-provider"
                       >
                         Change
                       </Button>
@@ -1797,18 +2132,16 @@ export default function TerraformWorkflow() {
                       data-testid="card-cloud-azure"
                     />
                   )}
-                  {config?.hasAws && (
-                    <ProviderCard
-                      icon={<CloudCog className="w-6 h-6" />}
-                      title="Amazon Web Services"
-                      description="Generate Terraform for AWS cloud resources"
-                      onClick={() => handleCloudProviderSelect('aws')}
-                      selected={cloudProvider === 'aws'}
-                      cloudProvider="aws"
-                      fillBackground={true}
-                      data-testid="card-cloud-aws"
-                    />
-                  )}
+                  <ProviderCard
+                    icon={<CloudCog className="w-6 h-6" />}
+                    title="Amazon Web Services"
+                    description="Generate Terraform for AWS cloud resources"
+                    onClick={() => handleCloudProviderSelect('aws')}
+                    selected={cloudProvider === 'aws'}
+                    cloudProvider="aws"
+                    fillBackground={true}
+                    data-testid="card-cloud-aws"
+                  />
                   {config?.hasGcp && (
                     <ProviderCard
                       icon={<Package className="w-6 h-6" />}
@@ -1821,10 +2154,10 @@ export default function TerraformWorkflow() {
                       data-testid="card-cloud-gcp"
                     />
                   )}
-                  {!config?.hasAzureCloud && !config?.hasAws && !config?.hasGcp && (
+                  {!config?.hasAzureCloud && !config?.hasGcp && (
                     <div className="col-span-3 text-center py-12">
                       <p className="text-muted-foreground mb-4">No cloud providers configured.</p>
-                      <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                      <Button onClick={() => setLocation('/settings')} data-testid="terraform-btn-settings">Go to Settings</Button>
                     </div>
                   )}
                 </div>
@@ -1853,18 +2186,16 @@ export default function TerraformWorkflow() {
                       data-testid="card-cloud-azure"
                     />
                   )}
-                  {config?.hasAws && (
-                    <ProviderCard
-                      icon={<CloudCog className="w-6 h-6" />}
-                      title="Amazon Web Services"
-                      description="Generate Terraform for AWS cloud resources"
-                      onClick={() => handleCloudProviderSelect('aws')}
-                      selected={cloudProvider === 'aws'}
-                      cloudProvider="aws"
-                      fillBackground={true}
-                      data-testid="card-cloud-aws"
-                    />
-                  )}
+                  <ProviderCard
+                    icon={<CloudCog className="w-6 h-6" />}
+                    title="Amazon Web Services"
+                    description="Generate Terraform for AWS cloud resources"
+                    onClick={() => handleCloudProviderSelect('aws')}
+                    selected={cloudProvider === 'aws'}
+                    cloudProvider="aws"
+                    fillBackground={true}
+                    data-testid="card-cloud-aws"
+                  />
                   {config?.hasGcp && (
                     <ProviderCard
                       icon={<Package className="w-6 h-6" />}
@@ -1877,10 +2208,10 @@ export default function TerraformWorkflow() {
                       data-testid="card-cloud-gcp"
                     />
                   )}
-                  {!config?.hasAzureCloud && !config?.hasAws && !config?.hasGcp && (
+                  {!config?.hasAzureCloud && !config?.hasGcp && (
                     <div className="col-span-3 text-center py-12">
                       <p className="text-muted-foreground mb-4">No cloud providers configured.</p>
-                      <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                      <Button onClick={() => setLocation('/settings')} data-testid="terraform-btn-settings">Go to Settings</Button>
                     </div>
                   )}
                 </div>
@@ -1969,8 +2300,10 @@ export default function TerraformWorkflow() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        data-testid="terraform-btn-change-child-repo"
                         onClick={() => {
                           setChildModuleRepoId('');
+                          setChildModuleRepoName('');
                           setChildModuleResources([]);
                           setChildModuleReviewed(false);
                         }}
@@ -1984,14 +2317,28 @@ export default function TerraformWorkflow() {
 
                 {childModuleResources.length > 0 && (
                   <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 p-4 mb-6">
-                    <div className="flex items-center gap-2 mb-3">
-                      <Package className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-                      <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100">
-                        Available Child Module Resources
-                      </h3>
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                      <div className="flex items-center gap-2">
+                        <Package className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                        <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100">
+                          Available Child Module Resources
+                        </h3>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowChildResourceCatalog((prev) => !prev)}
+                        className="text-blue-700 dark:text-blue-300"
+                      >
+                        {showChildResourceCatalog ? 'Hide details' : 'Show details'}
+                        {showChildResourceCatalog ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronRight className="w-4 h-4 ml-1" />}
+                      </Button>
                     </div>
+                    <p className="text-sm text-blue-800 dark:text-blue-200 mb-3">
+                      These are the validated child-module capabilities available for composition in the root module.
+                    </p>
                     <div className="flex flex-wrap gap-2">
-                      {childModuleResources.map((resource, idx) => (
+                      {(showChildResourceCatalog ? childModuleResources : childModuleResources.slice(0, 8)).map((resource, idx) => (
                         <span 
                           key={idx}
                           className="inline-flex items-center gap-1 px-3 py-1 rounded-md bg-white dark:bg-gray-800 text-xs font-mono text-blue-800 dark:text-blue-200 border border-blue-300 dark:border-blue-700"
@@ -2000,6 +2347,11 @@ export default function TerraformWorkflow() {
                         </span>
                       ))}
                     </div>
+                    {!showChildResourceCatalog && childModuleResources.length > 8 && (
+                      <p className="mt-3 text-xs text-blue-700 dark:text-blue-300">
+                        Showing 8 of {childModuleResources.length} resources. Expand to review the full catalog.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -2007,6 +2359,7 @@ export default function TerraformWorkflow() {
                   <div className="flex gap-4 justify-end">
                     <Button
                       variant="outline"
+                      data-testid="terraform-btn-back-step5"
                       onClick={() => {
                         setChildModuleReviewed(false);
                         setCurrentStep(4);
@@ -2017,15 +2370,37 @@ export default function TerraformWorkflow() {
                     <Button
                       onClick={async () => {
                         setChildModuleReviewed(true);
-                        await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '5' });
-                        setCurrentStep(5);
-                        queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
-                        await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, { 
-                          message: 'Child module reviewed. Now select or create the root module repository.' 
-                        });
+
+                        if (selectedRepo) {
+                          // Root module repo already chosen in Step 2 — skip Step 5
+                          try {
+                            const scanResult = await scanRepositoryMutation.mutateAsync();
+                            setRepositoryScanResult(scanResult);
+                          } catch {
+                            setRepositoryScanResult({
+                              isExisting: false, cloudProvider: null, moduleType: null,
+                              terraformFiles: [], hasResources: false, hasModules: false,
+                              providerBlocks: [], backend: { hasBackend: false }
+                            } as unknown as RepositoryScanResult);
+                          }
+                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
+                          setCurrentStep(6);
+                          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+                          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+                            message: 'Child module reviewed. Proceeding to backend configuration with the selected root module repository.'
+                          });
+                        } else {
+                          // No root repo selected yet — go to Step 5 to pick one
+                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '5' });
+                          setCurrentStep(5);
+                          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId] });
+                          await apiRequest('POST', `/api/sessions/${sessionId}/messages/system`, {
+                            message: 'Child module reviewed. Now select or create the root module repository.'
+                          });
+                        }
                       }}
                     >
-                      Continue to Root Module Repository →
+                      {selectedRepo ? 'Continue to Backend →' : 'Continue to Root Module Repository →'}
                     </Button>
                   </div>
                 )}
@@ -2076,6 +2451,7 @@ export default function TerraformWorkflow() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        data-testid="terraform-btn-change-root-repo"
                         onClick={() => {
                           setSelectedRepo('');
                           setRepositoryScanResult(null);
@@ -2092,6 +2468,7 @@ export default function TerraformWorkflow() {
                   <div className="flex gap-4 justify-end">
                     <Button
                       variant="outline"
+                      data-testid="terraform-btn-back-step3"
                       onClick={() => setCurrentStep(2)}
                     >
                       ← Back
@@ -2168,6 +2545,7 @@ export default function TerraformWorkflow() {
                               }}
                       disabled={configureBackendMutation.isPending}
                               readOnly={false}
+                              data-testid="terraform-input-backend-aws-bucket"
                               className="w-full h-11 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                               autoComplete="off"
                             />
@@ -2191,6 +2569,7 @@ export default function TerraformWorkflow() {
                               }}
                               disabled={configureBackendMutation.isPending}
                               readOnly={false}
+                              data-testid="terraform-input-backend-dynamodb-table"
                               className="w-full h-11 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                               autoComplete="off"
                             />
@@ -2211,6 +2590,7 @@ export default function TerraformWorkflow() {
                               onChange={(e) => setBackendRegion(e.target.value)}
                               disabled={configureBackendMutation.isPending}
                               readOnly={false}
+                              data-testid="terraform-input-backend-aws-region"
                               className="w-full h-11 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                               autoComplete="off"
                             />
@@ -2257,6 +2637,7 @@ export default function TerraformWorkflow() {
                               onChange={(e) => setBackendResourceGroup(e.target.value)}
                               disabled={configureBackendMutation.isPending}
                               readOnly={false}
+                              data-testid="terraform-input-backend-resource-group"
                               className="w-full h-11 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                               autoComplete="off"
                             />
@@ -2280,6 +2661,7 @@ export default function TerraformWorkflow() {
                               }}
                               disabled={configureBackendMutation.isPending}
                               readOnly={false}
+                              data-testid="terraform-input-backend-storage-account"
                               className="w-full h-11 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                               maxLength={24}
                               autoComplete="off"
@@ -2304,6 +2686,7 @@ export default function TerraformWorkflow() {
                               }}
                               disabled={configureBackendMutation.isPending}
                               readOnly={false}
+                              data-testid="terraform-input-backend-container"
                               className="w-full h-11 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                               autoComplete="off"
                             />
@@ -2406,18 +2789,14 @@ export default function TerraformWorkflow() {
                 </div>
 
                 {generateTerraformMutation.isPending && (
-                  <div className="text-center py-12">
-                    <Loader2 className="w-12 h-12 animate-spin mx-auto mb-4 text-primary" />
-                    <p className="text-muted-foreground">
-                      Generating Terraform configuration...
-                    </p>
-                  </div>
+                  <TerraformGeneratingLoader />
                 )}
 
                 <div className="flex gap-4 justify-center">
                   <Button
                     variant="outline"
                     onClick={() => setCurrentStep(5)}
+                    data-testid="terraform-btn-back-step6"
                   >
                     ← Back
                   </Button>
@@ -2462,14 +2841,28 @@ export default function TerraformWorkflow() {
                 {/* Show available child module resources */}
                 {childModuleResources.length > 0 && (
                   <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 p-4 mb-6">
-                    <div className="flex items-center gap-2 mb-3">
-                      <Package className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-                      <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100">
-                        Available Child Module Resources
-                      </h3>
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                      <div className="flex items-center gap-2">
+                        <Package className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                        <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100">
+                          Available Child Module Resources
+                        </h3>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowChildResourceCatalog((prev) => !prev)}
+                        className="text-blue-700 dark:text-blue-300"
+                      >
+                        {showChildResourceCatalog ? 'Hide details' : 'Show details'}
+                        {showChildResourceCatalog ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronRight className="w-4 h-4 ml-1" />}
+                      </Button>
                     </div>
+                    <p className="text-sm text-blue-800 dark:text-blue-200 mb-3">
+                      These are the validated child-module capabilities available for composition in the root module.
+                    </p>
                     <div className="flex flex-wrap gap-2">
-                      {childModuleResources.map((resource, idx) => (
+                      {(showChildResourceCatalog ? childModuleResources : childModuleResources.slice(0, 8)).map((resource, idx) => (
                         <span 
                           key={idx}
                           className="inline-flex items-center gap-1 px-3 py-1 rounded-md bg-white dark:bg-gray-800 text-xs font-mono text-blue-800 dark:text-blue-200 border border-blue-300 dark:border-blue-700"
@@ -2478,6 +2871,11 @@ export default function TerraformWorkflow() {
                         </span>
                       ))}
                     </div>
+                    {!showChildResourceCatalog && childModuleResources.length > 8 && (
+                      <p className="mt-3 text-xs text-blue-700 dark:text-blue-300">
+                        Showing 8 of {childModuleResources.length} resources. Expand to review the full catalog.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -2524,29 +2922,60 @@ export default function TerraformWorkflow() {
                     }`}>
                       {resourceValidationResult.message}
                     </p>
-                    {resourceValidationResult.requestedResources && resourceValidationResult.requestedResources.length > 0 && (
-                      <div className="mb-3">
-                        <p className="text-xs font-semibold mb-1">Requested Resources:</p>
-                        <div className="flex flex-wrap gap-2">
-                          {resourceValidationResult.requestedResources.map((resource, idx) => (
-                            <span key={idx} className="px-2 py-1 rounded bg-white dark:bg-gray-800 text-xs font-mono">
-                              {resource}
-                            </span>
-                          ))}
+                    {!resourceValidationResult.valid && (
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                        <div className="rounded-xl border border-red-200/70 bg-white/70 p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">Issue</p>
+                          <p className="text-sm text-red-900 dark:text-red-100">Requested resources do not fully map to the selected child-module capabilities.</p>
+                        </div>
+                        <div className="rounded-xl border border-red-200/70 bg-white/70 p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">Impact</p>
+                          <p className="text-sm text-red-900 dark:text-red-100">Code generation is blocked until unsupported resources are removed or the module scope is adjusted.</p>
+                        </div>
+                        <div className="rounded-xl border border-red-200/70 bg-white/70 p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">Fix Now</p>
+                          <p className="text-sm text-red-900 dark:text-red-100">Use only the validated resource types below, then resubmit using the input area.</p>
                         </div>
                       </div>
                     )}
-                    {resourceValidationResult.unavailableResources && resourceValidationResult.unavailableResources.length > 0 && (
-                      <div className="mb-3">
-                        <p className="text-xs font-semibold mb-1 text-red-800 dark:text-red-200">Unavailable Resources:</p>
-                        <div className="flex flex-wrap gap-2">
-                          {resourceValidationResult.unavailableResources.map((resource, idx) => (
-                            <span key={idx} className="px-2 py-1 rounded bg-red-100 dark:bg-red-900 text-xs font-mono text-red-800 dark:text-red-200">
-                              {resource}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                      <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Validation details</p>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowValidationDetails((prev) => !prev)}
+                      >
+                        {showValidationDetails ? 'Hide details' : 'Show details'}
+                        {showValidationDetails ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronRight className="w-4 h-4 ml-1" />}
+                      </Button>
+                    </div>
+                    {showValidationDetails && (
+                      <>
+                        {resourceValidationResult.requestedResources && resourceValidationResult.requestedResources.length > 0 && (
+                          <div className="mb-3">
+                            <p className="text-xs font-semibold mb-1">Requested Resources</p>
+                            <div className="flex flex-wrap gap-2">
+                              {resourceValidationResult.requestedResources.map((resource, idx) => (
+                                <span key={idx} className="px-2 py-1 rounded bg-white dark:bg-gray-800 text-xs font-mono">
+                                  {resource}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {resourceValidationResult.unavailableResources && resourceValidationResult.unavailableResources.length > 0 && (
+                          <div className="mb-3">
+                            <p className="text-xs font-semibold mb-1 text-red-800 dark:text-red-200">Unavailable Resources</p>
+                            <div className="flex flex-wrap gap-2">
+                              {resourceValidationResult.unavailableResources.map((resource, idx) => (
+                                <span key={idx} className="px-2 py-1 rounded bg-red-100 dark:bg-red-900 text-xs font-mono text-red-800 dark:text-red-200">
+                                  {resource}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 )}
@@ -2587,13 +3016,14 @@ export default function TerraformWorkflow() {
                           const filesResult = await refetchFiles();
                           console.log('   Files refetched:', filesResult.data?.length || 0);
                           
-                          // Advance to Step 8
-                          console.log('   Advancing to Step 8...');
-                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, { 
-                            currentStep: '8'
+                          // Advance to Step 9 (Build Workspace) for aggregated-root
+                          // Step 8 has no UI for aggregated-root; Build Workspace renders at Step 9
+                          console.log('   Advancing to Step 9 (Build Workspace)...');
+                          await apiRequest('PATCH', `/api/sessions/${sessionId}`, {
+                            currentStep: '9'
                           });
-                          setCurrentStep(8);
-                          
+                          setCurrentStep(9);
+
                           toast({
                             title: "Success",
                             description: "Code generated successfully. Review the files below.",
@@ -2630,6 +3060,29 @@ export default function TerraformWorkflow() {
                     <p className="text-xs text-red-700 dark:text-red-300">
                       Please review the unavailable resources above and adjust your description. You can submit a new description using the input below.
                     </p>
+                    {resourceValidationResult.unavailableResources && resourceValidationResult.unavailableResources.length > 0 && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            const suggestion = `Create only these root module resources using the selected child module capabilities: ${childModuleResources.map((r) => r.type).slice(0, 8).join(', ')}. Exclude unsupported resources: ${resourceValidationResult.unavailableResources?.join(', ')}.`;
+                            try {
+                              await navigator.clipboard.writeText(suggestion);
+                              toast({ title: 'Retry prompt copied', description: 'Paste the suggested prompt into the input below and resubmit.' });
+                              setWorkflowNotice({ tone: 'info', text: 'Retry prompt copied. Paste it into the input below to retry validation.' });
+                            } catch {
+                              toast({ title: 'Copy failed', description: 'Unable to copy retry prompt.', variant: 'destructive' });
+                            }
+                          }}
+                        >
+                          Copy Retry Prompt
+                        </Button>
+                        <p className="text-[11px] text-red-700 dark:text-red-300">
+                          Guided retry prompt excludes unsupported resources and keeps only validated module capabilities.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -2646,6 +3099,48 @@ export default function TerraformWorkflow() {
               ));
               const varCount = (allContent.match(/^variable\s+"/gm) ?? []).length;
               const outputCount = (allContent.match(/^output\s+"/gm) ?? []).length;
+              const expectedStages = 4; // Architecture → Best Approach → Security → Cost (all module approaches)
+              const completedStageCount = Math.min(expectedStages, completedPipelineStages.length);
+              const buildHealthStatus = buildAutoRun
+                ? 'Pipeline Running'
+                : buildId
+                  ? 'Healthy'
+                  : scanCompleted
+                    ? 'Ready for Commit'
+                    : (generatedFiles ?? []).length > 0
+                      ? 'Ready to Build'
+                      : 'Awaiting Generation';
+              const securitySummary = buildScanResult?.summary;
+              const securityPassRate = Number(securitySummary?.passPercentage || 0);
+              const securityPassed = Number(securitySummary?.passed ?? buildScanResult?.passed ?? 0);
+              const securityFailed = Number(securitySummary?.failed ?? buildScanResult?.failed ?? 0);
+              const securitySkipped = Number(securitySummary?.skipped ?? buildScanResult?.skipped ?? 0);
+              const failedChecks = Array.isArray(buildScanResult?.failedChecks) ? buildScanResult.failedChecks : [];
+              const topFailedChecks = failedChecks.slice(0, 3);
+              const severityCounts = failedChecks.reduce((acc: Record<string, number>, check: any) => {
+                const sev = String(check?.severity || 'unknown').toLowerCase();
+                acc[sev] = (acc[sev] || 0) + 1;
+                return acc;
+              }, { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 });
+              const costSummary = buildCostResult?.summary;
+              const monthlyRate = Number(costSummary?.monthlyGrandTotal || 0);
+              const yearlyRate = Number(costSummary?.yearlyGrandTotal || 0);
+              const currency = costSummary?.currency || 'USD';
+              const moduleApproachLabel =
+                moduleApproach === 'child-module'
+                  ? 'Child Module'
+                  : moduleApproach === 'aggregated-root'
+                    ? 'Aggregated Root'
+                    : moduleApproach === 'standalone-root'
+                      ? 'Standalone Root'
+                      : 'Not selected';
+              const buildStatusSentence = buildAutoRun
+                ? 'Build pipeline is running. Stay in Build Pipeline tab for live stage status.'
+                : buildId
+                  ? `Build ${buildId} completed successfully. You can proceed to commit.`
+                  : scanCompleted
+                    ? 'Build stage completed. Proceed to commit when ready.'
+                    : 'Run Build Pipeline to validate architecture, best-practice, security, and cost gates.';
 
               return (
                 <div className="space-y-6">
@@ -2661,15 +3156,15 @@ export default function TerraformWorkflow() {
 
 
                   {/* ── Tab bar ── */}
-                  <div className="flex gap-1 border-b">
-                    {(['overview', 'build', 'code'] as const).map(mode => (
+                  <div className="flex gap-2 p-1 rounded-xl bg-muted/60">
+                    {(['overview', 'build', 'code', 'report'] as const).map(mode => (
                       <button
                         key={mode}
                         onClick={() => setActivityViewMode(mode)}
-                        className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors -mb-px ${
+                        className={`px-4 py-2 text-sm font-semibold rounded-lg transition-all duration-200 ${
                           activityViewMode === mode
-                            ? 'border-primary text-primary'
-                            : 'border-transparent text-muted-foreground hover:text-foreground'
+                            ? 'bg-gradient-to-r from-emerald-500 to-green-500 text-white shadow-md shadow-emerald-200 dark:shadow-emerald-900/40'
+                            : 'text-muted-foreground hover:bg-gradient-to-r hover:from-emerald-50 hover:to-green-50 hover:text-emerald-700 dark:hover:from-emerald-950/40 dark:hover:to-green-950/40 dark:hover:text-emerald-300'
                         }`}
                       >
                         {mode === 'build' ? 'Build Pipeline' : mode.charAt(0).toUpperCase() + mode.slice(1)}
@@ -2702,84 +3197,26 @@ export default function TerraformWorkflow() {
                           </div>
                         ))}
                       </div>
+                      <div className="rounded-lg border bg-white/70 px-3 py-2 text-xs text-muted-foreground">
+                        {buildStatusSentence}
+                      </div>
 
-                      {/* Variables / Outputs badge row */}
-                      {(varCount > 0 || outputCount > 0) && (
-                        <div className="flex flex-wrap gap-2">
-                          {varCount > 0 && (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
-                              <Hash className="w-3 h-3" /> {varCount} variable{varCount !== 1 ? 's' : ''}
-                            </span>
-                          )}
-                          {outputCount > 0 && (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
-                              <ChevronRight className="w-3 h-3" /> {outputCount} output{outputCount !== 1 ? 's' : ''}
-                            </span>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Resource type chips */}
-                      {uniqueResourceTypes.length > 0 && (
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
-                            Infrastructure Components
-                          </p>
-                          <div className="flex flex-wrap gap-2">
-                            {uniqueResourceTypes.map(rt => {
-                              const { label, icon: Icon } = tfResourceLabel(rt);
-                              return (
-                                <span
-                                  key={rt}
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border bg-card hover:bg-muted/60 transition-colors"
-                                >
-                                  <Icon className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                                  {label}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* File cards grid */}
-                      {(generatedFiles ?? []).length > 0 && (
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
-                            Generated Files
-                          </p>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                            {generatedFiles.map(f => {
-                              const lines = (f.content ?? '').split('\n').length;
-                              const resCount = ((f.content ?? '').match(/^resource\s+"/gm) ?? []).length;
-                              const isMain = f.fileName.includes('main');
-                              const isVars = f.fileName.includes('variable');
-                              const isOut  = f.fileName.includes('output');
-                              const isBknd = f.fileName.includes('backend') || f.fileName.includes('provider');
-                              return (
-                                <button
-                                  key={f.fileName}
-                                  onClick={() => setActivityViewMode('code')}
-                                  className="group text-left rounded-2xl border bg-card p-4 hover:border-primary/40 hover:shadow-sm transition-all space-y-2"
-                                >
-                                  <div className="flex items-start justify-between gap-2">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <FileCode className={`w-4 h-4 shrink-0 ${isMain ? 'text-blue-500' : isVars ? 'text-violet-500' : isOut ? 'text-emerald-500' : isBknd ? 'text-orange-500' : 'text-muted-foreground'}`} />
-                                      <span className="text-xs font-mono font-semibold truncate">{f.fileName}</span>
-                                    </div>
-                                    <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5" />
-                                  </div>
-                                  <div className="flex gap-3 text-xs text-muted-foreground">
-                                    <span>{lines} lines</span>
-                                    {resCount > 0 && <span className="text-emerald-600 dark:text-emerald-400">{resCount} resource{resCount !== 1 ? 's' : ''}</span>}
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
+                      {isCommitted &&
+                        provider === 'github' &&
+                        terraformCicdInfo &&
+                        (moduleApproach === 'standalone-root' || moduleApproach === 'aggregated-root') && (
+                          <TerraformModuleCicdCard
+                            sessionId={sessionId}
+                            cicdInfo={terraformCicdInfo}
+                            expectedHeadSha={expectedWorkflowHeadSha}
+                            onMergeCicdInfo={(patch) =>
+                              setTerraformCicdInfo((prev: Record<string, unknown> | null) => ({
+                                ...(prev || {}),
+                                ...patch,
+                              }))
+                            }
+                          />
+                        )}
                     </div>
                   )}
 
@@ -2787,25 +3224,86 @@ export default function TerraformWorkflow() {
                        BUILD TAB
                   ══════════════════════════════════════════════ */}
                   {activityViewMode === 'build' && (
-                    <ActivityPanel
-                      sessionId={sessionId}
-                      workflowType="terraform"
-                      moduleApproach={moduleApproach}
-                      onScanComplete={() => {
-                        setScanCompleted(true);
-                        refetchFiles();
-                        // Generate unique build ID: BUILD-YYYYMMDD-HHmmss
-                        const now = new Date();
-                        const pad = (n: number) => String(n).padStart(2, '0');
-                        const id = `BUILD-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-                        setBuildId(id);
-                        toast({ title: "Build Complete", description: `${id} — ready to commit.` });
-                      }}
-                      onFixesApproved={() => {
-                        refetchFiles();
-                        toast({ title: "Fixes Applied", description: "Security fixes applied. Files updated." });
-                      }}
-                    />
+                    <div className="space-y-4">
+                      <ActivityPanel
+                        sessionId={sessionId}
+                        workflowType="terraform"
+                        moduleApproach={moduleApproach}
+                        pipelineLayout="sidebar"
+                        autoRun={buildAutoRun}
+                        onRequestRunPipeline={() => {
+                          setBuildAutoRun(false);
+                          setCompletedPipelineStages([]);
+                        }}
+                        onPipelineStageComplete={(stage) => {
+                          setCompletedPipelineStages((prev) => (prev.includes(stage) ? prev : [...prev, stage]));
+                        }}
+                        onDiagramResult={(result) => setBuildDiagramResult(result)}
+                        onScanResult={(result) => setBuildScanResult(result)}
+                        onCostResult={(result) => setBuildCostResult(result)}
+                        onScanComplete={() => {
+                          refetchFiles();
+                          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                        }}
+                        onTerraformFilesChanged={() => {
+                          refetchFiles();
+                          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                          setScanCompleted(false);
+                          setWorkflowNotice({
+                            tone: 'info',
+                            text: 'Rightsizing applied to Terraform. Re-run the build pipeline to refresh cost and security.',
+                          });
+                          toast({
+                            title: 'Terraform updated',
+                            description: 'Suggested SKU written to your .tf files. Run the pipeline again to validate.',
+                          });
+                        }}
+                        onFixesApproved={() => {
+                          refetchFiles();
+                          queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
+                          toast({ title: "Fixes Applied", description: "Security fixes applied. Files updated." });
+                        }}
+                        onPipelineComplete={() => {
+                          setBuildAutoRun(false);
+                          setScanCompleted(true);
+                          setBuildCompletedAt(new Date().toISOString());
+                          const id = generateBuildId('terraform');
+                          setBuildId(id);
+                          setCompletedPipelineStages(['diagram', 'refactor', 'security', 'cost']);
+                          // Auto-navigate to Overview so "Build Complete" card is immediately visible
+                          setActivityViewMode('overview');
+                          toast({ title: 'Build Complete', description: `${id} — ready to commit.` });
+                          void saveBuildHistory({
+                            sessionId: sessionId!,
+                            module: 'terraform',
+                            buildId: id,
+                            pipelineStages: ['diagram', 'refactor', 'security', 'cost'],
+                            filesGenerated: generatedFiles?.length || 0,
+                            repositoryName: selectedRepoName || undefined,
+                            metadata: {
+                              terraformBuildDetails: {
+                                diagram: {
+                                  diagramType: buildDiagramResult?.diagramType || 'flowchart',
+                                  mermaidSyntax: buildDiagramResult?.mermaidSyntax || null,
+                                },
+                                cost: {
+                                  currency,
+                                  monthlyRate,
+                                  yearlyRate,
+                                },
+                                security: {
+                                  passRate: securityPassRate,
+                                  passed: securityPassed,
+                                  failed: securityFailed,
+                                  skipped: securitySkipped,
+                                },
+                              },
+                            },
+                          });
+                        }}
+                        onViewBuildSummary={() => setActivityViewMode('overview')}
+                      />
+                    </div>
                   )}
 
                   {/* ══════════════════════════════════════════════
@@ -2834,49 +3332,212 @@ export default function TerraformWorkflow() {
                     </div>
                   )}
 
-                  {/* ── Navigation ── */}
-                  <div className="space-y-3 pt-2">
-                    {/* Build ID badge — shown once build completes */}
-                    {buildId && (
-                      <div className="flex justify-center">
-                        <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-mono font-semibold bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          {buildId}
-                        </span>
+                  {/* ══════════════════════════════════════════════
+                       REPORT TAB
+                  ══════════════════════════════════════════════ */}
+                  {activityViewMode === 'report' && (
+                    <div className="space-y-6">
+                      {/* Header */}
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h2 className="text-xl font-bold flex items-center gap-2">
+                            <FileText className="w-5 h-5 text-primary" />
+                            Build Report
+                          </h2>
+                          {buildId && (
+                            <p className="text-xs text-muted-foreground font-mono mt-0.5">{buildId} · {cloudProvider?.toUpperCase() ?? 'Cloud'} · {moduleApproachLabel}</p>
+                          )}
+                        </div>
+                        <Button variant="outline" size="sm" className="gap-2 print:hidden" onClick={() => window.print()}>
+                          <Download className="w-3.5 h-3.5" /> Download PDF
+                        </Button>
                       </div>
-                    )}
-                    <div className="flex gap-3 justify-center">
-                      <Button
-                        variant="outline"
-                        onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 8 : 6)}
-                      >
-                        ← Back
-                      </Button>
+
+                      {/* ── Architecture Diagram ── */}
+                      <div className="rounded-2xl border bg-card overflow-hidden">
+                        <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                          <Network className="w-4 h-4 text-primary" />
+                          <span className="font-semibold text-sm">Architecture Diagram</span>
+                        </div>
+                        {buildDiagramResult?.mermaidSyntax ? (
+                          <div className="p-4">
+                            <ArchitectureDiagramPreview mermaidSyntax={buildDiagramResult.mermaidSyntax} />
+                          </div>
+                        ) : (
+                          <div className="p-8 text-center text-muted-foreground text-sm">
+                            No diagram data — run the Build pipeline to generate the architecture diagram.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ── Security Scan Results ── */}
+                      <div className="rounded-2xl border bg-card overflow-hidden">
+                        <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                          <Shield className="w-4 h-4 text-primary" />
+                          <span className="font-semibold text-sm">Security Scan Results</span>
+                        </div>
+                        {buildScanResult ? (
+                          <div className="p-5 space-y-4">
+                            {/* KPI row */}
+                            <div className="grid grid-cols-3 gap-4">
+                              {[
+                                { label: 'Passed', value: securityPassed, color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
+                                { label: 'Failed', value: securityFailed, color: 'text-rose-600', bg: 'bg-rose-50 dark:bg-rose-950/30' },
+                                { label: 'Pass Rate', value: `${securityPassRate}%`, color: 'text-primary', bg: 'bg-primary/5' },
+                              ].map(({ label, value, color, bg }) => (
+                                <div key={label} className={`rounded-xl border p-3 text-center ${bg}`}>
+                                  <p className={`text-2xl font-bold ${color}`}>{value}</p>
+                                  <p className="text-xs text-muted-foreground">{label}</p>
+                                </div>
+                              ))}
+                            </div>
+                            {/* Severity breakdown */}
+                            {securityFailed > 0 && (
+                              <div className="flex gap-2 flex-wrap">
+                                {Object.entries(severityCounts).filter(([, v]) => (v as number) > 0).map(([sev, count]) => (
+                                  <span key={sev} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+                                    sev === 'critical' ? 'border-rose-300 bg-rose-50 text-rose-700' :
+                                    sev === 'high' ? 'border-orange-300 bg-orange-50 text-orange-700' :
+                                    sev === 'medium' ? 'border-amber-300 bg-amber-50 text-amber-700' :
+                                    'border-slate-300 bg-slate-50 text-slate-700'
+                                  }`}>{sev}: {count as number}</span>
+                                ))}
+                              </div>
+                            )}
+                            {/* Failed checks */}
+                            {failedChecks.length > 0 && (
+                              <div className="space-y-2">
+                                <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Failed Checks ({failedChecks.length})</p>
+                                <div className="space-y-2">
+                                  {failedChecks.map((c: any, i: number) => (
+                                    <div key={i} className="rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50/50 dark:bg-rose-950/20 p-3 space-y-1">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-mono text-xs font-semibold text-rose-700 dark:text-rose-400">{c.checkId}</span>
+                                        <span className="text-xs font-medium">{c.checkName}</span>
+                                      </div>
+                                      <p className="text-xs text-muted-foreground">{c.reason || c.guideline}</p>
+                                      {c.resource && <p className="text-xs text-muted-foreground font-mono">Resource: {c.resource}</p>}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {failedChecks.length === 0 && (
+                              <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800 px-4 py-3">
+                                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                                <span className="text-sm font-medium">All security checks passed!</span>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="p-8 text-center text-muted-foreground text-sm">
+                            No scan data — run the Build pipeline to generate security results.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ── Cost Analysis ── */}
+                      <div className="rounded-2xl border bg-card overflow-hidden">
+                        <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                          <DollarSign className="w-4 h-4 text-primary" />
+                          <span className="font-semibold text-sm">Cost Analysis</span>
+                        </div>
+                        {buildCostResult ? (
+                          <div className="p-5 space-y-4">
+                            <div className="grid grid-cols-3 gap-4">
+                              {[
+                                { label: 'Monthly', value: `${currency} ${monthlyRate.toFixed(2)}`, color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-950/30' },
+                                { label: 'Yearly', value: `${currency} ${yearlyRate.toFixed(2)}`, color: 'text-violet-600', bg: 'bg-violet-50 dark:bg-violet-950/30' },
+                                { label: 'Resources', value: buildCostResult.resources?.length ?? 0, color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
+                              ].map(({ label, value, color, bg }) => (
+                                <div key={label} className={`rounded-xl border p-3 text-center ${bg}`}>
+                                  <p className={`text-2xl font-bold ${color}`}>{value}</p>
+                                  <p className="text-xs text-muted-foreground">{label}</p>
+                                </div>
+                              ))}
+                            </div>
+                            {/* Per-resource cost table */}
+                            {buildCostResult.resources && buildCostResult.resources.length > 0 && (
+                              <div className="space-y-2">
+                                <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Per-Resource Breakdown</p>
+                                <div className="rounded-xl border overflow-hidden">
+                                  <table className="w-full text-xs">
+                                    <thead className="bg-muted/40">
+                                      <tr>
+                                        <th className="text-left px-3 py-2 font-semibold">Resource</th>
+                                        <th className="text-left px-3 py-2 font-semibold">Type</th>
+                                        <th className="text-right px-3 py-2 font-semibold">Monthly</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y">
+                                      {buildCostResult.resources.map((r: any, i: number) => (
+                                        <tr key={i} className="hover:bg-muted/20">
+                                          <td className="px-3 py-2 font-mono">{r.name || r.resourceName || '—'}</td>
+                                          <td className="px-3 py-2 text-muted-foreground">{r.type || r.resourceType || '—'}</td>
+                                          <td className="px-3 py-2 text-right font-semibold">{currency} {Number(r.monthlyCost || r.monthlyRate || 0).toFixed(2)}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="p-8 text-center text-muted-foreground text-sm">
+                            No cost data — run the Build pipeline to generate cost analysis.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ── Resource Summary ── */}
+                      {uniqueResourceTypes.length > 0 && (
+                        <div className="rounded-2xl border bg-card overflow-hidden">
+                          <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                            <Box className="w-4 h-4 text-primary" />
+                            <span className="font-semibold text-sm">Resource Summary</span>
+                          </div>
+                          <div className="p-5">
+                            <div className="flex flex-wrap gap-2">
+                              {uniqueResourceTypes.map(type => {
+                                const { label, icon: Icon } = tfResourceLabel(type);
+                                return (
+                                  <span key={type} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-muted/30 text-xs font-medium">
+                                    <Icon className="w-3.5 h-3.5 text-muted-foreground" />
+                                    {label}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Navigation footer */}
+                  <div className="flex flex-col gap-3 items-center pt-2 border-t">
+                    <div className="flex gap-4 justify-center">
+                      <Button variant="outline" onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 8 : 6)} data-testid="terraform-btn-back-build">← Back</Button>
                       <Button
                         disabled={!scanCompleted}
-                        title={!scanCompleted ? 'Run the Build pipeline first to continue' : undefined}
+                        data-testid="terraform-btn-continue-to-commit"
                         onClick={async () => {
                           const nextStep = moduleApproach === 'aggregated-root' ? 10 : 9;
                           setCurrentStep(nextStep as Step);
                           await apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: nextStep.toString() });
                         }}
                       >
-                        {!scanCompleted ? (
-                          <>
-                            <Clock3 className="w-4 h-4 mr-1.5 opacity-50" />
-                            Awaiting Build…
-                          </>
+                        {scanCompleted ? (
+                          <><CheckCircle2 className="w-4 h-4 mr-1.5" /> Proceed to Commit →</>
                         ) : (
-                          <>
-                            <CheckCircle2 className="w-4 h-4 mr-1.5" />
-                            Continue to Commit →
-                          </>
+                          <><Clock3 className="w-4 h-4 mr-1.5 opacity-50" /> Awaiting Build…</>
                         )}
                       </Button>
                     </div>
                     {!scanCompleted && (
                       <p className="text-center text-xs text-muted-foreground">
-                        Switch to the <button className="underline underline-offset-2 hover:text-foreground" onClick={() => setActivityViewMode('build')}>Build tab</button> and run the pipeline to unlock commit.
+                        Switch to the <button className="underline underline-offset-2 hover:text-foreground" onClick={() => setActivityViewMode('build')}>Build Pipeline</button> tab and run the pipeline to unlock commit.
                       </p>
                     )}
                   </div>
@@ -2892,17 +3553,26 @@ export default function TerraformWorkflow() {
                   <p className="text-muted-foreground">
                     Commit your Terraform configuration to the repository
                   </p>
+                  {!isCommitted &&
+                    provider === 'github' &&
+                    (moduleApproach === 'standalone-root' || moduleApproach === 'aggregated-root') && (
+                      <p className="text-xs text-muted-foreground mt-3 max-w-lg mx-auto">
+                        On push, we add GitHub Actions workflows (<code className="text-[11px]">terraform-module-validate.yml</code> / apply) so you can run the same plan-based validation as MigrateOps after the code lands in the repo.
+                      </p>
+                    )}
                 </div>
                 <div className="flex gap-4 justify-center">
                   <Button
                     variant="outline"
                     onClick={() => setCurrentStep(moduleApproach === 'aggregated-root' ? 9 : 8)}
+                    data-testid="terraform-btn-back-commit"
                   >
                     ← Back
                   </Button>
                   <Button
                     onClick={handleApprove}
                     disabled={commitMutation.isPending}
+                    data-testid="terraform-btn-commit"
                   >
                     {commitMutation.isPending ? (
                       <>
@@ -2914,30 +3584,47 @@ export default function TerraformWorkflow() {
                     )}
                   </Button>
                 </div>
-                {!scanCompleted && moduleApproach !== 'aggregated-root' && (
+                {!scanCompleted && (
                   <p className="text-sm text-muted-foreground text-center">
                     Please run the security scan before committing
                   </p>
                 )}
                 {isCommitted && (
-                  <div className="flex flex-col items-center gap-4 p-6 border rounded-lg bg-green-50 dark:bg-green-950">
-                    <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
-                      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      <h3 className="text-lg font-semibold">Successfully Committed!</h3>
+                  <div className="flex flex-col items-stretch gap-6 w-full max-w-3xl mx-auto">
+                    <div className="flex flex-col items-center gap-4 p-6 border rounded-lg bg-green-50 dark:bg-green-950">
+                      <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        <h3 className="text-lg font-semibold">Successfully Committed!</h3>
+                      </div>
+                      <p className="text-sm text-muted-foreground text-center">
+                        Your Terraform configuration has been committed to the repository.
+                      </p>
+                      <Button
+                        onClick={handleGoHome}
+                        className="w-full sm:w-auto"
+                        data-testid="button-go-home"
+                      >
+                        <Home className="w-4 h-4 mr-2" />
+                        Go to Home
+                      </Button>
                     </div>
-                    <p className="text-sm text-muted-foreground text-center">
-                      Your Terraform configuration has been committed to the repository.
-                    </p>
-                    <Button
-                      onClick={handleGoHome}
-                      className="w-full sm:w-auto"
-                      data-testid="button-go-home"
-                    >
-                      <Home className="w-4 h-4 mr-2" />
-                      Go to Home
-                    </Button>
+                    {provider === 'github' &&
+                      terraformCicdInfo &&
+                      (moduleApproach === 'standalone-root' || moduleApproach === 'aggregated-root') && (
+                        <TerraformModuleCicdCard
+                          sessionId={sessionId}
+                          cicdInfo={terraformCicdInfo}
+                          expectedHeadSha={expectedWorkflowHeadSha}
+                          onMergeCicdInfo={(patch) =>
+                            setTerraformCicdInfo((prev: Record<string, unknown> | null) => ({
+                              ...(prev || {}),
+                              ...patch,
+                            }))
+                          }
+                        />
+                      )}
                   </div>
                 )}
               </div>

@@ -10,6 +10,7 @@ interface InputFieldProps {
   icon?: string;
   required?: boolean;
   autoComplete?: string;
+  testId?: string;
 }
 
 export default function InputField({
@@ -22,6 +23,7 @@ export default function InputField({
   icon,
   required,
   autoComplete,
+  testId,
 }: InputFieldProps) {
   return (
     <div>
@@ -41,6 +43,7 @@ export default function InputField({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           autoComplete={autoComplete}
+          data-testid={testId}
           className={cn(
             "w-full px-4 py-3 rounded-lg",
             "bg-white/10 backdrop-blur-sm",

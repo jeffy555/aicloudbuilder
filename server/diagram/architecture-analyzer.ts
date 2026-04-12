@@ -9,12 +9,10 @@
  * - Network topology
  */
 
-import OpenAI from 'openai';
+import { aiChatCompletion } from '../utils/ai-client.js';
 import { z } from 'zod';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { buildCompliancePromptSection } from '../archme/compliance-presets.js';
+import { sanitizeContent } from '../utils/sanitize-prompt.js';
 
 export interface ArchitectureComponent {
   name: string;
@@ -71,6 +69,11 @@ export interface ArchitectureAnalysis {
     category: string; // "Monitoring", "Logging", "CI/CD", etc.
     description: string;
   }>;
+  complianceNotes?: Array<{
+    preset: string;
+    status: 'compliant' | 'warning' | 'non-compliant';
+    details: string;
+  }>;
   metadata: {
     totalComponents: number;
     totalRelationships: number;
@@ -83,7 +86,8 @@ export interface ArchitectureAnalysis {
  * Analyze architecture requirements using AI
  */
 export async function analyzeArchitectureRequirements(
-  requirements: string
+  requirements: string,
+  options?: { compliancePresets?: string[] }
 ): Promise<ArchitectureAnalysis> {
   console.log('\n🔍 ========== ARCHITECTURE REQUIREMENTS ANALYSIS ==========');
   console.log(`📝 Requirements length: ${requirements.length} characters`);
@@ -114,8 +118,15 @@ IMPORTANT GUIDELINES:
    - "arm": Azure Resource Manager template (ONLY for Azure resources explicitly using ARM)
    - "kubernetes": the cluster resource itself (AKS, EKS, GKE) — use terraform for provisioning but mark codeType as kubernetes to signal it is the cluster
 
-Return ONLY valid JSON in this exact structure:
+Return ONLY valid JSON in this exact structure (include "complianceNotes" only when compliance presets are specified):
 {
+  "complianceNotes": [
+    {
+      "preset": "preset_id",
+      "status": "compliant|warning|non-compliant",
+      "details": "Explanation of compliance posture"
+    }
+  ],
   "components": [
     {
       "name": "Service display name",
@@ -166,9 +177,17 @@ Return ONLY valid JSON in this exact structure:
   ]
 }`;
 
+  // Inject compliance requirements into the system prompt if presets are selected
+  const complianceSection = options?.compliancePresets?.length
+    ? await buildCompliancePromptSection(options.compliancePresets)
+    : '';
+  const fullSystemPrompt = complianceSection
+    ? systemPrompt + complianceSection
+    : systemPrompt;
+
   const userPrompt = `Analyze the following architecture requirements and extract all components, relationships, data flows, and security boundaries:
 
-${requirements}
+${sanitizeContent(requirements)}
 
 Extract ALL services mentioned, including:
 - Cloud services (Azure, AWS, GCP)
@@ -182,10 +201,10 @@ Return the analysis as valid JSON.`;
   try {
     console.log('🤖 Calling OpenAI for architecture analysis...');
     
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1',
+    const completion = await aiChatCompletion({
+      model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: fullSystemPrompt },
         { role: 'user', content: userPrompt }
       ],
       temperature: 0.3,
@@ -244,6 +263,11 @@ Return the analysis as valid JSON.`;
         category: z.string().optional().default('Other'),
         description: z.string().optional().default(''),
       })).optional().default([]),
+      complianceNotes: z.array(z.object({
+        preset: z.string(),
+        status: z.enum(['compliant', 'warning', 'non-compliant']),
+        details: z.string(),
+      })).optional().default([]),
     });
 
     // Validate AI response with Zod
@@ -299,8 +323,9 @@ Return the analysis as valid JSON.`;
       dataFlows,
       securityBoundaries,
       cloudProvider: analysis.cloudProvider || 'multi',
-      detectedProviders: detectedProviders.length > 0 ? detectedProviders : ['unknown'],
+      detectedProviders: (detectedProviders.length > 0 ? detectedProviders : ['unknown']) as Array<'azure' | 'aws' | 'gcp' | 'third-party'>,
       thirdPartyTools,
+      complianceNotes: validated.complianceNotes.length > 0 ? validated.complianceNotes : undefined,
       metadata: {
         totalComponents: components.length,
         totalRelationships: relationships.length,

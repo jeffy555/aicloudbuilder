@@ -1,8 +1,38 @@
 import OpenAI from 'openai';
+import { buildMigrateOpsAzureResourcePayloadString } from './migrate-resource-payload.js';
+import { buildSchemaGuidanceForResources } from './migrate-schema-guidance.js';
+import { ensureContainerAppContainerCpuMemory, fixImportBlocksQuotedToAddresses } from './migrate-hcl-fixes.js';
+import { aiChatCompletion } from './utils/ai-client.js';
+import type { TerraformCliValidationResult } from './terraform-cli-validate.js';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+/** MigrateOps: use a capable model by default; override with MIGRATEOPS_MODEL / MIGRATEOPS_REFINE_MODEL */
+const MIGRATEOPS_MODEL = process.env.MIGRATEOPS_MODEL || 'gpt-4o';
+const MIGRATEOPS_REFINE_MODEL = process.env.MIGRATEOPS_REFINE_MODEL || MIGRATEOPS_MODEL;
+/** Refine pass is OFF by default — the schema-aware repair pass in migrate.ts is more capable.
+ *  Set MIGRATEOPS_REFINE=true to enable as an extra AI pass (adds latency + cost). */
+const MIGRATEOPS_REFINE_ENABLED =
+  process.env.MIGRATEOPS_REFINE === 'true' || process.env.MIGRATEOPS_REFINE === '1';
+const MIGRATEOPS_MAX_OUTPUT_TOKENS = Math.min(
+  parseInt(process.env.MIGRATEOPS_MAX_OUTPUT_TOKENS || '16384', 10),
+  32768
+);
+const MIGRATEOPS_AI_TIMEOUT_MS = parseInt(process.env.MIGRATEOPS_AI_TIMEOUT_MS || '240000', 10);
+
+/** Terraform module workflow: AI repair after failed terraform validate (generate + optional manual endpoint) */
+const TERRAFORM_MODULE_CLI_REPAIR_MODEL =
+  process.env.TERRAFORM_MODULE_CLI_REPAIR_MODEL || 'gpt-4o-mini';
+const TERRAFORM_MODULE_CLI_REPAIR_MAX_TOKENS = Math.min(
+  parseInt(process.env.TERRAFORM_MODULE_CLI_REPAIR_MAX_TOKENS || '16384', 10),
+  32768
+);
+const TERRAFORM_MODULE_CLI_REPAIR_TIMEOUT_MS = parseInt(
+  process.env.TERRAFORM_MODULE_CLI_REPAIR_TIMEOUT_MS || '120000',
+  10
+);
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -260,7 +290,7 @@ Keep responses conversational and helpful. Always confirm actions before they're
 
     try {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           { role: 'system', content: systemPrompt },
           ...messages
@@ -289,7 +319,7 @@ Keep responses conversational and helpful. Always confirm actions before they're
 
   async chatWithContext(contextPrompt: string, messages: ChatMessage[]): Promise<string> {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1',
+      model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: contextPrompt },
         ...messages
@@ -347,7 +377,7 @@ Keep responses conversational and helpful. Always confirm actions before they're
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.0"
+      version = "~> 4.0"
     }
   }
 }
@@ -479,7 +509,7 @@ Return ONLY valid JSON, no markdown, no explanations.`;
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
@@ -531,7 +561,7 @@ Return ONLY a JSON array, no explanations. Example: ["name", "location", "accoun
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
@@ -645,7 +675,7 @@ Return ONLY valid JSON, no markdown, no explanations.`;
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
@@ -746,7 +776,7 @@ Be precise and base your analysis on the actual file content, not assumptions.`;
 
     try {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           { 
             role: 'system', 
@@ -815,118 +845,48 @@ Be precise and base your analysis on the actual file content, not assumptions.`;
   ): Promise<{
     files: Array<{ path: string; content: string }>;
   }> {
-    // Step 1: OpenAI analyzes the request first
+    // Skip separate analysis AI call — extract resources via regex and fetch MCP docs directly.
+    // The main generation prompt (Step 3) handles the original description without pre-refinement.
     console.log('\n🔍 ========== TERRAFORM GENERATION FLOW ==========');
     console.log(`📝 User Description: "${description}"`);
     console.log(`☁️  Cloud Provider: ${cloudProvider || 'Not specified'}`);
     console.log(`📦 Module Approach: ${moduleApproach || 'Not specified'}`);
-    console.log('\n🤖 Step 1: AI analyzing user request...');
-    
-    // Use OpenAI to analyze and refine the request
-    const analysisPrompt = `You are a Terraform expert. Analyze the following user request and prepare it for the Terraform MCP server.
 
-User Request: "${description}"
-Cloud Provider: ${cloudProvider || 'Not specified'}
-Module Approach: ${moduleApproach || 'Not specified'}
+    const refinedDescription = description;
 
-Your task:
-1. Identify all resources the user wants to create
-2. Refine the description to be clear and specific for Terraform code generation
-3. Ensure the description includes all necessary details for the Terraform MCP server
-
-Return a JSON object with:
-{
-  "refinedDescription": "A clear, detailed description optimized for Terraform MCP server",
-  "resources": ["list of resource types identified"],
-  "recommendations": "Any additional recommendations or clarifications"
-}
-
-Be specific about resource types (e.g., "azurerm_resource_group", "azurerm_storage_account", "azurerm_container_registry").`;
-
-    let refinedDescription = description;
-    let analysis: any = null;
-    
-    try {
-      const analysisCompletion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
-        messages: [
-          { 
-            role: 'system', 
-            content: 'You are a Terraform expert. Analyze user requests and prepare them for Terraform code generation. Return only valid JSON.' 
-          },
-          { role: 'user', content: analysisPrompt }
-        ],
-        temperature: 0.3,
-        max_tokens: 500,
-        response_format: { type: 'json_object' }
-      });
-
-      const analysisResponse = analysisCompletion.choices[0]?.message?.content || '{}';
-      analysis = JSON.parse(analysisResponse);
-      
-      if (analysis.refinedDescription) {
-        refinedDescription = analysis.refinedDescription;
-        console.log(`   ✅ AI Analysis Complete`);
-        console.log(`   📋 Identified Resources: ${analysis.resources?.join(', ') || 'N/A'}`);
-        console.log(`   ✨ Refined Description: "${refinedDescription.substring(0, 150)}${refinedDescription.length > 150 ? '...' : ''}"`);
-        if (analysis.recommendations) {
-          console.log(`   💡 Recommendations: ${analysis.recommendations}`);
+    // Extract resource types from description via regex (instant, no AI call needed)
+    const resourcesToFetch: string[] = [];
+    const resourcePatterns = [
+      /azurerm_(\w+)/gi,
+      /aws_(\w+)/gi,
+      /google_(\w+)/gi,
+      /(\w+)\s+(storage|compute|network|container|registry|account|group|service|function|app)/gi,
+    ];
+    for (const pattern of resourcePatterns) {
+      let match;
+      while ((match = pattern.exec(description)) !== null) {
+        if (match[1] && !resourcesToFetch.includes(match[1])) {
+          resourcesToFetch.push(match[1]);
         }
-      } else {
-        console.log(`   ⚠️  AI analysis didn't return refined description, using original`);
       }
-    } catch (analysisError: any) {
-      console.error(`   ⚠️  AI analysis failed: ${analysisError?.message || analysisError}`);
-      console.log(`   Using original description`);
-      // Continue with original description
     }
 
-    // Step 2: Fetch latest Terraform documentation from MCP server
-    console.log('\n🔗 Step 2: Fetching latest Terraform documentation from MCP server...');
-    
+    // Fetch MCP docs immediately (no longer gated on an AI analysis round-trip)
+    console.log('\n🔗 Step 1: Fetching Terraform documentation from MCP server...');
     let terraformDocs = '';
-    let resourcesToFetch: string[] = [];
-    
-    // Extract resources from AI analysis if available
-    if (analysis && analysis.resources && Array.isArray(analysis.resources)) {
-      resourcesToFetch = analysis.resources;
-    } else {
-      // Fallback: try to extract from description
-      const resourcePatterns = [
-        /azurerm_(\w+)/gi,
-        /aws_(\w+)/gi,
-        /google_(\w+)/gi,
-        /(\w+)\s+(storage|compute|network|container|registry|account|group|service|function|app)/gi
-      ];
-      
-      for (const pattern of resourcePatterns) {
-        let match;
-        while ((match = pattern.exec(refinedDescription)) !== null) {
-          if (match[1] && !resourcesToFetch.includes(match[1])) {
-            resourcesToFetch.push(match[1]);
-          }
-        }
-      }
-    }
-    
     if (resourcesToFetch.length > 0) {
       try {
         const { mcpClient } = await import('./mcp-client');
         terraformDocs = await mcpClient.fetchTerraformDocumentation(resourcesToFetch, cloudProvider);
-        console.log(`\n✅ SUCCESS: Fetched Terraform documentation for ${resourcesToFetch.length} resource(s)`);
-        console.log(`📚 Documentation length: ${terraformDocs.length} characters`);
-        console.log('==========================================\n');
+        console.log(`\n✅ Fetched docs for ${resourcesToFetch.length} resource(s) (${terraformDocs.length} chars)`);
       } catch (mcpError: any) {
-        console.error(`\n❌ FAILED: Terraform MCP server error: ${mcpError?.message || mcpError}`);
-        console.error('⚠️  Continuing without MCP documentation - will use OpenAI with general knowledge...');
-        console.log('==========================================\n');
-        // Continue without docs - OpenAI will use its training data
+        console.error(`\n❌ MCP error: ${mcpError?.message || mcpError} — continuing without docs`);
       }
     } else {
       console.log(`   ⚠️  No specific resources identified, skipping MCP documentation fetch`);
     }
-    // Step 3: Generate Terraform code using OpenAI with MCP documentation
-    console.log('\n🤖 Step 3: Generating Terraform code with OpenAI...');
+    // Step 2: Generate Terraform code using OpenAI with MCP documentation
+    console.log('\n🤖 Step 2: Generating Terraform code with OpenAI...');
     if (terraformDocs) {
       console.log(`   📚 Using latest documentation from Terraform MCP server`);
     } else {
@@ -937,6 +897,11 @@ Be specific about resource types (e.g., "azurerm_resource_group", "azurerm_stora
                      cloudProvider === 'aws' ? 'Amazon Web Services (AWS)' : 
                      cloudProvider === 'gcp' ? 'Google Cloud Platform (GCP)' : 
                      'the specified cloud provider';
+
+    /** Keeps generation aligned with user intent — avoids "helpful" extra resources */
+    const TERRAFORM_USER_SCOPE = `USER SCOPE (mandatory): Implement ONLY what the user asked for in the description. Do not add extra resources, optional services, environments, or regions unless explicitly requested. Prefer the smallest valid configuration that satisfies the request.
+
+CI / PLAN ACCURACY: Generated code must pass terraform validate and be plannable. For hashicorp/azurerm ~> 4.x use current documented attributes only (avoid deprecated names). Every var.* used in .tf files must be declared in variables.tf with a type; set values in dev.terraform.tfvars or defaults. Resource references must resolve (correct resource types and dependency order). Do not reference undeclared data or resources.`;
     
     // Build enhanced prompt with MCP documentation
     const docsContext = terraformDocs 
@@ -946,6 +911,8 @@ Be specific about resource types (e.g., "azurerm_resource_group", "azurerm_stora
     if (moduleApproach === 'child-module') {
       // Child modules use folder-based organization
       const prompt = `Generate Terraform child module code for ${cloudName} based on this description: "${refinedDescription}"${docsContext}
+
+${TERRAFORM_USER_SCOPE}
 
 IMPORTANT: Use the latest Terraform documentation provided above to ensure your code follows current best practices and uses the correct resource syntax.
 
@@ -987,9 +954,9 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
-          { role: 'system', content: 'You are a Terraform expert specializing in reusable child modules. Generate well-structured child modules using ONLY resource blocks, organized by resource type into separate folders. Never use module blocks in child modules.' },
+          { role: 'system', content: 'You are a Terraform expert specializing in reusable child modules. Implement only what the user asked for—no extra resource types or folders. Use ONLY resource blocks in separate folders by type; never use module blocks in child modules.' },
           { role: 'user', content: prompt }
         ],
         temperature: 0.3,
@@ -1113,6 +1080,8 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       
       const prompt = `Generate Terraform standalone root module for ${cloudName} based on this description: "${refinedDescription}"${docsContext}${existingFilesContext}
 
+${TERRAFORM_USER_SCOPE}
+
 IMPORTANT: Use the latest Terraform documentation provided above to ensure your code follows current best practices and uses the correct resource syntax.
 
 ${hasExistingFiles ? `🚨🚨🚨 CRITICAL: FILES ALREADY EXIST IN THE REPOSITORY! 🚨🚨🚨
@@ -1223,6 +1192,8 @@ CRITICAL: Generate code that follows ALL these best practices. The code must be 
 
 CRITICAL: DO NOT include provider configuration or terraform blocks in main.tf - those will be in separate files.
 
+STANDALONE ROOT (NOT AGGREGATED): Put real infrastructure in main.tf using "resource" and "data" blocks for the selected cloud provider. Do NOT use "module" blocks that download remote sources (https://, git::, Azure Blob URLs, or .zip archives). That pattern is for aggregated roots calling packaged modules; standalone root must declare resources directly.
+
 Please provide files:
 1. main.tf - Resource definitions ONLY (no provider blocks, no terraform blocks)${hasExistingFiles ? ' - MUST include ALL existing resources + new ones' : ''}
 2. variables.tf - Variable declarations (minimal, only for customizable values)${hasExistingFiles ? ' - MUST include ALL existing variables + new ones' : ''}
@@ -1238,7 +1209,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
             { 
               role: 'system', 
@@ -1270,7 +1241,11 @@ MANDATORY VERIFICATION BEFORE RESPONDING:
 6. If ANY verification fails, you have made an error - FIX IT before responding
 
 CRITICAL: If you cannot verify that your response includes ALL existing content PLUS new additions, DO NOT respond. Fix your response first.`
-                : `You are a Terraform expert specializing in production-ready, best-practice Terraform code. Generate code that follows ALL Terraform best practices and industry standards.
+                : `You are a Terraform expert specializing in production-ready, best-practice Terraform code.
+
+${TERRAFORM_USER_SCOPE}
+
+Generate code that follows Terraform best practices, but only for resources and settings the user actually requested.
 
 CRITICAL TERRAFORM BEST PRACTICES (MANDATORY):
 
@@ -1323,7 +1298,7 @@ CRITICAL TERRAFORM BEST PRACTICES (MANDATORY):
 
 8. **Code Quality**:
    - Use consistent formatting (2 spaces indentation)
-   - Avoid duplication - use variables, locals, or modules
+   - Avoid duplication - use variables and locals; optional local modules only with source = "./relative/path" — never remote module packages (http/https/git/blob/.zip) in standalone root
    - Keep resource blocks focused and readable
    - Validate inputs where possible
    - Use null_resource sparingly and only when necessary
@@ -1565,6 +1540,8 @@ REMEMBER: Generate production-ready code that follows ALL these best practices. 
       
       const prompt = `Generate Terraform aggregated root module for ${cloudName} based on this description: "${refinedDescription}"${docsContext}
 
+${TERRAFORM_USER_SCOPE}
+
 IMPORTANT: Use the latest Terraform documentation provided above to ensure your code follows current best practices and uses the correct resource syntax.
 
 This is an AGGREGATED ROOT MODULE. You MUST generate the following files with actual module calls based on the description:
@@ -1596,9 +1573,9 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
-          { role: 'system', content: 'You are a Terraform expert. Generate concise aggregated root modules with opinionated defaults. Avoid asking users for every detail.' },
+          { role: 'system', content: 'You are a Terraform expert. Follow the user description exactly; do not add modules or resources beyond what they asked for.' },
           { role: 'user', content: prompt }
         ],
         temperature: 0.3,
@@ -1737,7 +1714,7 @@ Format your response as JSON with a "files" array. Each file has "path" and "con
       let completion;
       try {
         completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           { role: 'system', content: 'You are a Terraform expert. Generate well-structured, production-ready Terraform code.' },
           { role: 'user', content: prompt }
@@ -1933,7 +1910,7 @@ Examples:
 Generate only the commit message, nothing else.`;
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1',
+      model: 'gpt-4o-mini',
       messages: [
         { role: 'user', content: prompt }
       ],
@@ -1978,7 +1955,7 @@ variable "variable_name" {
 Return ONLY the Terraform code, no markdown, no explanations.`;
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4.1',
+      model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: 'You are a Terraform expert. Generate clean, production-ready variable declarations.' },
         { role: 'user', content: prompt }
@@ -2023,7 +2000,7 @@ variable_name = { key = "value" }
 Return ONLY the Terraform code, no markdown, no explanations.`;
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4.1',
+      model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: 'You are a Terraform expert. Generate sensible default values for .tfvars files based on context.' },
         { role: 'user', content: prompt }
@@ -2032,6 +2009,78 @@ Return ONLY the Terraform code, no markdown, no explanations.`;
     });
 
     return response.choices[0]?.message?.content?.trim() || '';
+  }
+
+  /**
+   * MigrateOps: main.tf is often literal-only (no var.*). `ensureVariablesTfFromMainTf` only runs when
+   * var references exist — this pass fills variables.tf + dev.terraform.tfvars from tunable literals.
+   * Does not rewrite main.tf (avoids breaking imports/addresses).
+   */
+  async generateMigrateOpsVariablesTfvarsFromMainLiterals(mainTfContent: string): Promise<{
+    variablesTf: string;
+    tfvars: string;
+  }> {
+    const maxChars = 120000;
+    const body =
+      mainTfContent.length > maxChars
+        ? `${mainTfContent.slice(0, maxChars)}\n\n# ... [truncated for AI — ${mainTfContent.length} chars total]`
+        : mainTfContent;
+
+    const prompt = `You are a Terraform expert for hashicorp/azurerm ~> 4.x (MigrateOps: imported live Azure resources).
+
+main.tf below uses hardcoded values. Produce:
+1) variables_tf — Declare Terraform variables for tunable values that appear in main.tf: resource names, SKU/tier/size, image names/tags, hostnames, storage account names, service plan identifiers, container app settings, etc.
+2) dev_terraform_tfvars — Assign EVERY variable you declared with the same values as currently used in main.tf (so operators can override per environment).
+
+STRICT RULES:
+- Do NOT declare variables for resource \`location = "..."\` arguments — locations must stay literal in main.tf; never emit a "location" variable for azurerm resources.
+- Use snake_case variable names. Include \`type\` and \`description\` on each variable. Use \`default =\` in the variable block with the exact literal from main.tf where appropriate so terraform validate works even before editing main to use var.*.
+- dev_terraform_tfvars: one \`name = value\` per line; match every variable name. Use quotes for strings. Include a short header comment.
+- If main.tf is very small, still emit at least the obvious naming/SKU variables.
+- Output valid HCL only in the JSON strings (no markdown fences inside values).
+
+Return a JSON object ONLY:
+{
+  "variables_tf": "...",
+  "dev_terraform_tfvars": "..."
+}
+
+main.tf:
+\`\`\`hcl
+${body}
+\`\`\``;
+
+    const syncModel = process.env.MIGRATEOPS_SYNC_VARS_MODEL || 'gpt-4o-mini';
+    const completion = await aiChatCompletion(
+      {
+        model: syncModel,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You output only valid JSON with keys variables_tf and dev_terraform_tfvars. Values are Terraform HCL snippets.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.15,
+        max_tokens: 8192,
+        response_format: { type: 'json_object' },
+      },
+      { timeout: parseInt(process.env.MIGRATEOPS_SYNC_VARS_TIMEOUT_MS || '120000', 10), maxRetries: 1 }
+    );
+
+    const raw = completion.choices[0]?.message?.content || '{}';
+    let parsed: { variables_tf?: string; dev_terraform_tfvars?: string };
+    try {
+      parsed = JSON.parse(repairJson(raw));
+    } catch {
+      return { variablesTf: '', tfvars: '' };
+    }
+
+    return {
+      variablesTf: String(parsed.variables_tf || '').trim(),
+      tfvars: String(parsed.dev_terraform_tfvars || '').trim(),
+    };
   }
 
   /**
@@ -2061,7 +2110,7 @@ Return ONLY valid JSON, no markdown, no explanations.`;
 
     try {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           { role: 'system', content: 'You are a Terraform expert. Extract resource types and return them as JSON.' },
           { role: 'user', content: prompt }
@@ -2076,6 +2125,710 @@ Return ONLY valid JSON, no markdown, no explanations.`;
     } catch (error: any) {
       console.error('❌ Error extracting resources with AI:', error);
       return [];
+    }
+  }
+
+  /**
+   * Second AI pass: repair HCL for provider validity, required arguments, and import alignment.
+   */
+  private async refineMigrateOpsTerraformFiles(
+    files: Array<{ path: string; content: string }>,
+    scopeSection: string,
+    azureRulesSection: string
+  ): Promise<Array<{ path: string; content: string }>> {
+    const paths = files.map((f) => f.path);
+    const bundle = files
+      .map((f) => `=== FILE: ${f.path} ===\n${f.content}`)
+      .join('\n\n');
+    const bundleCap = 220_000;
+    const bundleTrimmed =
+      bundle.length > bundleCap ? `${bundle.slice(0, bundleCap)}\n\n... [trimmed for refine context]` : bundle;
+
+    const prompt = `You are a senior Terraform engineer. These files were generated from LIVE Azure Resource Manager JSON. Revise them so they are as close as possible to a successful \`terraform validate\` and \`terraform plan\` with Terraform 1.6+ and hashicorp/azurerm ~> 4.x.
+
+${scopeSection}
+
+${azureRulesSection}
+
+REFINE RULES:
+1. Use ONLY real azurerm resource types from the Terraform Registry — never invented names.
+2. \`azurerm_container_app\` MUST have: resource_group_name, container_app_environment_id, revision_mode, template { container { ... } }. **Every \`container\` block MUST include \`cpu\` and \`memory\`** (provider-required). Add them if missing.
+3. Every import block in imports.tf: \`to\` must be an **unquoted** address (e.g. to = azurerm_foo.bar), matching main.tf. Never quote the \`to\` value.
+4. Preserve resource labels when possible; fix bodies and attribute names.
+5. **Enforce standard generated tags** on resources that support tags:
+   \`tags = { ManagedBy = "MigrateOps", MigrateOpsImport = "true" }\`.
+   Do not attempt to mirror Azure Portal tags.
+6. If a resource cannot be represented faithfully without external data, add \`# migrateops: TODO\` and minimal valid stub — do not leave invalid HCL.
+7. Return JSON: { "files": [ { "path": string, "content": string } ] } with EXACTLY these paths: ${paths.map((p) => JSON.stringify(p)).join(', ')}
+
+--- FILES ---
+${bundleTrimmed}`;
+
+    try {
+      const completion = await aiChatCompletion(
+        {
+          model: MIGRATEOPS_REFINE_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You output only valid JSON with a "files" array. You fix Terraform HCL for Azure; you never invent resource types. For azurerm_container_app, every template.container block must set cpu and memory.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.05,
+          max_tokens: MIGRATEOPS_MAX_OUTPUT_TOKENS,
+          response_format: { type: 'json_object' },
+        },
+        { timeout: MIGRATEOPS_AI_TIMEOUT_MS, maxRetries: 1 }
+      );
+
+      const response = completion.choices[0]?.message?.content || '{"files":[]}';
+      const parsed = JSON.parse(repairJson(response));
+      const out = parsed.files;
+      if (!Array.isArray(out) || out.length === 0) {
+        return files;
+      }
+      const refinedByPath = new Map<string, string>();
+      for (const item of out) {
+        if (item?.path && typeof item.content === 'string') {
+          refinedByPath.set(item.path, item.content);
+        }
+      }
+      const merged = files.map((f) =>
+        refinedByPath.has(f.path) ? { path: f.path, content: refinedByPath.get(f.path)! } : f
+      );
+      return merged.map((f) =>
+        f.path.split('/').pop()?.toLowerCase() === 'main.tf'
+          ? { ...f, content: ensureContainerAppContainerCpuMemory(f.content) }
+          : f
+      );
+    } catch (err: any) {
+      console.warn('[MigrateOps] Refine pass failed, using first-pass files:', err?.message || err);
+      return files;
+    }
+  }
+
+  async generateTerraformFromLiveState(
+    cloudProvider: string,
+    resourcesJson: any[],
+    options?: {
+      resourceGroupName?: string;
+      resourceGroupLocation?: string;
+    }
+  ): Promise<{
+    files: Array<{ path: string; content: string }>;
+  }> {
+    console.log(`\n🔍 ========== MIGRATE-OPS GENERATION ==========`);
+    console.log(`☁️  Cloud Provider: ${cloudProvider}`);
+    console.log(`📦 Resources Count: ${resourcesJson.length}`);
+    console.log(
+      `   Models: generate=${MIGRATEOPS_MODEL} refine=${MIGRATEOPS_REFINE_MODEL} (set MIGRATEOPS_MODEL / MIGRATEOPS_REFINE_MODEL to override)`
+    );
+
+    const { payload: resourcesPayload, perResourceCapUsed, truncatedGlobally } =
+      buildMigrateOpsAzureResourcePayloadString(resourcesJson);
+    console.log(
+      `   Live payload: ${resourcesPayload.length} chars, per-resource property cap=${perResourceCapUsed}, global_truncated=${truncatedGlobally}`
+    );
+
+    const rgName = options?.resourceGroupName?.trim();
+    const rgLoc = options?.resourceGroupLocation?.trim();
+    const scopeSection =
+      rgName && rgLoc
+        ? `
+SCOPE (non-negotiable — this MigrateOps run is a single resource group):
+- Resource group name: "${rgName}"
+- The RESOURCE GROUP itself is in location: "${rgLoc}" — use this ONLY for the azurerm_resource_group block.
+- ⚠️ LOCATION RULE: Every OTHER resource (service plans, web apps, storage accounts, container apps, etc.) MUST use the \`location\` field from its own JSON entry, NOT "${rgLoc}". Resources can be in different Azure regions than their resource group. Hardcode each resource's own location as a string literal (e.g. location = "centralus") — never use var.location or the resource group location for child resources.
+- You MUST declare exactly one root resource group block:
+  resource "azurerm_resource_group" "migrate_scope" {
+    name     = "${rgName}"
+    location = "${rgLoc}"
+  }
+- Every \`resource_group_name = ...\` in this scope must be \`azurerm_resource_group.migrate_scope.name\`.
+`
+        : '';
+
+    const perResourceGuidance = buildSchemaGuidanceForResources(resourcesJson);
+
+    const azureRulesSection = `AZURERM 4.x MIGRATION RULES:
+- Target provider: hashicorp/azurerm ~> 4.x. Use ONLY real resource types from the Terraform Registry.
+- **TAGS:** Do NOT copy tags from Azure JSON. Generate standard tags in Terraform for every azurerm resource that supports tags:
+  \`tags = { ManagedBy = "MigrateOps", MigrateOpsImport = "true" }\`
+  Keep these keys/values stable unless user explicitly asks for different tag policy.
+- **\`migrateopsResolvedTerraform\` (when present) is authoritative.** The server pre-computed these values from live ARM JSON using the same rules Terraform needs (e.g. Container App \`ingress.target_port\`, \`revision_mode\`). Copy numbers and booleans from this object into HCL — do NOT override them with guesses from raw \`properties\` when they disagree.
+- Each resource may include \`migrateopsSchemaGuidance\` — per-resource-type cheat-sheet (Terraform type, ARM mappings, renames, removed blocks). **Follow it strictly.**
+- If \`migrateopsSchemaGuidance\` lists removed attributes or blocks, do NOT include them; use the replacement noted in the guidance.
+- Cross-check every \`azurerm_resource_group.<label>\` reference: the matching resource block MUST exist in main.tf.
+- Map fields from \`properties\`, \`migrateopsTerraformHints\`, and \`migrateopsResolvedTerraform\` into Terraform arguments. Prefer resolved + hints over re-parsing huge raw properties blobs.
+- If a resource type has no guidance attached, use the official Terraform Registry documentation for azurerm 4.x. If unsure about an attribute, add \`# TODO: verify\` rather than guessing.
+${perResourceGuidance}`;
+
+    const prompt = `MIGRATION OBJECTIVE: Reverse-engineer LIVE Azure resources into Terraform HCL so they can be imported into state via \`terraform import\`. The focus is migration fidelity — every resource must map cleanly to its Azure counterpart.
+
+Live Resources (JSON — includes \`migrateopsSchemaGuidance\`, \`migrateopsTerraformHints\`, and when available \`migrateopsResolvedTerraform\` with server-side resolved values):
+\`\`\`json
+${resourcesPayload}
+\`\`\`
+${scopeSection}
+
+${azureRulesSection}
+
+MIGRATION RULES:
+1. For each resource, check its \`migrateopsSchemaGuidance.terraformType\` and use that exact type. Follow \`armToTerraformMap\` to translate ARM property paths into Terraform argument names.
+2. If \`renamedIn4x\` shows an old→new mapping, ONLY use the new name. If \`removedIn4x\` lists an attribute, do NOT include it.
+3. Prefer \`migrateopsResolvedTerraform\` (authoritative), then migrateopsTerraformHints, then properties / sku / location / id — never invent numbers when resolved values exist.
+3b. **Tags:** For each Terraform resource type that supports tags, emit exactly:
+    \`tags = { ManagedBy = "MigrateOps", MigrateOpsImport = "true" }\`.
+    Do not read or mirror tags from Azure scan JSON.
+4. Drop only read-only noise (etag, internal IDs). Keep anything needed for a faithful plan.
+5. Extract repeated / tunable values into variables.tf and dev.terraform.tfvars.
+   **EXCEPTION — location is NEVER a variable**: Every resource MUST hardcode its own \`location\` directly from the \`location\` field in the JSON (e.g. \`location = "centralus"\`). Resources in the same resource group can have DIFFERENT locations in Azure. Never use \`var.location\` for any resource — it causes forces-replacement when the resource's actual location differs from the resource group. The \`location\` variable in variables.tf is only for informational reference; no resource block should reference it.
+6. Output files:
+   - main.tf — resource, data, locals, output blocks only (no terraform or provider block)
+   - variables.tf, dev.terraform.tfvars, outputs.tf
+7. imports.tf: one import block per managed resource in main.tf:
+   - \`to\` = **unquoted** Terraform resource address (e.g. to = azurerm_resource_group.migrate_scope)
+   - \`id\` = quoted Azure resource ARM ID string
+   - The import \`id\` MUST be the exact \`id\` field from the resource JSON (the Azure ARM resource ID).
+
+AZURERM_CONTAINER_APP CRITICAL RULES (for microsoft.app/containerapps resources):
+0. **Registry / ACR auth:** ARM lists \`configuration.registries[]\` with \`passwordSecretRef\` (camelCase). In Terraform the block is \`registry { server = "..." username = "..." password_secret_name = "..." }\` — the argument is **password_secret_name** only. There is NO \`password_secret_ref\` in the provider; emitting it causes immediate plan failure. Use \`migrateopsResolvedTerraform.azurerm_container_app.registry_blocks\` or \`migrateopsTerraformHints.containerApp.registriesForTerraform\` for exact values.
+0b. **Ingress transport:** In \`ingress {}\`, \`transport\` must be one of **auto**, **http**, **http2**, **tcp** (all **lowercase**). ARM often returns \`Auto\` or \`Http\` — use \`migrateopsResolvedTerraform.azurerm_container_app.ingress.transport\` or \`migrateopsTerraformHints.containerApp.ingressTransportForTerraform\` — never PascalCase strings.
+A. env { secret_name = "x" } — NOT secretRef = "x". The argument name is secret_name.
+B. NO scale {} block exists. Use min_replicas and max_replicas directly inside template {}.
+C. NO probes {} block exists. Use liveness_probe {}, readiness_probe {}, startup_probe {} inside container {}.
+D. ingress {} and secret {} are TOP-LEVEL on the resource — NOT inside template {}.
+E. ingress {} requires target_port (1–65535, NEVER 0). **Use migrateopsResolvedTerraform.azurerm_container_app.ingress.target_port** when present; it already resolves ingress → probes → container ports → env PORT. The field \`_resolvedFrom\` explains the source.
+F. Secrets: declare at top level as secret { name = "x", value = "y" }; reference in env as secret_name = "x".
+I. registry {} blocks (ACR pull): use password_secret_name = "..." (name of a top-level secret) — NEVER password_secret_ref (unsupported).
+G. NEVER include custom_domain {} inside ingress {} — it is a computed read-only attribute exported by the provider. Remove it entirely from the HCL. Also never set fqdn inside ingress {}.
+H. PROBE ATTRIBUTE NAMES inside liveness_probe {}, readiness_probe {}, startup_probe {} — ONLY these exact names work:
+   transport, port, path, initial_delay, interval_seconds, timeout, failure_count_threshold
+   Readiness ONLY (omit on liveness/startup): success_count_threshold
+   NEVER use: timeout_seconds, failure_threshold, success_threshold, initial_delay_seconds, period_seconds
+
+CRITICAL FORMATTING:
+Return a pure JSON object: { "files": [ { "path": string, "content": string } ] }. No markdown.
+
+Example:
+{
+  "files": [
+    { "path": "main.tf", "content": "..." },
+    { "path": "variables.tf", "content": "..." },
+    { "path": "dev.terraform.tfvars", "content": "..." },
+    { "path": "outputs.tf", "content": "..." },
+    { "path": "imports.tf", "content": "..." }
+  ]
+}`;
+
+    try {
+      const completion = await aiChatCompletion(
+        {
+          model: MIGRATEOPS_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are an expert Terraform migration engineer. You output only valid JSON with a "files" array. Your job is to reverse-engineer live Azure resources into Terraform HCL that is valid for hashicorp/azurerm ~> 4.x and ready for `terraform import`. When `migrateopsResolvedTerraform` is present on a resource, treat it as the single source of truth for those fields (pre-computed from ARM). Use `migrateopsSchemaGuidance` for types and renames. Never invent resource type names.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.08,
+          max_tokens: MIGRATEOPS_MAX_OUTPUT_TOKENS,
+          response_format: { type: 'json_object' },
+        },
+        { timeout: MIGRATEOPS_AI_TIMEOUT_MS, maxRetries: 2 }
+      );
+
+      let response = completion.choices[0]?.message?.content || '{"files":[]}';
+      const parsed = JSON.parse(repairJson(response));
+      let files: Array<{ path: string; content: string }> = parsed.files || [];
+
+      if (MIGRATEOPS_REFINE_ENABLED && files.length > 0) {
+        console.log('[MigrateOps] Running refine pass...');
+        files = await this.refineMigrateOpsTerraformFiles(files, scopeSection, azureRulesSection);
+      }
+
+      files = files.map((f) =>
+        f.path.split('/').pop()?.toLowerCase() === 'imports.tf'
+          ? { ...f, content: fixImportBlocksQuotedToAddresses(f.content) }
+          : f
+      );
+
+      return { files };
+    } catch (error: any) {
+      console.error('❌ Failed to generate Terraform from live state:', error);
+      throw new Error(`Failed to generate Terraform from live state: ${error.message}`);
+    }
+  }
+
+  /**
+   * AI-driven repair: reviews generated HCL against azurerm 4.x schema guidance
+   * and fixes attribute/block errors the model may have introduced.
+   * Replaces hardcoded regex patching — the AI is the intelligent layer.
+   *
+   * @param ciLogs Optional output from `terraform plan` / GitHub Actions — errors here take priority.
+   */
+  async repairMigrateOpsFiles(
+    files: Array<{ path: string; content: string }>,
+    schemaGuidanceText: string,
+    scopeSection: string,
+    ciLogs?: string
+  ): Promise<Array<{ path: string; content: string }>> {
+    const mainTf = files.find((f) => f.path.toLowerCase() === 'main.tf');
+    if (!mainTf) return files;
+
+    const paths = files.map((f) => f.path);
+    const bundle = files
+      .map((f) => `=== FILE: ${f.path} ===\n${f.content}`)
+      .join('\n\n');
+    const bundleCap = 220_000;
+    const bundleTrimmed =
+      bundle.length > bundleCap
+        ? `${bundle.slice(0, bundleCap)}\n\n... [trimmed]`
+        : bundle;
+
+    const ciLogsTrimmed = ciLogs?.trim()
+      ? ciLogs.length > 100_000
+        ? `${ciLogs.slice(-100_000)}\n\n... [earlier log output truncated]`
+        : ciLogs
+      : '';
+    const ciSection = ciLogsTrimmed
+      ? `
+
+--- TERRAFORM CI OUTPUT (GitHub Actions / terraform plan) — fix THESE errors first ---
+The following is real output from a failed validate workflow. Address every Error:, unsupported argument, invalid value, and missing attribute mentioned. Line numbers refer to the version of main.tf that was committed when CI ran; match resources and attributes by name.
+
+${ciLogsTrimmed}
+--- END CI OUTPUT ---
+
+`
+      : '';
+
+    const prompt = `You are a Terraform migration repair specialist. The files below were generated from live Azure resources for import into Terraform state using hashicorp/azurerm ~> 4.x.
+
+Your job: review every resource block in main.tf and fix any attribute names, blocks, or arguments that do not match the azurerm 4.x provider schema. The schema guidance below tells you the correct names.
+
+${scopeSection}
+
+${schemaGuidanceText}
+${ciSection}
+
+REPAIR RULES:${ciLogsTrimmed ? '\n0. **PRIORITY:** If CI output appears above, fix every error shown there before applying generic renames. Parse Error: blocks and "Unsupported argument" messages literally.' : ''}
+1. If an attribute was renamed in 4.x (e.g. enable_https_traffic_only → https_traffic_only_enabled), replace it with the new name.
+2. If a block was removed in 4.x (e.g. encryption {} on storage accounts), remove it and add the correct replacement if one exists.
+3. If a required argument is missing (e.g. arm_role_receiver missing "name"), add it with a sensible value derived from context.
+4. Deprecated resource types (azurerm_app_service_plan) should be replaced with the current type (azurerm_service_plan) with correct arguments.
+5. Computed/read-only attributes (linux_fx_version) should be replaced with the correct writable alternative (application_stack {}).
+6. address_prefix (singular) must become address_prefixes = ["..."] (list).
+7. Do NOT change resource labels, variable names, or import blocks unless fixing a direct error.
+8. Do NOT remove valid attributes that exist in 4.x — only fix wrong ones.
+9. Preserve all file content that is already correct.
+
+LOCATION FIDELITY RULES (critical — wrong location forces resource replacement):
+10. Every resource block MUST have its location hardcoded from the scanned JSON (e.g. location = "centralus"), NOT var.location or any variable reference. Resources in the same resource group can be in different Azure regions. Replace any \`location = var.location\` or \`location = var.azure_location\` with the actual hardcoded location string from the resource's own JSON \`location\` field. Failure to do this causes forces-replacement in terraform plan.
+
+TAGS (import / plan drift):
+10b. Ensure resources that support tags include:
+    \`tags = { ManagedBy = "MigrateOps", MigrateOpsImport = "true" }\`.
+    Do not fetch or mirror Azure-side tags during CI repair.
+
+AZURERM_CONTAINER_APP SPECIFIC RULES (critical):
+11. env blocks inside container {}: use secret_name = "..." NOT secretRef = "...". The argument is secret_name.
+12. There is NO probes {} block in azurerm_container_app. Replace any probes {} blocks with separate named blocks:
+    - liveness_probe { transport = "HTTP", port = N, path = "/", interval_seconds = 10 }
+    - readiness_probe { transport = "HTTP", port = N, path = "/", interval_seconds = 10 }
+    - startup_probe { transport = "HTTP", port = N, path = "/", interval_seconds = 10 }
+    If the probe type cannot be determined from context, use liveness_probe. If the source probes block has a "type" or similar field, map it.
+    PROBE ATTRIBUTE NAMES — only these exact names are accepted by the provider:
+      transport, port, path, initial_delay, interval_seconds, timeout,
+      failure_count_threshold, success_count_threshold (readiness only), header {}
+    WRONG names that will fail terraform plan (never use):
+      timeout_seconds, failure_threshold, success_threshold,
+      initial_delay_seconds, period_seconds, failure_count, success_count
+13. There is NO scale {} block in azurerm_container_app. Move min_replicas and max_replicas OUT of any scale {} block and place them directly inside the template {} block as flat arguments.
+14. ingress {} and secret {} are TOP-LEVEL blocks on azurerm_container_app — they must NOT be inside the template {} block.
+15. Every ingress {} block in azurerm_container_app MUST contain: target_port (number) and traffic_weight { percentage = 100, latest_revision = true }.
+16. Secrets declared in secret {} blocks at the top level must have a name and value. env vars that reference them must use: env { name = "VAR_NAME", secret_name = "secret-name" }.
+17. REMOVE the custom_domain {} block from inside ingress {} — it is a computed/read-only exported attribute. Terraform decides it automatically. Also remove fqdn from ingress {} for the same reason.
+18. In registry {} blocks: use password_secret_name = "..." NOT password_secret_ref — the provider attribute is password_secret_name (references a top-level secret {} name).
+19. In ingress {} only: transport must be lowercase auto, http, http2, or tcp — never "Auto" or "HTTP" (use migrateopsResolvedTerraform.azurerm_container_app.ingress.transport).
+
+--- FILES ---
+${bundleTrimmed}
+
+Return JSON: { "files": [ { "path": string, "content": string } ] } with EXACTLY these paths: ${paths.map((p) => JSON.stringify(p)).join(', ')}`;
+
+    try {
+      console.log(
+        ciLogsTrimmed
+          ? '[MigrateOps] Running AI repair pass (CI logs provided)...'
+          : '[MigrateOps] Running AI repair pass...'
+      );
+      const completion = await aiChatCompletion(
+        {
+          model: MIGRATEOPS_REFINE_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content: ciLogsTrimmed
+                ? 'You are a Terraform azurerm 4.x schema expert. Failed CI logs are included: fix those terraform plan errors first, then align with provider schema. Output valid JSON only.'
+                : 'You are a Terraform azurerm 4.x schema expert. You fix attribute names and blocks to match the current provider registry. Output valid JSON only.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.05,
+          max_tokens: MIGRATEOPS_MAX_OUTPUT_TOKENS,
+          response_format: { type: 'json_object' },
+        },
+        { timeout: MIGRATEOPS_AI_TIMEOUT_MS, maxRetries: 1 }
+      );
+
+      const response = completion.choices[0]?.message?.content || '{"files":[]}';
+      const parsed = JSON.parse(repairJson(response));
+      const out = parsed.files;
+      if (!Array.isArray(out) || out.length === 0) return files;
+
+      const repairedByPath = new Map<string, string>();
+      for (const item of out) {
+        if (item?.path && typeof item.content === 'string') {
+          repairedByPath.set(item.path, item.content);
+        }
+      }
+      const merged = files.map((f) =>
+        repairedByPath.has(f.path) ? { path: f.path, content: repairedByPath.get(f.path)! } : f
+      );
+      console.log('[MigrateOps] AI repair pass complete.');
+      return merged;
+    } catch (err: any) {
+      console.warn('[MigrateOps] AI repair pass failed, using previous files:', err?.message || err);
+      return files;
+    }
+  }
+
+  /**
+   * Terraform module (standalone / aggregated / child): fix HCL after failed local
+   * `terraform init -backend=false` + `terraform validate` (same spirit as MigrateOps CI repair).
+   */
+  async repairTerraformModuleFilesFromValidateOutput(
+    files: Array<{ path: string; content: string }>,
+    opts: {
+      cloudProvider: string | null;
+      moduleApproach: string | null;
+      failedCheck: TerraformCliValidationResult;
+    }
+  ): Promise<Array<{ path: string; content: string }>> {
+    if (files.length === 0) return files;
+
+    const fc = opts.failedCheck;
+    const diagText = fc.diagnostics
+      .map(
+        (d) =>
+          `[${d.severity || 'error'}] ${d.summary || ''}${d.detail ? `\n${d.detail}` : ''}${d.range?.filename ? `\nfile: ${d.range.filename}` : ''}`
+      )
+      .join('\n---\n');
+
+    const initSection =
+      fc.initOk || (!fc.initStderr && !fc.initStdout)
+        ? ''
+        : `\n--- terraform init (-backend=false) output ---\n${(fc.initStderr || '').slice(0, 12000)}${(fc.initStdout || '').slice(0, 4000)}\n--- end init ---\n`;
+
+    const validateSection = fc.validateRaw
+      ? `\n--- terraform validate -json (excerpt) ---\n${fc.validateRaw.slice(0, 14000)}\n--- end validate ---\n`
+      : '';
+
+    const paths = files.map((f) => f.path);
+    const bundle = files
+      .map((f) => `=== FILE: ${f.path} ===\n${f.content}`)
+      .join('\n\n');
+    const bundleCap = 200_000;
+    const bundleTrimmed =
+      bundle.length > bundleCap ? `${bundle.slice(0, bundleCap)}\n\n... [bundle trimmed]` : bundle;
+
+    const approachRules =
+      opts.moduleApproach === 'standalone-root'
+        ? `Standalone ROOT module: main.tf must use resource/data blocks for the cloud provider. Do NOT use module blocks with remote sources (https://, git::, Azure Blob, .zip). Provider/terraform blocks live in separate files — do not duplicate them in main.tf.`
+        : opts.moduleApproach === 'aggregated-root'
+          ? `Aggregated ROOT: root main.tf uses module { source = "./ChildDir" } to compose local child modules; fix paths and variables to match.`
+          : opts.moduleApproach === 'child-module'
+            ? `Child module: only resource blocks in module folders; no root provider/terraform blocks in child main.tf files.`
+            : '';
+
+    const cloud =
+      opts.cloudProvider === 'azure'
+        ? 'hashicorp/azurerm ~> 4.x'
+        : opts.cloudProvider === 'aws'
+          ? 'hashicorp/aws'
+          : opts.cloudProvider === 'gcp'
+            ? 'hashicorp/google'
+            : 'the selected cloud provider';
+
+    const prompt = `You are a senior Terraform engineer. The following Terraform files failed \`terraform init -backend=false\` and/or \`terraform validate\` in automation.
+
+Cloud / provider target: ${cloud}
+Module approach: ${opts.moduleApproach || 'unspecified'}
+${approachRules}
+
+DIAGNOSTICS (fix every issue referenced; unsupported arguments, missing required arguments, type errors, undeclared variables, invalid references):
+${diagText || '(no structured diagnostics)'}
+${initSection}
+${validateSection}
+
+FULL FILE SET (return corrected content for each path):
+${bundleTrimmed}
+
+RULES:
+1. Return JSON only: { "files": [ { "path": string, "content": string } ] }.
+2. Include EVERY path exactly once: ${paths.map((p) => JSON.stringify(p)).join(', ')}.
+3. Preserve working code; change only what is needed for validate to pass.
+4. Ensure variables.tf declares every var.* used; dev.terraform.tfvars supplies values where needed.
+5. For Azure, use argument names compatible with azurerm 4.x registry docs.
+
+`;
+
+    try {
+      console.log('[Terraform module] Running AI CLI repair pass...');
+      const completion = await aiChatCompletion(
+        {
+          model: TERRAFORM_MODULE_CLI_REPAIR_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You fix Terraform HCL so terraform validate passes. Output valid JSON with a "files" array only.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.06,
+          max_tokens: TERRAFORM_MODULE_CLI_REPAIR_MAX_TOKENS,
+          response_format: { type: 'json_object' },
+        },
+        { timeout: TERRAFORM_MODULE_CLI_REPAIR_TIMEOUT_MS, maxRetries: 1 }
+      );
+
+      const response = completion.choices[0]?.message?.content || '{"files":[]}';
+      const parsed = JSON.parse(repairJson(response));
+      const out = parsed.files;
+      if (!Array.isArray(out) || out.length === 0) return files;
+
+      const repairedByPath = new Map<string, string>();
+      for (const item of out) {
+        if (item?.path && typeof item.content === 'string') {
+          repairedByPath.set(item.path, item.content);
+        }
+      }
+      const merged = files.map((f) =>
+        repairedByPath.has(f.path) ? { path: f.path, content: repairedByPath.get(f.path)! } : f
+      );
+      console.log('[Terraform module] AI CLI repair pass complete.');
+      return merged;
+    } catch (err: unknown) {
+      console.warn('[Terraform module] AI CLI repair failed, keeping previous files:', err);
+      return files;
+    }
+  }
+
+  /**
+   * Terraform module: repair using real GitHub Actions `terraform plan` / validate job logs
+   * (same role as MigrateOps repair-from-logs).
+   */
+  async repairTerraformModuleFromCiPlanLogs(
+    files: Array<{ path: string; content: string }>,
+    opts: {
+      cloudProvider: string | null;
+      moduleApproach: string | null;
+      planLogs: string;
+    }
+  ): Promise<Array<{ path: string; content: string }>> {
+    if (files.length === 0) return files;
+
+    const planLogsTrimmed = opts.planLogs.trim()
+      ? opts.planLogs.length > 100_000
+        ? `... [truncated]\n${opts.planLogs.slice(-100_000)}`
+        : opts.planLogs
+      : '';
+
+    if (!planLogsTrimmed) return files;
+
+    const paths = files.map((f) => f.path);
+    const bundle = files
+      .map((f) => `=== FILE: ${f.path} ===\n${f.content}`)
+      .join('\n\n');
+    const bundleCap = 200_000;
+    const bundleTrimmed =
+      bundle.length > bundleCap ? `${bundle.slice(0, bundleCap)}\n\n... [bundle trimmed]` : bundle;
+
+    const approachRules =
+      opts.moduleApproach === 'standalone-root'
+        ? `Standalone ROOT module: main.tf uses resource/data blocks; no remote module package sources (https/git/blob zip). Provider/terraform blocks stay in their own files.`
+        : opts.moduleApproach === 'aggregated-root'
+          ? `Aggregated ROOT: root main.tf composes local modules via module { source = "./Dir" }.`
+          : opts.moduleApproach === 'child-module'
+            ? `Child modules: resource blocks only in folder main.tf files.`
+            : '';
+
+    const cloud =
+      opts.cloudProvider === 'azure'
+        ? 'hashicorp/azurerm ~> 4.x'
+        : opts.cloudProvider === 'aws'
+          ? 'hashicorp/aws'
+          : opts.cloudProvider === 'gcp'
+            ? 'hashicorp/google'
+            : 'the selected cloud provider';
+
+    const prompt = `You are a senior Terraform engineer. GitHub Actions ran terraform init/plan/validate and FAILED. Fix the Terraform files so a subsequent plan can succeed.
+
+Cloud / provider: ${cloud}
+Module approach: ${opts.moduleApproach || 'unspecified'}
+${approachRules}
+
+--- TERRAFORM CI OUTPUT (GitHub Actions) — fix every error below first ---
+Address Error:, unsupported argument, missing required argument, invalid reference, provider errors, and variable/tfvars issues mentioned in the logs.
+
+${planLogsTrimmed}
+--- END CI OUTPUT ---
+
+FULL FILE SET (return corrected content for each path):
+${bundleTrimmed}
+
+RULES:
+1. Return JSON only: { "files": [ { "path": string, "content": string } ] }.
+2. Include EVERY path exactly once: ${paths.map((p) => JSON.stringify(p)).join(', ')}.
+3. Preserve correct code; change only what CI errors require.
+4. variables.tf / dev.terraform.tfvars must align with var.* usage in .tf files.
+5. For Azure, use azurerm 4.x documented argument names.
+
+`;
+
+    try {
+      console.log('[Terraform module] Running AI repair from CI plan logs...');
+      const completion = await aiChatCompletion(
+        {
+          model: TERRAFORM_MODULE_CLI_REPAIR_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You fix Terraform HCL using failed CI terraform plan/validate logs. Output valid JSON with a "files" array only.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.06,
+          max_tokens: TERRAFORM_MODULE_CLI_REPAIR_MAX_TOKENS,
+          response_format: { type: 'json_object' },
+        },
+        { timeout: TERRAFORM_MODULE_CLI_REPAIR_TIMEOUT_MS, maxRetries: 1 }
+      );
+
+      const response = completion.choices[0]?.message?.content || '{"files":[]}';
+      const parsed = JSON.parse(repairJson(response));
+      const out = parsed.files;
+      if (!Array.isArray(out) || out.length === 0) return files;
+
+      const repairedByPath = new Map<string, string>();
+      for (const item of out) {
+        if (item?.path && typeof item.content === 'string') {
+          repairedByPath.set(item.path, item.content);
+        }
+      }
+      const merged = files.map((f) =>
+        repairedByPath.has(f.path) ? { path: f.path, content: repairedByPath.get(f.path)! } : f
+      );
+      console.log('[Terraform module] AI repair from CI logs complete.');
+      return merged;
+    } catch (err: unknown) {
+      console.warn('[Terraform module] AI repair from CI logs failed:', err);
+      return files;
+    }
+  }
+
+  /**
+   * Plain-language drift explanation + fix steps for MigrateOps sync-check (UI).
+   * Set MIGRATEOPS_SYNC_AI=0 to skip (details lists still returned).
+   */
+  async generateMigrateSyncRemediation(payload: {
+    missingImports: string[];
+    staleImports: Array<{ to: string; id: string }>;
+    orphanImports: string[];
+    terraformResourceCount: number;
+    importBlockCount: number;
+  }): Promise<{
+    summary: string;
+    suggestions: Array<{
+      category: 'missing_import' | 'stale_import_id' | 'orphan_import';
+      title: string;
+      detail: string;
+      suggestedFix: string;
+    }>;
+  } | null> {
+    if (
+      payload.missingImports.length === 0 &&
+      payload.staleImports.length === 0 &&
+      payload.orphanImports.length === 0
+    ) {
+      return null;
+    }
+
+    const prompt = `MigrateOps sync check found drift between Terraform resources in main.tf, import blocks in imports.tf, and the last scanned Azure resource list.
+
+DATA:
+${JSON.stringify(payload, null, 2)}
+
+MEANINGS:
+- missingImports: addresses that appear as resource blocks in Terraform but have no matching import { to = ... } — imports are needed for state alignment when adopting existing Azure resources.
+- staleImports: import id values that do not match any resource ID from the scanned Azure inventory (subscription may have changed or scan is stale).
+- orphanImports: import "to" addresses that do not match any resource block in the current Terraform root module.
+
+Return JSON only:
+{
+  "summary": "2-5 sentences in plain English for someone doing a migration",
+  "suggestions": [
+    {
+      "category": "missing_import" | "stale_import_id" | "orphan_import",
+      "title": "short headline",
+      "detail": "what is wrong",
+      "suggestedFix": "concrete remediation steps (which file to edit, whether to re-run Extract, etc.)"
+    }
+  ]
+}
+At most 12 suggestions; group similar resource addresses into one suggestion when helpful.`;
+
+    try {
+      const completion = await aiChatCompletion(
+        {
+          model: process.env.MIGRATEOPS_SYNC_AI_MODEL || 'gpt-4o-mini',
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a Terraform migration expert. Respond with valid JSON only. Be specific and actionable.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.15,
+          max_tokens: 2500,
+          response_format: { type: 'json_object' },
+        },
+        { timeout: 90000, maxRetries: 1 }
+      );
+      const raw = completion.choices[0]?.message?.content || '{}';
+      const parsed = JSON.parse(repairJson(raw));
+      if (!parsed.summary || !Array.isArray(parsed.suggestions)) return null;
+      const allowed = new Set(['missing_import', 'stale_import_id', 'orphan_import']);
+      return {
+        summary: String(parsed.summary),
+        suggestions: parsed.suggestions.map((s: any) => ({
+          category: allowed.has(s.category) ? s.category : 'missing_import',
+          title: String(s.title || 'Issue'),
+          detail: String(s.detail || ''),
+          suggestedFix: String(s.suggestedFix || ''),
+        })),
+      };
+    } catch (e: any) {
+      console.warn('generateMigrateSyncRemediation failed:', e?.message || e);
+      return null;
     }
   }
 
@@ -2153,7 +2906,7 @@ Generate the complete script code.`;
 
     try {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4.1',
+        model: 'gpt-4o-mini',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }

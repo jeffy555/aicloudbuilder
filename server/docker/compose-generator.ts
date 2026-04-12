@@ -2,7 +2,16 @@
  * Docker Compose Generator
  * Generates docker-compose.yml using AI based on repo scan data and Dockerfile content.
  */
-import OpenAI from "openai";
+import { aiChatCompletion } from '../utils/ai-client.js';
+import { z } from 'zod';
+import { sanitizeField, sanitizeContent } from '../utils/sanitize-prompt.js';
+
+// ─── Zod schemas for AI response validation ─────────────────────────────────
+
+const aiImageSizeSchema = z.object({
+  compressed: z.number(),
+  uncompressed: z.number(),
+});
 
 export interface ComposeGenerateOptions {
   projectName: string;
@@ -64,9 +73,49 @@ export interface ImageSizeEstimate {
 }
 
 /**
- * Estimate final image sizes from a Dockerfile's FROM instructions.
+ * Use AI to estimate compressed/uncompressed sizes for an unknown Docker image.
+ * Returns null on failure so the caller can fall back to defaults.
  */
-export function estimateImageSizes(dockerfileContent: string): ImageSizeEstimate[] {
+async function aiEstimateImageSize(
+  imageName: string
+): Promise<{ compressed: number; uncompressed: number } | null> {
+  try {
+    const response = await aiChatCompletion({
+      model: "gpt-4o-mini",
+      temperature: 0.3,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system" as const,
+          content:
+            'You are a Docker image size expert. Estimate the typical compressed (pulled) and uncompressed (on-disk) size in MB for a Docker image. Return JSON: { "compressed": <number>, "uncompressed": <number> }. Be realistic based on the image contents. If you are unsure, provide a reasonable estimate based on the image name, base OS, and typical contents.',
+        },
+        {
+          role: "user" as const,
+          content: `Estimate the compressed and uncompressed size in MB for this Docker image: ${imageName}`,
+        },
+      ],
+    });
+
+    const raw = response.choices[0]?.message?.content;
+    if (!raw) return null;
+
+    const result = aiImageSizeSchema.safeParse(JSON.parse(raw));
+    if (!result.success) {
+      console.warn('[compose-generator] AI image size response validation failed:', result.error.message);
+      return null;
+    }
+    return result.data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Estimate final image sizes from a Dockerfile's FROM instructions.
+ * Uses a static lookup table for known images and AI estimation for unknown ones.
+ */
+export async function estimateImageSizes(dockerfileContent: string): Promise<ImageSizeEstimate[]> {
   const lines = dockerfileContent.split('\n');
   const fromLines = lines.filter(l => l.trim().toUpperCase().startsWith('FROM'));
   const estimates: ImageSizeEstimate[] = [];
@@ -80,10 +129,6 @@ export function estimateImageSizes(dockerfileContent: string): ImageSizeEstimate
     const stageName = match[2] || `stage${stages.length}`;
     stages.push(stageName);
 
-    // Resolve COPY --from=<stage> references — skip builder stages in final estimate
-    // We only care about the last stage (final image)
-    const isLastStage = fromLines.indexOf(fromLine) === fromLines.length - 1;
-
     // Match against lookup table (try exact, then base without digest/sha)
     const imageNormalized = image.replace(/@sha256:\w+$/, '').toLowerCase();
     let sizeData = IMAGE_SIZES[imageNormalized];
@@ -95,6 +140,14 @@ export function estimateImageSizes(dockerfileContent: string): ImageSizeEstimate
         imageNormalized === key
       );
       if (entry) sizeData = entry[1];
+    }
+
+    // For unknown images, try AI estimation before falling back to generic defaults
+    if (!sizeData) {
+      const aiEstimate = await aiEstimateImageSize(image);
+      if (aiEstimate) {
+        sizeData = aiEstimate;
+      }
     }
 
     estimates.push({
@@ -118,17 +171,15 @@ export function estimateImageSizes(dockerfileContent: string): ImageSizeEstimate
 export async function generateDockerCompose(
   options: ComposeGenerateOptions
 ): Promise<ComposeGenerateResult> {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
   const contextLines: string[] = [
-    `Project: ${options.projectName}`,
-    `Languages: ${options.languages.join(', ') || 'unknown'}`,
-    `Frameworks: ${options.frameworks.join(', ') || 'none detected'}`,
+    `Project: ${sanitizeField(options.projectName)}`,
+    `Languages: ${options.languages.map(l => sanitizeField(l)).join(', ') || 'unknown'}`,
+    `Frameworks: ${options.frameworks.map(f => sanitizeField(f)).join(', ') || 'none detected'}`,
   ];
-  if (options.entrypoint) contextLines.push(`Entry point: ${options.entrypoint}`);
+  if (options.entrypoint) contextLines.push(`Entry point: ${sanitizeField(options.entrypoint)}`);
   if (options.existingDockerfileContent) {
     contextLines.push(
-      `\nExisting Dockerfile (first 800 chars):\n${options.existingDockerfileContent.substring(0, 800)}`
+      `\nExisting Dockerfile (first 800 chars):\n${sanitizeContent(options.existingDockerfileContent.substring(0, 800))}`
     );
   }
 
@@ -152,7 +203,7 @@ Generate a production-ready docker-compose.yml file for this application. Requir
 
 Return ONLY the docker-compose.yml content, no markdown fencing, no explanations.`;
 
-  const completion = await openai.chat.completions.create({
+  const completion = await aiChatCompletion({
     model: 'gpt-4o-mini',
     messages: [
       {

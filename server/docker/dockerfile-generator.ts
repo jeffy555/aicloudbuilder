@@ -1,8 +1,4 @@
-import OpenAI from 'openai';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { aiChatCompletion } from '../utils/ai-client.js';
 
 // Helper function to repair JSON (enhanced version)
 function repairJson(jsonText: string): string {
@@ -268,22 +264,22 @@ Generate Dockerfile and .dockerignore files.`;
         ? "Previous response included unrelated module references. This request is strictly for Dockerfile generation—do not mention Terraform, Kubernetes, ScoreMe, ArchMe, automation scripts, weather, hobby topics, or other unrelated content."
         : null;
 
-    const messages = [
+    const messages: { role: 'system' | 'user'; content: string }[] = [
       {
-        role: 'system',
+        role: 'system' as const,
         content: systemPrompt
       },
       ...(scopeRetryReminder ? [{
-        role: 'system',
+        role: 'system' as const,
         content: scopeRetryReminder
       }] : []),
       {
-        role: 'user',
+        role: 'user' as const,
         content: userPrompt
       }
     ];
     
-    const completion = await openai.chat.completions.create({
+    const completion = await aiChatCompletion({
       model: 'gpt-4o-mini',
       messages,
       temperature: 0.3,

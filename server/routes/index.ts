@@ -2,6 +2,8 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { registerHealthRoutes } from "./health";
 import { registerAuthRoutes } from "./auth";
+import { registerMicrosoftAuthRoutes } from "./auth-microsoft";
+import { registerAwsAuthRoutes } from "./auth-aws";
 import { registerUserSecretsRoutes } from "./user-secrets";
 import { registerSessionRoutes } from "./sessions";
 import { registerFileRoutes } from "./files";
@@ -23,6 +25,7 @@ import { registerTerraformGenerationRoutes } from "./terraform-generation";
 import { registerScanRoutes } from "./scan";
 import { registerFixesRoutes } from "./fixes";
 import { registerCostAnalysisRoutes } from "./cost-analysis";
+import { registerMigrateRoutes } from "./migrate";
 // Import legacy routes for routes not yet migrated
 import { registerLegacyRoutes } from "../routes-legacy";
 
@@ -48,6 +51,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Register new modular routes
   registerHealthRoutes(app);
   registerAuthRoutes(app); // Authentication routes (signup, login, logout)
+  registerMicrosoftAuthRoutes(app); // Microsoft Azure AD SSO
+  registerAwsAuthRoutes(app);       // AWS Cognito SSO
   registerUserSecretsRoutes(app); // Bitwarden secrets management
   registerSessionRoutes(app);
   registerFileRoutes(app);
@@ -69,6 +74,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerScanRoutes(app);               // POST /api/sessions/:id/scan
   registerFixesRoutes(app);              // POST /api/sessions/:id/fix-issues
   registerCostAnalysisRoutes(app);       // POST /api/sessions/:id/analyze-cost
+  registerMigrateRoutes(app);            // /api/migrate/*
 
   // Legacy routes stub — all endpoints have been migrated to modular route files above
   const server = await registerLegacyRoutes(app);

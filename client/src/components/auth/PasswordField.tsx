@@ -10,6 +10,7 @@ interface PasswordFieldProps {
   showStrengthIndicator?: boolean;
   required?: boolean;
   autoComplete?: string;
+  testId?: string;
 }
 
 export default function PasswordField({
@@ -21,6 +22,7 @@ export default function PasswordField({
   showStrengthIndicator = false,
   required,
   autoComplete,
+  testId,
 }: PasswordFieldProps) {
   const [showPassword, setShowPassword] = useState(false);
 
@@ -55,6 +57,7 @@ export default function PasswordField({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           autoComplete={autoComplete}
+          data-testid={testId}
           className={cn(
             "w-full px-4 py-3 rounded-lg",
             "bg-white/10 backdrop-blur-sm",

@@ -1,4 +1,9 @@
 /**
+ * @deprecated This file is no longer used. All recommendation logic has been
+ * moved to AI-driven analysis. Retained for reference only — safe to delete.
+ */
+
+/**
  * Thresholds and savings estimates for the cost-optimization recommendation engine.
  *
  * Design principles:

@@ -6,7 +6,7 @@
 import type { Express } from "express";
 import { mcpClient, type MCPProvider } from "../mcp-client";
 import { bitwardenService, isBitwardenConfigured } from "../services/bitwarden-service";
-import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { requireAuth, optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
 
 /**
  * Register debug routes
@@ -151,7 +151,8 @@ export function registerDebugRoutes(app: Express) {
   });
 
   // Credential diagnostic endpoint — use this in production to diagnose why Bitwarden isn't working
-  app.get("/api/debug/credentials", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  // requireAuth prevents unauthenticated callers from learning which env vars / services are configured
+  app.get("/api/debug/credentials", requireAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const userId = req.userId;
       const providers = ['github', 'azure-devops', 'azure-cloud'] as const;

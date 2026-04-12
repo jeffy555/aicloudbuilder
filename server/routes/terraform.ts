@@ -13,6 +13,19 @@ import { validateTerraformRequest, formatValidationErrors } from "../terraform-v
 import { generateArchitectureDiagram } from "../diagram/terraform-diagram-generator";
 import { findMatchingBrace } from "../utils/route-helpers";
 import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { aiMediumLimiter } from "../middleware/rate-limit";
+import { sessionIdParams } from "@shared/api-contracts/common";
+import {
+  configureBackendBody,
+  refactorBody,
+  refactorFixBody,
+  generateDiagramBody,
+  validatePolicyBody,
+  rightsizingBody,
+  applyRightsizingBody,
+  analyzePlanDiffBody,
+} from "@shared/api-contracts/terraform";
 import { bitwardenService, isBitwardenConfigured } from "../services/bitwarden-service";
 import { AZURE_PRICING_CONFIG } from "../azure-pricing-config.js";
 import {
@@ -32,11 +45,24 @@ const TERRAFORM_VAR_USAGE_PATTERN = /var\.([a-zA-Z0-9_-]+)/g;
 const TERRAFORM_VAR_DECLARATION_PATTERN = /variable\s+"([^"]+)"/g;
 
 /**
+ * Verify the requesting user owns the session (or session is unowned).
+ * Returns false and sends 403 if access is denied.
+ */
+function ensureTerraformSessionOwnership(session: any, req: AuthenticatedRequest, res: any): boolean {
+  if (!session.userId || session.userId !== req.userId) {
+    console.warn(`[SECURITY] Terraform session access denied: sessionId=${session.id} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+    res.status(403).json({ error: 'Access denied to this session' });
+    return false;
+  }
+  return true;
+}
+
+/**
  * Register Terraform-specific routes
  */
 export function registerTerraformRoutes(app: Express) {
   // Configure Terraform backend (Azure/AWS/GCP)
-  app.post("/api/sessions/:id/configure-backend", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/configure-backend", optionalAuth, validateRequest({ params: sessionIdParams, body: configureBackendBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { action, backendConfig } = req.body; // action: 'validate' | 'create' | 'decline'
@@ -45,6 +71,7 @@ export function registerTerraformRoutes(app: Express) {
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
+      if (!ensureTerraformSessionOwnership(session, req, res)) return;
 
       // Scenario 1: User declines backend
       if (action === 'decline') {
@@ -65,10 +92,43 @@ export function registerTerraformRoutes(app: Express) {
         
         // AWS backend validation
         if (cloudProvider === 'aws' || session.backendType === 's3') {
-          // For AWS, we can't validate S3/DynamoDB via MCP, so we'll just mark as validated
-          // User should verify resources exist manually
           if (!session.backendContainer) {
             return res.status(400).json({ error: 'Backend configuration incomplete: S3 bucket name is required' });
+          }
+          const bucketName = session.backendContainer;
+          const dynamodbTable = session.backendStateKey?.includes('|') ? session.backendStateKey.split('|')[1] : 'terraform-state-lock';
+          const region = session.backendLocation || 'us-east-1';
+
+          const bucketValidation = await mcpClient.validateAwsS3Bucket(bucketName, region);
+          if (bucketValidation.error) {
+            return res.json({
+              status: 'validation_error',
+              error: bucketValidation.error,
+              suggestion: 'Ensure AWS MCP server is configured and AWS credentials are valid.'
+            });
+          }
+          if (!bucketValidation.exists) {
+            return res.json({
+              status: 'validation_failed',
+              error: `S3 bucket "${bucketName}" not found in region "${region}"`,
+              suggestion: 'Create the bucket or update backend configuration'
+            });
+          }
+
+          const tableValidation = await mcpClient.validateAwsDynamoDbTable(dynamodbTable, region);
+          if (tableValidation.error) {
+            return res.json({
+              status: 'validation_error',
+              error: tableValidation.error,
+              suggestion: 'Ensure AWS MCP server is configured and AWS credentials are valid.'
+            });
+          }
+          if (!tableValidation.exists) {
+            return res.json({
+              status: 'validation_failed',
+              error: `DynamoDB table "${dynamodbTable}" not found in region "${region}"`,
+              suggestion: 'Create the table or update backend configuration'
+            });
           }
 
           await storage.updateSession(sessionId, {
@@ -78,12 +138,11 @@ export function registerTerraformRoutes(app: Express) {
 
           return res.json({
             status: 'validated',
-            message: 'AWS backend configuration validated (please ensure S3 bucket and DynamoDB table exist)',
+            message: 'AWS backend configuration validated successfully via AWS MCP',
             details: {
-              bucket: session.backendContainer,
-              // Extract DynamoDB table from stateKey if stored in format "state-key|dynamodb-table"
-              dynamodbTable: session.backendStateKey?.includes('|') ? session.backendStateKey.split('|')[1] : 'terraform-state-lock',
-              region: session.backendLocation || 'us-east-1',
+              bucket: bucketName,
+              dynamodbTable,
+              region,
               stateKey: session.backendStateKey?.includes('|') ? session.backendStateKey.split('|')[0] : (session.backendStateKey || 'terraform.tfstate')
             }
           });
@@ -154,11 +213,43 @@ export function registerTerraformRoutes(app: Express) {
 
       // Scenario 3: Missing backend - create with defaults or provided config
       if (action === 'create') {
+        // Declared outside try so they're accessible in the finally block for cleanup
+        let bitwardenCredentialsApplied = false;
+        let awsBitwardenCredentialsApplied = false;
+        let prevAzureEnv: Record<string, string | undefined> = {};
+        let prevAwsEnv: Record<string, string | undefined> = {};
         try {
           const cloudProvider = session.cloudProvider || 'azure';
           
           // AWS backend configuration
           if (cloudProvider === 'aws') {
+            // Load AWS credentials from Bitwarden for this request if not already configured
+            prevAwsEnv = {
+              AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+              AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+              AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN,
+              AWS_REGION: process.env.AWS_REGION,
+              AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION,
+            };
+            if (!process.env.AWS_ACCESS_KEY_ID && req.userId && isBitwardenConfigured()) {
+              try {
+                const awsSecret = await bitwardenService.getUserSecret(req.userId, 'aws');
+                if (awsSecret?.accessKeyId && awsSecret?.secretAccessKey) {
+                  process.env.AWS_ACCESS_KEY_ID = awsSecret.accessKeyId;
+                  process.env.AWS_SECRET_ACCESS_KEY = awsSecret.secretAccessKey;
+                  process.env.AWS_REGION = awsSecret.region || process.env.AWS_REGION || 'us-east-1';
+                  process.env.AWS_DEFAULT_REGION = awsSecret.region || process.env.AWS_DEFAULT_REGION || 'us-east-1';
+                  awsBitwardenCredentialsApplied = true;
+                  await mcpClient.disconnectAwsClient();
+                  console.log(`✅ AWS credentials loaded from Bitwarden for user ${req.userId} (request-scoped)`);
+                } else {
+                  console.warn(`⚠️ AWS credentials not found in Bitwarden for user ${req.userId}`);
+                }
+              } catch (bwErr: any) {
+                console.warn(`⚠️ Failed to load AWS credentials from Bitwarden: ${bwErr.message}`);
+              }
+            }
+
             // Use provided config or generate sensible defaults for AWS
             const defaults = {
               bucket: backendConfig?.bucket || backendConfig?.container || `terraform-state-${Date.now().toString().slice(-8)}`,
@@ -174,9 +265,32 @@ export function registerTerraformRoutes(app: Express) {
             console.log('Region:', defaults.region);
             console.log('State Key:', defaults.stateKey);
 
-            // Note: AWS backend resources (S3 bucket, DynamoDB table) need to be created manually
-            // or via AWS CLI/Console. We'll just generate the backend.tf configuration.
-            // For now, we'll assume they exist or will be created by the user.
+            let backendValidated: 'true' | 'pending' = 'true';
+            let provisioningMessage = 'AWS backend resources provisioned and validated via AWS MCP.';
+            let provisioningWarnings: string[] = [];
+
+            const bucketValidation = await mcpClient.validateAwsS3Bucket(defaults.bucket, defaults.region);
+            if (!bucketValidation.exists) {
+              const bucketCreate = await mcpClient.createAwsS3Bucket(defaults.bucket, defaults.region);
+              if (!bucketCreate.success) {
+                backendValidated = 'pending';
+                provisioningWarnings.push(bucketCreate.error || 'Failed to create S3 bucket via AWS MCP');
+              }
+            }
+
+            const tableValidation = await mcpClient.validateAwsDynamoDbTable(defaults.dynamodbTable, defaults.region);
+            if (!tableValidation.exists) {
+              const tableCreate = await mcpClient.createAwsDynamoDbLockTable(defaults.dynamodbTable, defaults.region);
+              if (!tableCreate.success) {
+                backendValidated = 'pending';
+                provisioningWarnings.push(tableCreate.error || 'Failed to create DynamoDB table via AWS MCP');
+              }
+            }
+
+            if (backendValidated === 'pending') {
+              provisioningMessage =
+                'AWS backend configuration generated. Some resources were not provisioned automatically via AWS MCP.';
+            }
 
             // Update session with backend configuration
             // Note: Store DynamoDB table name in backendStateKey as "state-key|dynamodb-table" format
@@ -186,7 +300,7 @@ export function registerTerraformRoutes(app: Express) {
               backendContainer: defaults.bucket, // Reuse container field for S3 bucket
               backendStateKey: `${defaults.stateKey}|${defaults.dynamodbTable}`, // Store both state key and DynamoDB table
               backendLocation: defaults.region, // Reuse location field for AWS region
-              backendValidated: 'pending', // Mark as pending - user needs to create resources
+              backendValidated,
               workflowStep: 'terraform_generation'
             });
 
@@ -232,23 +346,33 @@ export function registerTerraformRoutes(app: Express) {
 
             return res.json({
               status: 'configured',
-              message: 'AWS backend configuration generated. Please create the S3 bucket and DynamoDB table manually, then run terraform init.',
+              message: provisioningMessage,
               details: {
                 ...defaults,
+                backendValidated,
                 filesGenerated: ['backend.tf', 'provider.tf', 'terraform.tf'],
                 instructions: [
                   `Create S3 bucket: aws s3 mb s3://${defaults.bucket} --region ${defaults.region}`,
                   `Create DynamoDB table: aws dynamodb create-table --table-name ${defaults.dynamodbTable} --attribute-definitions AttributeName=LockID,AttributeType=S --key-schema AttributeName=LockID,KeyType=HASH --billing-mode PAY_PER_REQUEST --region ${defaults.region}`,
                   'Then run: terraform init'
-                ]
+                ],
+                warnings: provisioningWarnings.length > 0 ? provisioningWarnings : undefined,
               }
             });
           }
 
           // Azure backend configuration (existing logic)
-          // Step 0: Load Azure Cloud credentials from Bitwarden into process.env if not already set.
-          // This allows users who stored credentials via Settings to use Terraform backend
-          // without requiring AZURE_* env vars to be pre-configured in the container.
+          // Step 0: Load Azure Cloud credentials from Bitwarden — scoped to THIS request only.
+          // Credentials are applied to process.env temporarily and cleared in the finally block below
+          // so they cannot leak to other concurrent requests.
+          // Save any pre-existing env vars so we can restore them (e.g. container-level service principal)
+          prevAzureEnv = {
+            AZURE_CLIENT_ID: process.env.AZURE_CLIENT_ID,
+            AZURE_TENANT_ID: process.env.AZURE_TENANT_ID,
+            AZURE_SUBSCRIPTION_ID: process.env.AZURE_SUBSCRIPTION_ID,
+            AZURE_CLIENT_SECRET: process.env.AZURE_CLIENT_SECRET,
+          };
+
           if (!process.env.AZURE_CLIENT_ID && req.userId && isBitwardenConfigured()) {
             try {
               const azureSecret = await bitwardenService.getUserSecret(req.userId, 'azure-cloud');
@@ -259,7 +383,8 @@ export function registerTerraformRoutes(app: Express) {
                 if (azureSecret.clientSecret) {
                   process.env.AZURE_CLIENT_SECRET = azureSecret.clientSecret;
                 }
-                console.log(`✅ Azure Cloud credentials loaded from Bitwarden for user ${req.userId}`);
+                bitwardenCredentialsApplied = true;
+                console.log(`✅ Azure Cloud credentials loaded from Bitwarden for user ${req.userId} (request-scoped)`);
               } else {
                 console.warn(`⚠️ Azure Cloud credentials not found in Bitwarden for user ${req.userId}`);
               }
@@ -524,6 +649,63 @@ export function registerTerraformRoutes(app: Express) {
             error: error.message || 'Failed to create Azure backend resources',
             suggestion: 'Ensure you are authenticated with Azure CLI (run: az login) and have proper permissions to create storage accounts'
           });
+        } finally {
+          // Restore or clear Azure credentials that were temporarily injected from Bitwarden
+          // This prevents one user's credentials from leaking to another user's concurrent request
+          if (bitwardenCredentialsApplied) {
+            if (prevAzureEnv.AZURE_CLIENT_ID !== undefined) {
+              process.env.AZURE_CLIENT_ID = prevAzureEnv.AZURE_CLIENT_ID;
+            } else {
+              delete process.env.AZURE_CLIENT_ID;
+            }
+            if (prevAzureEnv.AZURE_TENANT_ID !== undefined) {
+              process.env.AZURE_TENANT_ID = prevAzureEnv.AZURE_TENANT_ID;
+            } else {
+              delete process.env.AZURE_TENANT_ID;
+            }
+            if (prevAzureEnv.AZURE_SUBSCRIPTION_ID !== undefined) {
+              process.env.AZURE_SUBSCRIPTION_ID = prevAzureEnv.AZURE_SUBSCRIPTION_ID;
+            } else {
+              delete process.env.AZURE_SUBSCRIPTION_ID;
+            }
+            if (prevAzureEnv.AZURE_CLIENT_SECRET !== undefined) {
+              process.env.AZURE_CLIENT_SECRET = prevAzureEnv.AZURE_CLIENT_SECRET;
+            } else {
+              delete process.env.AZURE_CLIENT_SECRET;
+            }
+            // Force the azure-resources MCP client to reconnect next time so it picks up fresh credentials
+            await mcpClient.disconnectAzureClient();
+            console.log(`🔒 Azure credentials cleared from process.env after request for user ${req.userId}`);
+          }
+          if (awsBitwardenCredentialsApplied) {
+            if (prevAwsEnv.AWS_ACCESS_KEY_ID !== undefined) {
+              process.env.AWS_ACCESS_KEY_ID = prevAwsEnv.AWS_ACCESS_KEY_ID;
+            } else {
+              delete process.env.AWS_ACCESS_KEY_ID;
+            }
+            if (prevAwsEnv.AWS_SECRET_ACCESS_KEY !== undefined) {
+              process.env.AWS_SECRET_ACCESS_KEY = prevAwsEnv.AWS_SECRET_ACCESS_KEY;
+            } else {
+              delete process.env.AWS_SECRET_ACCESS_KEY;
+            }
+            if (prevAwsEnv.AWS_SESSION_TOKEN !== undefined) {
+              process.env.AWS_SESSION_TOKEN = prevAwsEnv.AWS_SESSION_TOKEN;
+            } else {
+              delete process.env.AWS_SESSION_TOKEN;
+            }
+            if (prevAwsEnv.AWS_REGION !== undefined) {
+              process.env.AWS_REGION = prevAwsEnv.AWS_REGION;
+            } else {
+              delete process.env.AWS_REGION;
+            }
+            if (prevAwsEnv.AWS_DEFAULT_REGION !== undefined) {
+              process.env.AWS_DEFAULT_REGION = prevAwsEnv.AWS_DEFAULT_REGION;
+            } else {
+              delete process.env.AWS_DEFAULT_REGION;
+            }
+            await mcpClient.disconnectAwsClient();
+            console.log(`🔒 AWS credentials cleared from process.env after request for user ${req.userId}`);
+          }
         }
       }
 
@@ -542,7 +724,7 @@ export function registerTerraformRoutes(app: Express) {
   // We do NOT register it here to avoid conflicts - let the legacy route handle it
 
   // Refactor Terraform files (validate best practices)
-  app.post("/api/sessions/:id/refactor", async (req, res) => {
+  app.post("/api/sessions/:id/refactor", optionalAuth, aiMediumLimiter, validateRequest({ params: sessionIdParams, body: refactorBody }), async (req: AuthenticatedRequest, res) => {
     interface RefactorResult {
       isValid: boolean;
       issues: Array<{
@@ -573,6 +755,7 @@ export function registerTerraformRoutes(app: Express) {
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
+      if (!ensureTerraformSessionOwnership(session, req, res)) return;
 
       // Get all Terraform files from session storage
       const files = await storage.getFilesBySession(sessionId);
@@ -662,7 +845,8 @@ export function registerTerraformRoutes(app: Express) {
       }
 
       // Check 2: Variables declared but not in tfvars
-      if (variablesTf && tfvarsFiles.length > 0) {
+      // Skip for child-module — child modules get variable values from the parent module block, not tfvars
+      if (variablesTf && tfvarsFiles.length > 0 && session.moduleApproach !== 'child-module') {
         declaredVariables.forEach(varName => {
           if (!tfvarsVariables.has(varName)) {
             issues.push({
@@ -758,7 +942,8 @@ export function registerTerraformRoutes(app: Express) {
       }
 
       // Check 4: Hardcoded defaults in variables.tf (should be in tfvars)
-      if (variablesTf) {
+      // Skip for child-module — child modules use defaults as documentation; values come from parent module block
+      if (variablesTf && session.moduleApproach !== 'child-module') {
         const lines = variablesTf.content.split('\n');
         let currentVariable = '';
         let inDefaultBlock = false;
@@ -802,8 +987,8 @@ export function registerTerraformRoutes(app: Express) {
         });
       }
 
-      // Check 5: Variables in tfvars but not declared
-      if (variablesTf && tfvarsFiles.length > 0) {
+      // Check 5: Variables in tfvars but not declared (skip for child modules)
+      if (variablesTf && tfvarsFiles.length > 0 && session.moduleApproach !== 'child-module') {
         tfvarsVariables.forEach(varName => {
           if (!declaredVariables.has(varName)) {
             issues.push({
@@ -924,14 +1109,15 @@ export function registerTerraformRoutes(app: Express) {
   });
 
   // Fix Terraform best practices issues automatically
-  app.post("/api/sessions/:id/refactor-fix", async (req, res) => {
+  app.post("/api/sessions/:id/refactor-fix", optionalAuth, aiMediumLimiter, validateRequest({ params: sessionIdParams, body: refactorFixBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
-    
+
     try {
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
+      if (!ensureTerraformSessionOwnership(session, req, res)) return;
 
       console.log(`\n🔧 [REFACTOR-FIX] Fixing Terraform best practices issues...`);
       console.log(`   Session ID: ${sessionId}`);
@@ -1056,7 +1242,8 @@ export function registerTerraformRoutes(app: Express) {
         }
 
         // Fix 2: Add missing variables to tfvars with sensible default values
-        if (variablesTf && primaryTfvars) {
+        // Skip for child-module — child modules get variable values from the parent module block, not tfvars
+        if (variablesTf && primaryTfvars && session.moduleApproach !== 'child-module') {
           const missingInTfvars = Array.from(declaredVariables).filter(v => !tfvarsVariables.has(v));
           if (missingInTfvars.length > 0) {
             console.log(`      🔧 Fix 2: Adding ${missingInTfvars.length} missing variable(s) to ${primaryTfvars.fileName} with sensible defaults...`);
@@ -1430,9 +1617,9 @@ export function registerTerraformRoutes(app: Express) {
   });
 
   // Generate Terraform architecture diagram
-  app.post("/api/sessions/:id/generate-diagram", async (req, res) => {
+  app.post("/api/sessions/:id/generate-diagram", optionalAuth, aiMediumLimiter, validateRequest({ params: sessionIdParams, body: generateDiagramBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
-    
+
     try {
       console.log(`\n🎨 ========== DIAGRAM GENERATION REQUEST ==========`);
       console.log(`Session ID: ${sessionId}`);
@@ -1442,11 +1629,12 @@ export function registerTerraformRoutes(app: Express) {
       const session = await storage.getSession(sessionId);
       if (!session) {
         console.error(`❌ Session not found: ${sessionId}`);
-        return res.status(404).json({ 
+        return res.status(404).json({
           error: 'Session not found',
           details: `Session ${sessionId} does not exist`
         });
       }
+      if (!ensureTerraformSessionOwnership(session, req, res)) return;
 
       console.log(`✅ Session found: step=${session.currentStep}, workflow=${session.workflowStep}`);
 
@@ -1537,7 +1725,7 @@ export function registerTerraformRoutes(app: Express) {
 
   // ─── Policy Validation ─────────────────────────────────────────────────────
 
-  app.post("/api/terraform/validate-policy", async (req, res) => {
+  app.post("/api/terraform/validate-policy", validateRequest({ body: validatePolicyBody }), async (req, res) => {
     try {
       const { files, enabledRules, requiredTags, approvedRegions } = req.body;
 
@@ -1549,7 +1737,7 @@ export function registerTerraformRoutes(app: Express) {
       const { runPolicyChecks } = await import('../terraform-policy-engine.js');
 
       const resources = parseResources(files);
-      const result = runPolicyChecks(resources, { enabledRules, requiredTags, approvedRegions });
+      const result = await runPolicyChecks(resources, { enabledRules, requiredTags, approvedRegions });
 
       res.json({ success: true, ...result });
     } catch (error: any) {
@@ -1563,7 +1751,7 @@ export function registerTerraformRoutes(app: Express) {
   // POST /api/sessions/:id/rightsizing-recommendations
   // Reads the session's .tf files, applies static rightsizing rules, and
   // returns per-resource recommendations with estimated savings.
-  app.post("/api/sessions/:id/rightsizing-recommendations", async (req, res) => {
+  app.post("/api/sessions/:id/rightsizing-recommendations", optionalAuth, aiMediumLimiter, validateRequest({ params: sessionIdParams, body: rightsizingBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       // costsByAddress is optional: { "azurerm_linux_virtual_machine.app": 150.00 }
@@ -1573,6 +1761,7 @@ export function registerTerraformRoutes(app: Express) {
 
       const session = await storage.getSession(sessionId);
       if (!session) return res.status(404).json({ error: 'Session not found' });
+      if (!ensureTerraformSessionOwnership(session, req, res)) return;
 
       const sessionFiles = await storage.getFilesBySession(sessionId);
       const tfFiles = sessionFiles.filter(f =>
@@ -1592,7 +1781,7 @@ export function registerTerraformRoutes(app: Express) {
         Object.entries(costsByAddress).map(([k, v]) => [k, Number(v)])
       );
 
-      const result = generateRightsizingRecommendations(combinedHcl, costMap);
+      const result = await generateRightsizingRecommendations(combinedHcl, costMap);
 
       console.log(
         `\n⚖️  RIGHTSIZING: session=${sessionId} files=${tfFiles.length}` +
@@ -1606,7 +1795,68 @@ export function registerTerraformRoutes(app: Express) {
     }
   });
 
-  app.post("/api/terraform/analyze-plan-diff", async (req, res) => {
+  // POST /api/sessions/:id/apply-rightsizing — apply one AI rightsizing suggestion to session .tf files
+  app.post(
+    "/api/sessions/:id/apply-rightsizing",
+    optionalAuth,
+    aiMediumLimiter,
+    validateRequest({ params: sessionIdParams, body: applyRightsizingBody }),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const sessionId = req.params.id;
+        const session = await storage.getSession(sessionId);
+        if (!session) return res.status(404).json({ error: "Session not found" });
+        if (!ensureTerraformSessionOwnership(session, req, res)) return;
+
+        const input = req.body;
+        const sessionFiles = await storage.getFilesBySession(sessionId);
+        const tfFiles = sessionFiles.filter((f) => f.fileName.endsWith(".tf"));
+
+        if (tfFiles.length === 0) {
+          return res.status(400).json({
+            success: false,
+            error: "No Terraform files found in session",
+            message: "Generate or upload Terraform before applying rightsizing.",
+          });
+        }
+
+        const { applyRightsizingToHcl } = await import("../terraform-rightsizing.js");
+
+        let lastReason: string | undefined;
+        for (const file of tfFiles) {
+          const { hcl, applied, reason } = applyRightsizingToHcl(file.content, input);
+          lastReason = reason;
+          if (applied) {
+            await storage.updateFile(file.id, hcl);
+            console.log(
+              `⚖️  APPLY-RIGHTSIZING: session=${sessionId} file=${file.fileName} ${input.resourceType}.${input.resourceName} ${input.attribute}`
+            );
+            return res.json({
+              success: true,
+              fileName: file.fileName,
+              fileId: file.id,
+              message: `Updated ${input.attribute} in ${file.fileName}`,
+            });
+          }
+        }
+
+        return res.status(400).json({
+          success: false,
+          error: "Could not apply rightsizing",
+          message: lastReason || "No matching resource or attribute line found in any .tf file.",
+        });
+      } catch (error: any) {
+        console.error("❌ apply-rightsizing failed:", error);
+        res.status(500).json({
+          success: false,
+          error: "Failed to apply rightsizing",
+          message: error?.message || String(error),
+        });
+      }
+    }
+  );
+
+  app.post("/api/terraform/analyze-plan-diff", validateRequest({ body: analyzePlanDiffBody }), async (req, res) => {
     try {
       const { planJson } = req.body;
 
@@ -1632,7 +1882,8 @@ export function registerTerraformRoutes(app: Express) {
         const azEntry = azConfig[resourceType];
         if (azEntry) {
           try {
-            const { fetchAzurePricing } = await import('../routes-legacy.js').catch(() => ({ fetchAzurePricing: null }));
+            const legacyRoutes: any = await import('../routes-legacy.js').catch(() => null);
+            const fetchAzurePricing = legacyRoutes?.fetchAzurePricing;
             if (fetchAzurePricing) {
               const filter  = azEntry.buildFilter({ ...azEntry.defaults, ...attrs }, location);
               const items   = await (fetchAzurePricing as any)(filter);

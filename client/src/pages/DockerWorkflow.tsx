@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { generateBuildId, saveBuildHistory } from "@/lib/build-history";
 import { useSecretsConfig } from "@/hooks/useSecretsConfig";
 import Header from "@/components/Header";
 import ProviderCard from "@/components/ProviderCard";
@@ -10,9 +11,10 @@ import CreateRepoForm from "@/components/CreateRepoForm";
 import StepIndicator from "@/components/StepIndicator";
 import CodeEditor from "@/components/CodeEditor";
 import ActivityPanel from "@/components/ActivityPanel";
+import BuildHistoryPanel from "@/components/BuildHistoryPanel";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -22,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Package, Home, RefreshCw, Loader2, Shield, FileText, CheckCircle2, GitBranch, Search, FileCode, FolderTree, Layers, Cpu, HardDrive, Clock3 } from "lucide-react";
+import { Package, Home, RefreshCw, Loader2, Shield, FileText, CheckCircle2, GitBranch, Search, FileCode, FolderTree, Layers, Cpu, HardDrive, Clock3, Download, Hash } from "lucide-react";
 import type { Session, Message, Repository, GeneratedFile } from "@shared/schema";
 
 interface ExistingDockerfile {
@@ -82,9 +84,10 @@ export default function DockerWorkflow() {
   const [isGeneratingCompose, setIsGeneratingCompose] = useState<boolean>(false);
   const [composeServices, setComposeServices] = useState<string[]>([]);
   const [dockerfileSource, setDockerfileSource] = useState<'generated' | 'existing' | null>(null);
-  const [activityViewMode, setActivityViewMode] = useState<'overview' | 'build' | 'code'>('overview');
+  const [activityViewMode, setActivityViewMode] = useState<'overview' | 'build' | 'code' | 'report'>('overview');
   const [buildId, setBuildId] = useState<string | null>(null);
   const [buildAutoRun, setBuildAutoRun] = useState(false);
+  const [buildScanResult, setBuildScanResult] = useState<any>(null);
 
   // Fetch secrets configuration status
   const { data: config } = useSecretsConfig();
@@ -863,31 +866,47 @@ export default function DockerWorkflow() {
   const dependencyHighlights = getDependencyHighlights();
 
   return (
-    <div className="min-h-screen bg-white">
-      <Header>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <Package className="w-6 h-6 text-primary" />
-            <h1 className="text-xl font-bold">Docker Workflow</h1>
-          </div>
-          <div className="flex gap-2 ml-auto">
-            <Button variant="outline" size="sm" onClick={handleRefresh}>
-              <RefreshCw className="w-4 h-4 mr-2" />
-              Refresh
-            </Button>
-            <Button variant="outline" size="sm" onClick={handleGoHome}>
-              <Home className="w-4 h-4 mr-2" />
-              Home
-            </Button>
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 via-emerald-50/30 to-white relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-24 -left-20 h-72 w-72 rounded-full bg-emerald-300/20 blur-3xl" />
+        <div className="absolute top-24 -right-24 h-80 w-80 rounded-full bg-cyan-300/20 blur-3xl" />
+        <div className="absolute bottom-0 left-1/3 h-64 w-64 rounded-full bg-violet-300/15 blur-3xl" />
+      </div>
+      <Header />
+
+      <main className="container mx-auto px-4 py-6 max-w-7xl relative z-10">
+        <div className="mb-6 rounded-2xl border border-emerald-100/70 bg-white/80 backdrop-blur-sm px-4 py-4 shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-gradient-to-br from-emerald-100 to-cyan-100 border border-emerald-200/60">
+                <Package className="w-6 h-6 text-primary" />
+              </div>
+              <div>
+                <h1 className="text-3xl font-bold">Docker Workflow</h1>
+                <p className="text-muted-foreground">
+                  Generate Dockerfiles and multi-stage builds from source code analysis
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={handleRefresh} data-testid="docker-btn-refresh">
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Refresh
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleGoHome} data-testid="docker-btn-home">
+                <Home className="w-4 h-4 mr-2" />
+                Home
+              </Button>
+            </div>
           </div>
         </div>
-      </Header>
 
-      <main className="container mx-auto px-6 py-8 max-w-7xl">
         <StepIndicator steps={steps} currentStep={currentStep} />
+        <ScrollArea className="flex-1 px-4 sm:px-6 lg:px-8 mt-6">
+          <div className="max-w-6xl mx-auto pb-8 space-y-6">
 
         {/* Workflow Progress Panel */}
-        <div className="rounded-xl border bg-card p-5 sm:p-6 mt-6">
+        <div className="rounded-xl border bg-card p-5 sm:p-6">
           <div className="flex flex-col gap-4">
             <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
               <div>
@@ -922,8 +941,7 @@ export default function DockerWorkflow() {
           </div>
         </div>
 
-        <div className="mt-8">
-          {/* Step 1: Repository Selection */}
+            {/* Step 1: Repository Selection */}
           {currentStep === 1 && (
             <div className="space-y-6">
               <div className="text-center">
@@ -943,6 +961,7 @@ export default function DockerWorkflow() {
                       onClick={() => handleProviderSelect('github')}
                       provider="github"
                       fillBackground={true}
+                      data-testid="docker-card-provider-github"
                     />
                   )}
                   {config?.hasAzureDevOps && (
@@ -953,12 +972,13 @@ export default function DockerWorkflow() {
                       onClick={() => handleProviderSelect('azure')}
                       provider="azure"
                       fillBackground={true}
+                      data-testid="docker-card-provider-azure"
                     />
                   )}
                   {!config?.hasGithub && !config?.hasAzureDevOps && (
                     <div className="col-span-2 text-center py-12">
                       <p className="text-muted-foreground mb-4">No repository providers configured.</p>
-                      <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                      <Button onClick={() => setLocation('/settings')} data-testid="docker-btn-settings">Go to Settings</Button>
                     </div>
                   )}
                 </div>
@@ -996,7 +1016,7 @@ export default function DockerWorkflow() {
                               <p className="text-sm text-muted-foreground">Repository selected</p>
                               <p className="text-lg font-semibold text-slate-900">{selectedRepo}</p>
                             </div>
-                            <Button variant="ghost" size="sm" onClick={clearRepositorySelection}>
+                            <Button variant="ghost" size="sm" onClick={clearRepositorySelection} data-testid="docker-btn-change-repo">
                               Change
                             </Button>
                           </div>
@@ -1016,6 +1036,7 @@ export default function DockerWorkflow() {
                               value={selectedBranch || defaultBranchName || ""}
                               onValueChange={handleBranchChange}
                               disabled={branchesLoading && branches.length === 0}
+                              data-testid="docker-select-branch"
                             >
                               <SelectTrigger className="w-full">
                                 <SelectValue
@@ -1052,6 +1073,7 @@ export default function DockerWorkflow() {
                               className="w-full mt-2"
                               onClick={() => fetchRepoScan(selectedRepo, selectedBranch || defaultBranchName || undefined)}
                               disabled={!selectedBranch && !defaultBranchName}
+                              data-testid="docker-btn-analyze"
                             >
                               Run Analysis
                             </Button>
@@ -1170,7 +1192,7 @@ export default function DockerWorkflow() {
               )}
               {repoScanData ? (
                 <div className="space-y-6">
-                  <Card className="rounded-3xl border border-border/60 bg-white/90 p-6 shadow-xl">
+                  <Card className="rounded-2xl border border-border/60 bg-white/90 p-6 shadow-sm">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                       <div>
                         <p className="text-[11px] uppercase tracking-[0.5em] text-muted-foreground">Analysis Summary</p>
@@ -1286,6 +1308,7 @@ export default function DockerWorkflow() {
                     variant="default"
                     onClick={handleUseExistingDockerfile}
                     disabled={isGenerating}
+                    data-testid="docker-btn-use-existing"
                   >
                     Use Existing Dockerfile →
                   </Button>
@@ -1294,6 +1317,7 @@ export default function DockerWorkflow() {
                   variant={existingDockerfile ? "outline" : "default"}
                   onClick={handleProceedToGenerate}
                   disabled={!scanCompleted || !scanHasResults || isGenerating}
+                  data-testid="docker-btn-generate"
                 >
                   {isGenerating ? "Generating..." : existingDockerfile ? "Regenerate with AI" : "Next → Generate"}
                 </Button>
@@ -1320,7 +1344,7 @@ export default function DockerWorkflow() {
 
           {/* Step 3: Generate (shows loading with progress) */}
           {currentStep === 3 && (
-            <Card className="rounded-3xl border-dashed border-border/40 bg-white/80 p-8 text-center shadow-lg">
+            <Card className="rounded-2xl border-dashed border-border/40 bg-white/80 p-8 text-center shadow-lg">
               <div className="flex flex-col items-center gap-4">
                 <Loader2 className="w-8 h-8 animate-spin text-primary" />
                 <p className="text-lg font-semibold text-slate-900">Generating Dockerfile...</p>
@@ -1362,7 +1386,7 @@ export default function DockerWorkflow() {
                 </p>
               </div>
 
-              <div className="rounded-3xl border border-border/60 bg-white/90 p-6 shadow-xl space-y-4">
+              <div className="rounded-2xl border border-border/60 bg-white/90 p-6 shadow-sm space-y-4">
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
                   <div>
                     <p className="text-[11px] uppercase tracking-[0.5em] text-muted-foreground">Files generated</p>
@@ -1393,7 +1417,7 @@ export default function DockerWorkflow() {
                 </div>
               </div>
 
-              <Card className="rounded-3xl border border-border/60 bg-slate-50 p-0 overflow-hidden shadow-xl">
+              <Card className="rounded-2xl border border-border/60 bg-slate-50 p-0 overflow-hidden shadow-sm">
                 {generatedFiles && generatedFiles.length > 0 ? (
                   <CodeEditor 
                     files={generatedFiles.map(f => ({ name: f.fileName, content: f.content }))} 
@@ -1463,6 +1487,7 @@ export default function DockerWorkflow() {
                     variant="outline"
                     onClick={() => generateComposeMutation.mutate()}
                     disabled={isGeneratingCompose || generatedFiles.length === 0}
+                    data-testid="docker-btn-generate-compose"
                   >
                     {isGeneratingCompose ? (
                       <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Generating...</>
@@ -1488,6 +1513,7 @@ export default function DockerWorkflow() {
                 <Button
                   variant="outline"
                   onClick={() => setCurrentStep(2)}
+                  data-testid="docker-btn-back"
                 >
                   ← Back
                 </Button>
@@ -1498,6 +1524,7 @@ export default function DockerWorkflow() {
                       currentStep: '5'
                     });
                   }}
+                  data-testid="docker-btn-continue-to-scan"
                 >
                   Continue to Scan →
                 </Button>
@@ -1526,15 +1553,15 @@ export default function DockerWorkflow() {
                 </div>
 
                 {/* Tab navigation */}
-                <div className="flex gap-1 border-b pb-0">
-                  {(['overview', 'build', 'code'] as const).map(mode => (
+                <div className="flex gap-2 p-1 rounded-xl bg-muted/60">
+                  {(['overview', 'build', 'code', 'report'] as const).map(mode => (
                     <button
                       key={mode}
                       onClick={() => setActivityViewMode(mode)}
-                      className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors -mb-px ${
+                      className={`px-4 py-2 text-sm font-semibold rounded-lg transition-all duration-200 ${
                         activityViewMode === mode
-                          ? 'border-primary text-primary'
-                          : 'border-transparent text-muted-foreground hover:text-foreground'
+                          ? 'bg-gradient-to-r from-emerald-500 to-green-500 text-white shadow-md shadow-emerald-200 dark:shadow-emerald-900/40'
+                          : 'text-muted-foreground hover:bg-gradient-to-r hover:from-emerald-50 hover:to-green-50 hover:text-emerald-700 dark:hover:from-emerald-950/40 dark:hover:to-green-950/40 dark:hover:text-emerald-300'
                       }`}
                     >
                       {mode === 'build' ? 'Build Pipeline' : mode.charAt(0).toUpperCase() + mode.slice(1)}
@@ -1637,6 +1664,13 @@ export default function DockerWorkflow() {
                       </div>
                     )}
 
+                    {/* Build History — Current Session */}
+                    <BuildHistoryPanel sessionId={sessionId} module="docker" limit={5} refreshKey={buildId} title="Session Builds" />
+
+                    {/* Build History — All Docker Builds */}
+                    <div className="mt-4 pt-4 border-t">
+                      <BuildHistoryPanel module="docker" limit={20} refreshKey={buildId} title="All Docker Builds" showModuleBadge={false} />
+                    </div>
                   </div>
                 )}
 
@@ -1649,6 +1683,7 @@ export default function DockerWorkflow() {
                       pipelineLayout="sidebar"
                       autoRun={buildAutoRun}
                       onRequestRunPipeline={() => { setBuildAutoRun(false); }}
+                      onScanResult={(result) => setBuildScanResult(result)}
                       onScanComplete={(result) => {
                         if (result && result.success && result.summary && result.summary.total > 0) {
                           setScanHasResults(true);
@@ -1663,9 +1698,15 @@ export default function DockerWorkflow() {
                         setBuildAutoRun(false);
                         setScanCompleted(true);
                         setScanHasResults(true);
-                        const now = new Date();
-                        const pad = (n: number) => String(n).padStart(2, '0');
-                        const id = `DOCKER-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+                        const id = generateBuildId('docker');
+                        await saveBuildHistory({
+                          sessionId: sessionId!,
+                          module: 'docker',
+                          buildId: id,
+                          pipelineStages: ['refactor', 'security'],
+                          filesGenerated: generatedFiles?.length || 0,
+                          repositoryName: selectedRepo || undefined,
+                        });
                         setBuildId(id);
                         toast({ title: 'Build Complete', description: `${id} — ready to commit.` });
                         setActivityViewMode('overview');
@@ -1693,10 +1734,149 @@ export default function DockerWorkflow() {
                   </div>
                 )}
 
+                {/* ── REPORT TAB ── */}
+                {activityViewMode === 'report' && (
+                  <div className="space-y-6">
+                    {/* Header */}
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h2 className="text-xl font-bold flex items-center gap-2">
+                          <FileText className="w-5 h-5 text-primary" />
+                          Build Report
+                        </h2>
+                        {buildId && (
+                          <p className="text-xs text-muted-foreground font-mono mt-0.5">{buildId} · Docker · {selectedRepo}</p>
+                        )}
+                      </div>
+                      <Button variant="outline" size="sm" className="gap-2 print:hidden" onClick={() => window.print()}>
+                        <Download className="w-3.5 h-3.5" /> Download PDF
+                      </Button>
+                    </div>
+
+                    {/* ── Security Scan Results ── */}
+                    <div className="rounded-2xl border bg-card overflow-hidden">
+                      <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                        <Shield className="w-4 h-4 text-primary" />
+                        <span className="font-semibold text-sm">Security Scan Results</span>
+                      </div>
+                      {buildScanResult ? (() => {
+                        const passed = Number(buildScanResult.summary?.passed ?? buildScanResult.passed ?? 0);
+                        const failed = Number(buildScanResult.summary?.failed ?? buildScanResult.failed ?? 0);
+                        const passRate = Number(buildScanResult.summary?.passPercentage ?? 0);
+                        const checks = Array.isArray(buildScanResult.failedChecks) ? buildScanResult.failedChecks : [];
+                        return (
+                          <div className="p-5 space-y-4">
+                            <div className="grid grid-cols-3 gap-4">
+                              {[
+                                { label: 'Passed', value: passed, color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
+                                { label: 'Failed', value: failed, color: 'text-rose-600', bg: 'bg-rose-50 dark:bg-rose-950/30' },
+                                { label: 'Pass Rate', value: `${passRate}%`, color: 'text-primary', bg: 'bg-primary/5' },
+                              ].map(({ label, value, color, bg }) => (
+                                <div key={label} className={`rounded-xl border p-3 text-center ${bg}`}>
+                                  <p className={`text-2xl font-bold ${color}`}>{value}</p>
+                                  <p className="text-xs text-muted-foreground">{label}</p>
+                                </div>
+                              ))}
+                            </div>
+                            {checks.length > 0 && (
+                              <div className="space-y-2">
+                                <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Failed Checks ({checks.length})</p>
+                                <div className="space-y-2">
+                                  {checks.map((c: any, i: number) => (
+                                    <div key={i} className="rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50/50 dark:bg-rose-950/20 p-3 space-y-1">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-mono text-xs font-semibold text-rose-700 dark:text-rose-400">{c.checkId}</span>
+                                        <span className="text-xs font-medium">{c.checkName}</span>
+                                      </div>
+                                      <p className="text-xs text-muted-foreground">{c.reason || c.guideline}</p>
+                                      {c.resource && <p className="text-xs text-muted-foreground font-mono">Resource: {c.resource}</p>}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {checks.length === 0 && (
+                              <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800 px-4 py-3">
+                                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                                <span className="text-sm font-medium">All security checks passed!</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })() : (
+                        <div className="p-8 text-center text-muted-foreground text-sm">
+                          No scan data — run the Build pipeline to generate security results.
+                        </div>
+                      )}
+                    </div>
+
+                    {/* ── Image Analysis ── */}
+                    {imageEstimates && imageEstimates.length > 0 && (
+                      <div className="rounded-2xl border bg-card overflow-hidden">
+                        <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                          <HardDrive className="w-4 h-4 text-primary" />
+                          <span className="font-semibold text-sm">Image Size Analysis</span>
+                        </div>
+                        <div className="p-5 space-y-3">
+                          {imageEstimates.map((est) => (
+                            <div key={est.image} className="rounded-xl border bg-muted/20 p-3 flex items-center justify-between gap-4">
+                              <div className="min-w-0">
+                                <p className="font-mono text-sm font-semibold truncate">{est.image}</p>
+                                <p className="text-xs text-muted-foreground">Stage: {est.stage}</p>
+                              </div>
+                              <div className="text-right shrink-0">
+                                <p className="text-sm font-bold">{est.compressedMB} MB</p>
+                                <p className="text-xs text-muted-foreground">On-disk: {est.uncompressedMB} MB</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ── Dockerfile Summary ── */}
+                    <div className="rounded-2xl border bg-card overflow-hidden">
+                      <div className="px-5 py-3 border-b bg-muted/40 flex items-center gap-2">
+                        <FileCode className="w-4 h-4 text-primary" />
+                        <span className="font-semibold text-sm">Dockerfile Summary</span>
+                      </div>
+                      <div className="p-5">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                          <div className="rounded-xl border bg-blue-50 dark:bg-blue-950/30 p-3 text-center">
+                            <p className="text-xl font-bold text-blue-600">{generatedFiles.length}</p>
+                            <p className="text-xs text-muted-foreground">Files</p>
+                          </div>
+                          <div className="rounded-xl border bg-violet-50 dark:bg-violet-950/30 p-3 text-center">
+                            <p className="text-xl font-bold text-violet-600">{dockerfileLines}</p>
+                            <p className="text-xs text-muted-foreground">Lines</p>
+                          </div>
+                          <div className="rounded-xl border bg-emerald-50 dark:bg-emerald-950/30 p-3 text-center">
+                            <p className="text-xl font-bold text-emerald-600">{baseImages.length}</p>
+                            <p className="text-xs text-muted-foreground">Base Images</p>
+                          </div>
+                          <div className="rounded-xl border bg-orange-50 dark:bg-orange-950/30 p-3 text-center">
+                            <p className="text-xl font-bold text-orange-600">{isMultiStage ? 'Yes' : 'No'}</p>
+                            <p className="text-xs text-muted-foreground">Multi-stage</p>
+                          </div>
+                        </div>
+                        {baseImages.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-4">
+                            {baseImages.map(img => (
+                              <span key={img} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium bg-muted border">
+                                {img}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Navigation footer */}
                 <div className="flex flex-col gap-3 items-center pt-2 border-t">
                   <div className="flex gap-4 justify-center">
-                    <Button variant="outline" onClick={() => setCurrentStep(4)}>← Back</Button>
+                    <Button variant="outline" onClick={() => setCurrentStep(4)} data-testid="docker-btn-back">← Back</Button>
                     <Button
                       onClick={() => {
                         setCurrentStep(6);
@@ -1704,6 +1884,7 @@ export default function DockerWorkflow() {
                       }}
                       disabled={!scanCompleted}
                       title={!scanCompleted ? 'Run the Build pipeline first to continue' : undefined}
+                      data-testid="docker-btn-continue-to-commit"
                     >
                       Continue to Commit →
                     </Button>
@@ -1716,65 +1897,107 @@ export default function DockerWorkflow() {
             );
           })()}
 
-          {/* Step 6: Commit */}
+          {/* Step 6: Commit & Push */}
           {currentStep === 6 && (
             <div className="space-y-6">
+              {/* Build ID badge */}
+              {buildId && (
+                <div className="flex justify-center">
+                  <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-mono font-semibold bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    {buildId}
+                  </span>
+                </div>
+              )}
               <div className="text-center">
-                <h2 className="text-2xl font-bold mb-2">Commit to Repository</h2>
+                <h2 className="text-2xl font-bold mb-2">Commit & Push</h2>
                 <p className="text-muted-foreground">
-                  Commit your Dockerfile to {selectedRepo}
+                  Review your files and commit them to the repository
                 </p>
               </div>
 
-              <div className="max-w-2xl mx-auto">
-                <div className="bg-muted/50 p-6 rounded-lg space-y-4">
-                  <div>
-                    <p className="text-sm font-semibold mb-2">Repository:</p>
-                    <p className="text-sm text-muted-foreground">{selectedRepo}</p>
+              {isCommitted ? (
+                <div className="flex flex-col items-center gap-6 py-12">
+                  <div className="w-20 h-20 rounded-full bg-emerald-100 dark:bg-emerald-900/40 flex items-center justify-center">
+                    <CheckCircle2 className="w-10 h-10 text-emerald-600" />
                   </div>
-                  <div>
-                    <p className="text-sm font-semibold mb-2">Files to commit:</p>
-                    <ul className="list-disc list-inside text-sm text-muted-foreground">
-                      {generatedFiles.map(f => (
-                        <li key={f.id}>{f.fileName}</li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-
-                <div className="flex gap-4 justify-center mt-6">
-                  <Button
-                    variant="outline"
-                    onClick={() => setCurrentStep(5)}
-                  >
-                    ← Back
-                  </Button>
-                  <Button
-                    onClick={() => commitMutation.mutate()}
-                    disabled={commitMutation.isPending || isCommitted}
-                  >
-                    {commitMutation.isPending ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Committing...
-                      </>
-                    ) : isCommitted ? (
-                      <>
-                        <FileText className="w-4 h-4 mr-2" />
-                        Committed
-                      </>
-                    ) : (
-                      <>
-                        <FileText className="w-4 h-4 mr-2" />
-                        Commit to Repository
-                      </>
+                  <div className="text-center space-y-1">
+                    <h3 className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">Successfully Committed!</h3>
+                    {buildId && (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-semibold bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700">
+                        <Hash className="w-3 h-3" />{buildId}
+                      </span>
                     )}
+                    <p className="text-sm text-muted-foreground mt-2">
+                      Your Docker artifacts have been committed to the repository.
+                      <br />Redirecting to home in a moment…
+                    </p>
+                  </div>
+                  <Button onClick={handleGoHome} data-testid="docker-btn-go-home" className="gap-2">
+                    <Home className="w-4 h-4" /> Go to Home
                   </Button>
                 </div>
-              </div>
+              ) : (
+                <div className="space-y-6 max-w-3xl mx-auto">
+                  {/* File Review */}
+                  {generatedFiles.length > 0 && (
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Files to Commit</CardTitle>
+                        <CardDescription>
+                          {generatedFiles.length} file(s) will be committed to {selectedRepo}
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="space-y-2 max-h-48 overflow-y-auto">
+                          {generatedFiles.map((file) => (
+                            <div key={file.id} className="flex items-center gap-2 p-2 rounded bg-muted">
+                              <FileText className="w-4 h-4 text-muted-foreground" />
+                              <span className="text-sm font-mono">{file.fileName}</span>
+                              <span className="text-xs text-muted-foreground ml-auto">
+                                {file.content.length} chars
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Commit Actions */}
+                  <div className="flex gap-4 justify-center">
+                    <Button
+                      variant="outline"
+                      onClick={() => setCurrentStep(5)}
+                      data-testid="docker-btn-back"
+                    >
+                      ← Back
+                    </Button>
+                    <Button
+                      onClick={() => commitMutation.mutate()}
+                      disabled={commitMutation.isPending || isCommitted}
+                      data-testid="docker-btn-commit"
+                    >
+                      {commitMutation.isPending ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Committing...
+                        </>
+                      ) : (
+                        <>
+                          <GitBranch className="w-4 h-4 mr-2" />
+                          Commit to Repository
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
-        </div>
+
+          </div>
+        </ScrollArea>
       </main>
     </div>
   );

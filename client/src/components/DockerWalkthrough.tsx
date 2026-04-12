@@ -551,14 +551,14 @@ function SlideCommit() {
 }
 
 const slides: Slide[] = [
-  { step: 1, title: "Select Provider", subtitle: "Step 1: Choose GitHub or Azure DevOps", icon: Package, content: <SlideProviderSelection /> },
-  { step: 2, title: "Repo & Branch", subtitle: "Step 1: Select repo, pick branch, run analysis", icon: GitBranch, content: <SlideRepoBranchAnalysis /> },
-  { step: 3, title: "Analysis Summary", subtitle: "Step 2: Languages, frameworks, dependencies, base image", icon: Search, content: <SlideAnalysisSummary /> },
-  { step: 4, title: "Generate", subtitle: "Step 3: AI generates Dockerfile from repo analysis", icon: Loader2, content: <SlideGenerating /> },
-  { step: 5, title: "Review & Edit", subtitle: "Step 4: Review files in CodeEditor", icon: FileText, content: <SlideReviewEdit /> },
-  { step: 6, title: "Best Approach", subtitle: "Step 5: Official images, version pinning, security", icon: Wrench, content: <SlideBestApproach /> },
-  { step: 7, title: "Security Scan", subtitle: "Step 5: Checkov scan with auto-fix", icon: Shield, content: <SlideSecurityScan /> },
-  { step: 8, title: "Commit & Push", subtitle: "Step 6: Commit Dockerfile to repository", icon: Package, content: <SlideCommit /> },
+  { step: 1, title: "Connect Your Codebase", subtitle: "Link GitHub or Azure DevOps — AI reads your actual source code to build the right Dockerfile", icon: Package, content: <SlideProviderSelection /> },
+  { step: 2, title: "Pick Branch, Scan Stack", subtitle: "AI scans your repo: detects language, framework, dependencies, and runtime requirements automatically", icon: GitBranch, content: <SlideRepoBranchAnalysis /> },
+  { step: 3, title: "Stack Detected, No Guessing", subtitle: "Python 3.11, FastAPI, PostgreSQL driver — correct base image and build steps chosen for your exact stack", icon: Search, content: <SlideAnalysisSummary /> },
+  { step: 4, title: "Dockerfile + Compose Generated", subtitle: "Multi-stage build, .dockerignore, and docker-compose.yml — the complete artifact set, not just a Dockerfile", icon: Loader2, content: <SlideGenerating /> },
+  { step: 5, title: "Review Everything in One View", subtitle: "Edit Dockerfile, Compose, and .dockerignore side by side — no copy-paste, no tab switching", icon: FileText, content: <SlideReviewEdit /> },
+  { step: 6, title: "Best Practices Enforced", subtitle: "Official images, pinned versions, non-root user, health checks — every best practice applied automatically", icon: Wrench, content: <SlideBestApproach /> },
+  { step: 7, title: "Security Scan Before Ship", subtitle: "Checkov catches hardcoded secrets, privileged containers, and missing healthchecks with one-click AI fixes", icon: Shield, content: <SlideSecurityScan /> },
+  { step: 8, title: "Commit All Artifacts Together", subtitle: "Dockerfile + .dockerignore + docker-compose.yml committed as one clean PR-ready commit", icon: Package, content: <SlideCommit /> },
 ];
 
 const SLIDE_DURATION = 5000;

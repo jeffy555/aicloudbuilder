@@ -1,17 +1,39 @@
 /**
- * Terraform Rightsizing Recommendations
+ * Terraform Rightsizing Recommendations (AI-driven)
  *
  * Analyses Terraform HCL files (from a session) to identify over-provisioned
- * resources and suggests cost-optimised alternatives based on static rules.
+ * resources and suggests cost-optimised alternatives using GPT-4o-mini.
  *
  * Design decisions:
  *  - Uses a lightweight regex HCL extractor (not a full parser). Sufficient for
  *    the top-level and single-nested string attributes we care about.
- *  - Rules are purely static (no external API calls). This keeps latency <1 ms
- *    and avoids credential requirements.
- *  - If a monthly cost map is supplied (from an earlier cost-analysis pass),
- *    estimated dollar savings are attached to each recommendation.
+ *  - All rightsizing intelligence comes from the AI model — no static rule tables.
+ *  - If the AI call fails, returns safe empty defaults (no recommendations).
  */
+
+import { aiChatCompletion } from './utils/ai-client.js';
+import { z } from 'zod';
+import { sanitizeJsonForPrompt } from './utils/sanitize-prompt.js';
+
+// ─── Zod schemas for AI response validation ─────────────────────────────────
+
+const aiRecSchema = z.object({
+  address: z.string(),
+  resourceType: z.string(),
+  resourceName: z.string(),
+  attribute: z.string(),
+  currentValue: z.string(),
+  suggestedValue: z.string(),
+  currentLabel: z.string().optional().default(''),
+  suggestedLabel: z.string().optional().default(''),
+  estimatedSavingPercent: z.number().catch(0),
+  rationale: z.string().optional().default(''),
+  risk: z.enum(['low', 'medium', 'high']).catch('medium'),
+});
+const aiRightsizingResponseSchema = z.object({
+  recommendations: z.array(aiRecSchema).catch([]),
+});
+
 
 // ─── Public interfaces ────────────────────────────────────────────────────────
 
@@ -47,388 +69,6 @@ export interface RightsizingResult {
   resourcesAnalysed: number;
 }
 
-// ─── Internal rule table ──────────────────────────────────────────────────────
-
-interface RightsizingRule {
-  resourceTypes: string[];
-  /** Ordered list of attribute names to check — first match wins */
-  attributes: string[];
-  /** Regex matched against the attribute value */
-  pattern: RegExp;
-  currentLabel: string;
-  /** Use $1 to reference the first capture group from pattern */
-  suggestedValue: string;
-  suggestedLabel: string;
-  savingPercent: number;
-  rationale: string;
-  risk: 'low' | 'medium' | 'high';
-}
-
-const VM_TYPES = [
-  'azurerm_linux_virtual_machine',
-  'azurerm_windows_virtual_machine',
-  'azurerm_virtual_machine',
-];
-
-const RULES: RightsizingRule[] = [
-  // ── Azure VMs (D-series v3) ───────────────────────────────────────────────
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_D16s?_v3$/i,
-    currentLabel: 'Standard_D16s_v3 (16 vCPUs, 64 GB)',
-    suggestedValue: 'Standard_D8s_v3',
-    suggestedLabel: 'Standard_D8s_v3 (8 vCPUs, 32 GB)',
-    savingPercent: 50,
-    rationale: 'Halving vCPUs reduces cost ~50%. Apply only when average CPU utilisation stays below 40%.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_D8s?_v3$/i,
-    currentLabel: 'Standard_D8s_v3 (8 vCPUs, 32 GB)',
-    suggestedValue: 'Standard_D4s_v3',
-    suggestedLabel: 'Standard_D4s_v3 (4 vCPUs, 16 GB)',
-    savingPercent: 50,
-    rationale: 'Halving vCPUs reduces cost ~50%. Recommended when average CPU stays below 40%.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_D4s?_v3$/i,
-    currentLabel: 'Standard_D4s_v3 (4 vCPUs, 16 GB)',
-    suggestedValue: 'Standard_D2s_v3',
-    suggestedLabel: 'Standard_D2s_v3 (2 vCPUs, 8 GB)',
-    savingPercent: 50,
-    rationale: 'Suitable for light workloads. Verify peak CPU does not exceed 60% before downsizing.',
-    risk: 'medium',
-  },
-  // ── Azure VMs (D-series v4 / v5) ─────────────────────────────────────────
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_D8_?v4$/i,
-    currentLabel: 'Standard_D8_v4 (8 vCPUs, 32 GB)',
-    suggestedValue: 'Standard_D4_v4',
-    suggestedLabel: 'Standard_D4_v4 (4 vCPUs, 16 GB)',
-    savingPercent: 50,
-    rationale: 'Same generation step-down at ~50% cost reduction.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_D4_?v4$/i,
-    currentLabel: 'Standard_D4_v4 (4 vCPUs, 16 GB)',
-    suggestedValue: 'Standard_D2_v4',
-    suggestedLabel: 'Standard_D2_v4 (2 vCPUs, 8 GB)',
-    savingPercent: 50,
-    rationale: 'Same generation, half the compute at ~50% cost.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_D8_?v5$/i,
-    currentLabel: 'Standard_D8_v5 (8 vCPUs, 32 GB)',
-    suggestedValue: 'Standard_D4_v5',
-    suggestedLabel: 'Standard_D4_v5 (4 vCPUs, 16 GB)',
-    savingPercent: 50,
-    rationale: 'Same generation step-down at ~50% cost reduction.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_D4_?v5$/i,
-    currentLabel: 'Standard_D4_v5 (4 vCPUs, 16 GB)',
-    suggestedValue: 'Standard_D2_v5',
-    suggestedLabel: 'Standard_D2_v5 (2 vCPUs, 8 GB)',
-    savingPercent: 50,
-    rationale: 'Same generation, half the compute at ~50% cost.',
-    risk: 'medium',
-  },
-  // ── Azure VMs (E-series → D-series) ──────────────────────────────────────
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_E4s?_v3$/i,
-    currentLabel: 'Standard_E4s_v3 (memory-optimised, 4 vCPUs, 32 GB)',
-    suggestedValue: 'Standard_D4s_v3',
-    suggestedLabel: 'Standard_D4s_v3 (general purpose, 4 vCPUs, 16 GB)',
-    savingPercent: 20,
-    rationale: 'E-series costs ~20-25% more than D-series. Switch unless the workload genuinely needs >8 GB RAM per vCPU.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_E8s?_v3$/i,
-    currentLabel: 'Standard_E8s_v3 (memory-optimised, 8 vCPUs, 64 GB)',
-    suggestedValue: 'Standard_D8s_v3',
-    suggestedLabel: 'Standard_D8s_v3 (general purpose, 8 vCPUs, 32 GB)',
-    savingPercent: 20,
-    rationale: 'E-series costs ~20-25% more than D-series. Switch unless the workload genuinely needs >8 GB RAM per vCPU.',
-    risk: 'medium',
-  },
-  // ── Azure VMs (F-series compute-optimised) ────────────────────────────────
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_F8s?_v2$/i,
-    currentLabel: 'Standard_F8s_v2 (8 vCPUs, compute-opt)',
-    suggestedValue: 'Standard_F4s_v2',
-    suggestedLabel: 'Standard_F4s_v2 (4 vCPUs, compute-opt)',
-    savingPercent: 50,
-    rationale: 'Halving vCPUs on F-series saves ~50%. F-series is justified only for sustained CPU-bound workloads.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_F4s?_v2$/i,
-    currentLabel: 'Standard_F4s_v2 (4 vCPUs, compute-opt)',
-    suggestedValue: 'Standard_F2s_v2',
-    suggestedLabel: 'Standard_F2s_v2 (2 vCPUs, compute-opt)',
-    savingPercent: 50,
-    rationale: 'Halving vCPUs saves ~50%. Verify the workload is genuinely CPU-bound before choosing F-series.',
-    risk: 'medium',
-  },
-  // ── Azure VMs (B-series burstable) ────────────────────────────────────────
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_B4ms$/i,
-    currentLabel: 'Standard_B4ms (burstable, 4 vCPUs, 16 GB)',
-    suggestedValue: 'Standard_B2ms',
-    suggestedLabel: 'Standard_B2ms (burstable, 2 vCPUs, 8 GB)',
-    savingPercent: 50,
-    rationale: 'B-series is cost-effective for low-average-CPU workloads. The burstable model is preserved at B2ms.',
-    risk: 'low',
-  },
-  {
-    resourceTypes: VM_TYPES,
-    attributes: ['size'],
-    pattern: /^Standard_B8ms$/i,
-    currentLabel: 'Standard_B8ms (burstable, 8 vCPUs, 32 GB)',
-    suggestedValue: 'Standard_B4ms',
-    suggestedLabel: 'Standard_B4ms (burstable, 4 vCPUs, 16 GB)',
-    savingPercent: 50,
-    rationale: 'B-series: halving size saves ~50% while keeping the burstable cost model.',
-    risk: 'low',
-  },
-
-  // ── App Service Plans ─────────────────────────────────────────────────────
-  {
-    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku', 'size'],
-    pattern: /^P3v3$/i,
-    currentLabel: 'Premium v3 P3 (4 vCPUs)',
-    suggestedValue: 'P2v3',
-    suggestedLabel: 'Premium v3 P2 (2 vCPUs)',
-    savingPercent: 35,
-    rationale: 'P2v3 retains all Premium v3 features (VNet, zone redundancy) at ~35% lower cost.',
-    risk: 'low',
-  },
-  {
-    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku', 'size'],
-    pattern: /^P2v3$/i,
-    currentLabel: 'Premium v3 P2 (2 vCPUs)',
-    suggestedValue: 'P1v3',
-    suggestedLabel: 'Premium v3 P1 (1 vCPU)',
-    savingPercent: 35,
-    rationale: 'P1v3 retains all Premium v3 features. Sufficient for most apps under moderate load.',
-    risk: 'low',
-  },
-  {
-    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku', 'size'],
-    pattern: /^S3$/i,
-    currentLabel: 'Standard S3 (4 vCPUs)',
-    suggestedValue: 'S2',
-    suggestedLabel: 'Standard S2 (2 vCPUs)',
-    savingPercent: 33,
-    rationale: 'S2 is a direct step-down in Standard tier with no feature loss.',
-    risk: 'low',
-  },
-  {
-    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku', 'size'],
-    pattern: /^S2$/i,
-    currentLabel: 'Standard S2 (2 vCPUs)',
-    suggestedValue: 'S1',
-    suggestedLabel: 'Standard S1 (1 vCPU)',
-    savingPercent: 33,
-    rationale: 'S1 is adequate for single-instance apps with low to moderate traffic.',
-    risk: 'low',
-  },
-  {
-    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku', 'size'],
-    pattern: /^P2v2$/i,
-    currentLabel: 'Premium v2 P2 (older generation)',
-    suggestedValue: 'P1v3',
-    suggestedLabel: 'Premium v3 P1 (newer generation, comparable perf)',
-    savingPercent: 20,
-    rationale: 'Premium v3 delivers better performance per dollar than Premium v2. P1v3 ≈ P2v2 in throughput.',
-    risk: 'low',
-  },
-  {
-    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku', 'size'],
-    pattern: /^P1v3$/i,
-    currentLabel: 'Premium v3 P1 (entry premium tier)',
-    suggestedValue: 'S1',
-    suggestedLabel: 'Standard S1 (lower-cost shared feature tier)',
-    savingPercent: 30,
-    rationale: 'If Premium-only capabilities are not required (e.g., advanced networking/isolation needs), S1 can reduce cost significantly.',
-    risk: 'high',
-  },
-  {
-    resourceTypes: ['azurerm_service_plan', 'azurerm_app_service_plan'],
-    attributes: ['sku_name', 'sku', 'size'],
-    pattern: /^P1v2$/i,
-    currentLabel: 'Premium v2 P1',
-    suggestedValue: 'S1',
-    suggestedLabel: 'Standard S1',
-    savingPercent: 25,
-    rationale: 'For non-critical workloads that do not depend on Premium tier features, Standard S1 is typically more cost-efficient.',
-    risk: 'high',
-  },
-
-  // ── Azure SQL Database ────────────────────────────────────────────────────
-  {
-    resourceTypes: ['azurerm_mssql_database'],
-    attributes: ['sku_name'],
-    pattern: /^BC_Gen5_(\d+)$/i,
-    currentLabel: 'Business Critical Gen5 (local SSD + HA replica)',
-    suggestedValue: 'GP_Gen5_$1',
-    suggestedLabel: 'General Purpose Gen5 (same vCores, no HA replica)',
-    savingPercent: 45,
-    rationale: 'Business Critical adds a local-SSD read replica. If zone-HA and in-memory OLTP are not required, General Purpose saves ~45%.',
-    risk: 'high',
-  },
-  {
-    resourceTypes: ['azurerm_mssql_database'],
-    attributes: ['sku_name'],
-    pattern: /^GP_Gen5_16$/i,
-    currentLabel: 'General Purpose Gen5 16 vCores',
-    suggestedValue: 'GP_Gen5_8',
-    suggestedLabel: 'General Purpose Gen5 8 vCores',
-    savingPercent: 50,
-    rationale: 'Halving vCores saves ~50%. Review query parallelism and max concurrent connections first.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: ['azurerm_mssql_database'],
-    attributes: ['sku_name'],
-    pattern: /^GP_Gen5_8$/i,
-    currentLabel: 'General Purpose Gen5 8 vCores',
-    suggestedValue: 'GP_Gen5_4',
-    suggestedLabel: 'General Purpose Gen5 4 vCores',
-    savingPercent: 50,
-    rationale: 'Halving vCores saves ~50%. Suitable when query parallelism is low.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: ['azurerm_mssql_database'],
-    attributes: ['sku_name'],
-    pattern: /^GP_Gen5_4$/i,
-    currentLabel: 'General Purpose Gen5 4 vCores',
-    suggestedValue: 'GP_Gen5_2',
-    suggestedLabel: 'General Purpose Gen5 2 vCores',
-    savingPercent: 50,
-    rationale: 'Halving vCores saves ~50%. Review max_worker_threads and query plans before changing.',
-    risk: 'medium',
-  },
-
-  // ── Azure Database for PostgreSQL flexible ────────────────────────────────
-  {
-    resourceTypes: ['azurerm_postgresql_flexible_server'],
-    attributes: ['sku_name'],
-    pattern: /^GP_Standard_D4ds_v4$/i,
-    currentLabel: 'General Purpose D4ds_v4 (4 vCPUs)',
-    suggestedValue: 'GP_Standard_D2ds_v4',
-    suggestedLabel: 'General Purpose D2ds_v4 (2 vCPUs)',
-    savingPercent: 50,
-    rationale: 'Halving vCPUs saves ~50% on PostgreSQL Flexible Server compute.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: ['azurerm_postgresql_flexible_server'],
-    attributes: ['sku_name'],
-    pattern: /^GP_Standard_D8ds_v4$/i,
-    currentLabel: 'General Purpose D8ds_v4 (8 vCPUs)',
-    suggestedValue: 'GP_Standard_D4ds_v4',
-    suggestedLabel: 'General Purpose D4ds_v4 (4 vCPUs)',
-    savingPercent: 50,
-    rationale: 'Halving vCPUs saves ~50% on PostgreSQL Flexible Server compute.',
-    risk: 'medium',
-  },
-
-  // ── Redis Cache ───────────────────────────────────────────────────────────
-  {
-    resourceTypes: ['azurerm_redis_cache'],
-    attributes: ['sku_name'],
-    pattern: /^Premium$/i,
-    currentLabel: 'Premium tier (geo-replication, clustering)',
-    suggestedValue: 'Standard',
-    suggestedLabel: 'Standard tier (HA replica, no clustering)',
-    savingPercent: 60,
-    rationale: 'Premium adds geo-replication and data persistence to disk. Switch to Standard if neither feature is required.',
-    risk: 'high',
-  },
-  {
-    resourceTypes: ['azurerm_redis_cache'],
-    attributes: ['sku_name'],
-    pattern: /^Standard$/i,
-    currentLabel: 'Standard tier (HA replica)',
-    suggestedValue: 'Basic',
-    suggestedLabel: 'Basic tier (single node, no SLA replica)',
-    savingPercent: 50,
-    rationale: 'Basic removes the SLA-backed replica. Only suitable for dev/test environments.',
-    risk: 'high',
-  },
-
-  // ── AKS default node pool ─────────────────────────────────────────────────
-  {
-    resourceTypes: ['azurerm_kubernetes_cluster'],
-    attributes: ['vm_size'],
-    pattern: /^Standard_D16s?_v3$/i,
-    currentLabel: 'D16s_v3 node (16 vCPUs)',
-    suggestedValue: 'Standard_D8s_v3',
-    suggestedLabel: 'D8s_v3 node (8 vCPUs)',
-    savingPercent: 50,
-    rationale: 'Smaller nodes + cluster autoscaler scales more efficiently. Check no single pod requires >8 vCPU guaranteed.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: ['azurerm_kubernetes_cluster'],
-    attributes: ['vm_size'],
-    pattern: /^Standard_D8s?_v3$/i,
-    currentLabel: 'D8s_v3 node (8 vCPUs)',
-    suggestedValue: 'Standard_D4s_v3',
-    suggestedLabel: 'D4s_v3 node (4 vCPUs)',
-    savingPercent: 50,
-    rationale: 'Smaller nodes allow the autoscaler to right-size more precisely. Verify no pod needs >4 vCPU guaranteed.',
-    risk: 'medium',
-  },
-  {
-    resourceTypes: ['azurerm_kubernetes_cluster'],
-    attributes: ['vm_size'],
-    pattern: /^Standard_D4s?_v3$/i,
-    currentLabel: 'D4s_v3 node (4 vCPUs)',
-    suggestedValue: 'Standard_D2s_v3',
-    suggestedLabel: 'D2s_v3 node (2 vCPUs)',
-    savingPercent: 50,
-    rationale: 'Good for clusters where the heaviest pod needs ≤2 vCPU. Enable cluster autoscaler for maximum savings.',
-    risk: 'medium',
-  },
-];
-
 // ─── Lightweight HCL attribute extractor ─────────────────────────────────────
 
 interface ParsedResource {
@@ -436,160 +76,6 @@ interface ParsedResource {
   resourceName: string;
   /** All quoted string attributes found anywhere in the block body */
   attributes: Record<string, string>;
-}
-
-function createRecommendation(
-  resource: ParsedResource,
-  attribute: string,
-  currentValue: string,
-  suggestedValue: string,
-  currentLabel: string,
-  suggestedLabel: string,
-  savingPercent: number,
-  rationale: string,
-  risk: 'low' | 'medium' | 'high',
-  costsByAddr: Map<string, number>,
-): RightsizingRecommendation {
-  const address = `${resource.resourceType}.${resource.resourceName}`;
-  const monthlyCost = costsByAddr.get(address) ?? 0;
-  const estimatedMonthlySaving = monthlyCost > 0
-    ? Math.round(monthlyCost * savingPercent / 100 * 100) / 100
-    : undefined;
-
-  return {
-    address,
-    resourceType: resource.resourceType,
-    resourceName: resource.resourceName,
-    attribute,
-    currentValue,
-    suggestedValue,
-    currentLabel,
-    suggestedLabel,
-    estimatedSavingPercent: savingPercent,
-    estimatedMonthlySaving,
-    rationale,
-    risk,
-  };
-}
-
-/**
- * Generic Azure fallback heuristics so rightsizing can still provide
- * recommendations for azurerm resources not yet covered by explicit rules.
- */
-function generateGenericAzureRecommendation(
-  resource: ParsedResource,
-  costsByAddr: Map<string, number>,
-): RightsizingRecommendation | null {
-  if (!resource.resourceType.startsWith('azurerm_')) return null;
-
-  const candidates = ['sku_name', 'size', 'vm_size', 'storage_account_type', 'sku', 'sku_tier', 'tier'];
-  const attribute = candidates.find((attr) => !!resource.attributes[attr]);
-  if (!attribute) return null;
-
-  const currentValue = resource.attributes[attribute];
-  if (!currentValue) return null;
-
-  // Premium -> Standard fallback
-  if (/premium/i.test(currentValue)) {
-    const suggestedValue = currentValue.replace(/premium/gi, 'Standard');
-    if (suggestedValue !== currentValue) {
-      return createRecommendation(
-        resource,
-        attribute,
-        currentValue,
-        suggestedValue,
-        `${currentValue} (premium/high-cost tier)`,
-        `${suggestedValue} (standard tier)`,
-        25,
-        'Premium tier detected. If premium-only features are not required, Standard is typically more cost-efficient.',
-        'high',
-        costsByAddr,
-      );
-    }
-  }
-
-  // Geo-redundant storage -> local redundancy
-  if (/(RAGRS|GRS)$/i.test(currentValue)) {
-    const suggestedValue = currentValue.replace(/RAGRS$/i, 'LRS').replace(/GRS$/i, 'LRS');
-    if (suggestedValue !== currentValue) {
-      return createRecommendation(
-        resource,
-        attribute,
-        currentValue,
-        suggestedValue,
-        `${currentValue} (geo-redundant replication)`,
-        `${suggestedValue} (local redundancy)`,
-        40,
-        'Geo-redundant storage has significantly higher cost. Use LRS when cross-region DR is not required.',
-        'high',
-        costsByAddr,
-      );
-    }
-  }
-
-  // Azure VM-style Standard_D* downsizing
-  const vmMatch = currentValue.match(/^Standard_D(\d+)(.*)$/i);
-  if (vmMatch) {
-    const currentSize = Number(vmMatch[1]);
-    if (Number.isFinite(currentSize) && currentSize >= 4) {
-      const nextSize = Math.max(2, Math.floor(currentSize / 2));
-      const suggestedValue = `Standard_D${nextSize}${vmMatch[2]}`;
-      return createRecommendation(
-        resource,
-        attribute,
-        currentValue,
-        suggestedValue,
-        `${currentValue} (current compute size)`,
-        `${suggestedValue} (downsized compute)`,
-        30,
-        'A larger D-series size was detected. Step-down sizing is a common rightsizing move for underutilized workloads.',
-        'medium',
-        costsByAddr,
-      );
-    }
-  }
-
-  // PostgreSQL/MySQL style GP_Standard_D* downsizing
-  const dbMatch = currentValue.match(/^GP_Standard_D(\d+)(.*)$/i);
-  if (dbMatch) {
-    const currentSize = Number(dbMatch[1]);
-    if (Number.isFinite(currentSize) && currentSize >= 4) {
-      const nextSize = Math.max(2, Math.floor(currentSize / 2));
-      const suggestedValue = `GP_Standard_D${nextSize}${dbMatch[2]}`;
-      return createRecommendation(
-        resource,
-        attribute,
-        currentValue,
-        suggestedValue,
-        `${currentValue} (current database compute tier)`,
-        `${suggestedValue} (downsized database compute tier)`,
-        35,
-        'Database compute tier appears over-provisioned. A lower GP size can reduce cost if workload headroom is available.',
-        'medium',
-        costsByAddr,
-      );
-    }
-  }
-
-  // Standard S* -> Basic B* heuristic for non-critical workloads
-  const stdMatch = currentValue.match(/^S(\d+)$/i);
-  if (stdMatch) {
-    const suggestedValue = `B${stdMatch[1]}`;
-    return createRecommendation(
-      resource,
-      attribute,
-      currentValue,
-      suggestedValue,
-      `${currentValue} (standard tier)`,
-      `${suggestedValue} (basic tier)`,
-      20,
-      'Standard tier detected. For dev/test or low-traffic workloads, Basic can reduce spend.',
-      'high',
-      costsByAddr,
-    );
-  }
-
-  return null;
 }
 
 /**
@@ -605,7 +91,7 @@ function parseHclResources(hcl: string): ParsedResource[] {
 
   // Match top-level resource blocks. The body capture handles one level of
   // nesting by allowing `{ ... }` sub-blocks inside the outer braces.
-  const blockRe = /resource\s+"([^"]+)"\s+"([^"]+)"\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/gs;
+  const blockRe = /resource\s+"([^"]+)"\s+"([^"]+)"\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g;
   let blockMatch: RegExpExecArray | null;
 
   while ((blockMatch = blockRe.exec(hcl)) !== null) {
@@ -629,84 +115,234 @@ function parseHclResources(hcl: string): ParsedResource[] {
   return results;
 }
 
+// ─── AI-driven rightsizing analysis ───────────────────────────────────────────
+
+const SYSTEM_PROMPT = `You are an Azure FinOps expert specializing in Terraform cost optimization and rightsizing.
+
+Analyze the provided Terraform resource configurations and identify over-provisioned resources that can be downsized to reduce cost.
+
+For each recommendation, provide:
+- address: Full Terraform address (e.g. "azurerm_linux_virtual_machine.app")
+- resourceType: The Terraform resource type
+- resourceName: The Terraform resource name
+- attribute: The HCL attribute holding the SKU/size (e.g. "size", "sku_name", "vm_size")
+- currentValue: The current value in the .tf file
+- suggestedValue: The recommended replacement value (must be a valid Azure SKU/size)
+- currentLabel: Human-friendly label for the current value (include vCPUs/memory where applicable)
+- suggestedLabel: Human-friendly label for the suggested value
+- estimatedSavingPercent: Percentage of monthly cost saved (integer 1-100)
+- rationale: One-sentence explanation for the recommendation
+- risk: "low", "medium", or "high" — the operational risk of applying this change
+
+Guidelines:
+- Only recommend downsizing when there is a clear next-smaller SKU available
+- Consider VM series (D, E, F, B), App Service Plans, SQL databases, Redis, AKS node pools, PostgreSQL, and storage accounts
+- For VMs: suggest halving vCPUs within the same series, or switching from memory-optimized (E-series) to general purpose (D-series)
+- For App Service Plans: suggest stepping down within the same tier or to a lower tier
+- For databases: suggest halving vCores or switching from Business Critical to General Purpose
+- For Redis: suggest stepping down tiers (Premium→Standard, Standard→Basic for dev/test)
+- For storage: suggest switching from GRS/RA-GRS to LRS, or from Premium to Standard
+- Be conservative — flag high risk for tier changes that remove features
+- Do NOT recommend changes for the smallest available SKU in a tier
+
+Return a JSON object with this exact structure:
+{
+  "recommendations": [ ... array of recommendation objects ... ]
+}
+
+If no rightsizing opportunities are found, return { "recommendations": [] }.`;
+
+async function analyzeWithAI(
+  resources: ParsedResource[],
+  costsByAddr: Map<string, number>,
+): Promise<RightsizingRecommendation[]> {
+  if (resources.length === 0) return [];
+
+  const resourceSummaries = resources.map(r => ({
+    address: `${r.resourceType}.${r.resourceName}`,
+    type: r.resourceType,
+    name: r.resourceName,
+    attributes: r.attributes,
+    currentMonthlyCost: costsByAddr.get(`${r.resourceType}.${r.resourceName}`) ?? null,
+  }));
+
+  const userContent = `Analyze these ${resources.length} Terraform resources for rightsizing opportunities:\n\n${JSON.stringify(sanitizeJsonForPrompt(resourceSummaries), null, 2)}`;
+
+  const response = await aiChatCompletion({
+    model: 'gpt-4o-mini',
+    temperature: 0.3,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system' as const, content: SYSTEM_PROMPT },
+      { role: 'user' as const, content: userContent },
+    ],
+  });
+
+  const content = response.choices[0]?.message?.content;
+  if (!content) return [];
+
+  const result = aiRightsizingResponseSchema.safeParse(JSON.parse(content));
+  if (!result.success) {
+    console.warn('[terraform-rightsizing] AI response validation failed:', result.error.message);
+    return [];
+  }
+
+  const recs: RightsizingRecommendation[] = [];
+
+  for (const rec of result.data.recommendations) {
+    if (!rec.address || !rec.resourceType || !rec.resourceName ||
+        !rec.attribute || !rec.currentValue || !rec.suggestedValue) {
+      continue;
+    }
+
+    const monthlyCost = costsByAddr.get(rec.address) ?? 0;
+    const savingPercent = Math.max(0, Math.min(100, rec.estimatedSavingPercent));
+    const estimatedMonthlySaving = monthlyCost > 0
+      ? Math.round(monthlyCost * savingPercent / 100 * 100) / 100
+      : undefined;
+
+    recs.push({
+      address: rec.address,
+      resourceType: rec.resourceType,
+      resourceName: rec.resourceName,
+      attribute: rec.attribute,
+      currentValue: rec.currentValue,
+      suggestedValue: rec.suggestedValue,
+      currentLabel: rec.currentLabel || rec.currentValue,
+      suggestedLabel: rec.suggestedLabel || rec.suggestedValue,
+      estimatedSavingPercent: savingPercent,
+      estimatedMonthlySaving,
+      rationale: rec.rationale || 'AI-identified rightsizing opportunity.',
+      risk: rec.risk,
+    });
+  }
+
+  return recs;
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /**
  * Analyse the combined content of all `.tf` files in a session and return
- * rightsizing recommendations.
+ * rightsizing recommendations using AI-driven analysis.
  *
  * @param hclContent   Concatenated content of all .tf files
  * @param costsByAddr  Optional map of Terraform address → monthly USD cost
  *                     (populated from a prior cost-analysis run so that dollar
  *                     savings can be shown alongside percent savings)
  */
-export function generateRightsizingRecommendations(
+export async function generateRightsizingRecommendations(
   hclContent: string,
   costsByAddr: Map<string, number> = new Map(),
-): RightsizingResult {
+): Promise<RightsizingResult> {
   const resources = parseHclResources(hclContent);
-  const recommendations: RightsizingRecommendation[] = [];
 
-  for (const resource of resources) {
-    let matchedExplicitRule = false;
+  try {
+    const recommendations = await analyzeWithAI(resources, costsByAddr);
 
-    for (const rule of RULES) {
-      if (!rule.resourceTypes.includes(resource.resourceType)) continue;
+    const totalSaving = recommendations.reduce(
+      (sum, r) => sum + (r.estimatedMonthlySaving ?? 0),
+      0,
+    );
 
-      for (const attr of rule.attributes) {
-        const value = resource.attributes[attr];
-        if (!value) continue;
+    return {
+      recommendations,
+      totalRecommendations: recommendations.length,
+      totalEstimatedMonthlySaving: Math.round(totalSaving * 100) / 100,
+      resourcesAnalysed: resources.length,
+    };
+  } catch (error) {
+    console.warn('[terraform-rightsizing] AI analysis failed, returning empty defaults:', error);
+    return {
+      recommendations: [],
+      totalRecommendations: 0,
+      totalEstimatedMonthlySaving: 0,
+      resourcesAnalysed: resources.length,
+    };
+  }
+}
 
-        const match = rule.pattern.exec(value);
-        if (!match) continue;
+// ─── Apply suggestion to HCL (single resource block) ─────────────────────────
 
-        // Substitute capture groups into suggestedValue (e.g. BC_Gen5_$1 → GP_Gen5_4)
-        const suggestedValue = match.length > 1
-          ? rule.suggestedValue.replace(/\$(\d+)/g, (_, n) => match[Number(n)] ?? '')
-          : rule.suggestedValue;
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-        const suggestedLabel = match.length > 1
-          ? rule.suggestedLabel.replace(/\$(\d+)/g, (_, n) => match[Number(n)] ?? '')
-          : rule.suggestedLabel;
+export interface ApplyRightsizingInput {
+  resourceType: string;
+  resourceName: string;
+  attribute: string;
+  currentValue: string;
+  suggestedValue: string;
+}
 
-        recommendations.push(createRecommendation(
-          resource,
-          attr,
-          value,
-          suggestedValue,
-          rule.currentLabel,
-          suggestedLabel,
-          rule.savingPercent,
-          rule.rationale,
-          rule.risk,
-          costsByAddr,
-        ));
+export interface ApplyRightsizingFileResult {
+  applied: boolean;
+  fileName?: string;
+  fileId?: string;
+  reason?: string;
+}
 
-        matchedExplicitRule = true;
-        break; // attr loop
-      }
+/**
+ * Locate `resource "type" "name" { ... }` and replace the first matching
+ * `attribute = "currentValue"` line inside that block with the suggested value.
+ */
+export function applyRightsizingToHcl(
+  hcl: string,
+  input: ApplyRightsizingInput,
+): { hcl: string; applied: boolean; reason?: string } {
+  const re = new RegExp(
+    `resource\\s+"${escapeRegExp(input.resourceType)}"\\s+"${escapeRegExp(input.resourceName)}"\\s*\\{`,
+    'm',
+  );
+  const m = hcl.match(re);
+  if (!m || m.index === undefined) {
+    return { hcl, applied: false, reason: 'Resource block not found in file' };
+  }
 
-      if (matchedExplicitRule) break; // rules loop
-    }
-
-    // Fallback: generic Azure heuristics for resource types not covered by specific rules
-    if (!matchedExplicitRule) {
-      const genericRecommendation = generateGenericAzureRecommendation(resource, costsByAddr);
-      if (genericRecommendation) {
-        recommendations.push(genericRecommendation);
+  const blockStart = m.index;
+  const openBrace = blockStart + m[0].length - 1;
+  let depth = 0;
+  let blockEnd = -1;
+  for (let i = openBrace; i < hcl.length; i++) {
+    const c = hcl[i];
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) {
+        blockEnd = i + 1;
+        break;
       }
     }
   }
+  if (blockEnd === -1) {
+    return { hcl, applied: false, reason: 'Unclosed resource block' };
+  }
 
-  const totalSaving = recommendations.reduce(
-    (sum, r) => sum + (r.estimatedMonthlySaving ?? 0),
-    0,
+  const before = hcl.slice(0, blockStart);
+  const block = hcl.slice(blockStart, blockEnd);
+  const after = hcl.slice(blockEnd);
+
+  const attrRe = new RegExp(
+    `^(\\s*)${escapeRegExp(input.attribute)}\\s*=\\s*"${escapeRegExp(input.currentValue)}"`,
+    'm',
+  );
+  if (!attrRe.test(block)) {
+    return {
+      hcl,
+      applied: false,
+      reason: `No line ${input.attribute} = "${input.currentValue}" in this resource block (file may have changed).`,
+    };
+  }
+
+  const newBlock = block.replace(
+    attrRe,
+    `$1${input.attribute} = "${input.suggestedValue}"`,
   );
 
-  return {
-    recommendations,
-    totalRecommendations: recommendations.length,
-    totalEstimatedMonthlySaving: Math.round(totalSaving * 100) / 100,
-    resourcesAnalysed: resources.length,
-  };
+  if (newBlock === block) {
+    return { hcl, applied: false, reason: 'Replacement did not change content' };
+  }
+
+  return { hcl: before + newBlock + after, applied: true };
 }

@@ -1,8 +1,4 @@
-import OpenAI from 'openai';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { aiChatCompletion } from '../utils/ai-client.js';
 
 export interface BestPracticeIssue {
   category: string;
@@ -71,7 +67,7 @@ ${combinedYaml}
 Identify all best practice issues and provide specific, actionable suggestions.`;
 
   try {
-    const completion = await openai.chat.completions.create({
+    const completion = await aiChatCompletion({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt },

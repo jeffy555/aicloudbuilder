@@ -869,7 +869,19 @@ export const AZURE_PRICING_CONFIG: Record<string, AzurePricingEntry> = {
     },
     calculateCost: (item, attrs) => {
       const cpu = parseFloat(attrs.cpu || '0.5');
-      return (item.retailPrice || 0) * cpu * HOURS_PER_MONTH * 3600;
+      const unit = (item.unitOfMeasure || '').toLowerCase();
+      const price = item.retailPrice || 0;
+      if (unit.includes('second')) {
+        return price * cpu * HOURS_PER_MONTH * 3600;
+      }
+      if (unit.includes('day')) {
+        return price * cpu * (365 / 12);
+      }
+      if (unit.includes('month')) {
+        return price * cpu;
+      }
+      // Azure Container Apps meters are typically hourly (e.g., "1 Hour").
+      return price * cpu * HOURS_PER_MONTH;
     }
   },
 

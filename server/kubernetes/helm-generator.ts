@@ -2,7 +2,7 @@
  * Helm Chart Generator
  * AI-powered generation of complete Helm charts with optional post-generation lint.
  */
-import OpenAI from 'openai';
+import { aiChatCompletion } from '../utils/ai-client.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -36,7 +36,6 @@ export interface RepoAnalysisResult {
 export async function analyzeRepositoryForHelm(
   files: Array<{ name: string; content: string }>
 ): Promise<RepoAnalysisResult> {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   // Build a compact snapshot of file names + first 400 chars of each
   const snapshot = files
@@ -61,7 +60,7 @@ Return ONLY this JSON (no markdown):
 
   console.log(`\n🔍 Analysing repository (${files.length} file(s))...`);
 
-  const completion = await openai.chat.completions.create({
+  const completion = await aiChatCompletion({
     model: 'gpt-4o-mini',
     messages: [
       { role: 'system', content: systemPrompt },
@@ -113,8 +112,6 @@ export async function generateHelmChart(
     port = 8080,
     appContext,
   } = options;
-
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   // ── Required files list ──────────────────────────────────────────────────
   const requiredFiles = [
@@ -258,7 +255,7 @@ CRITICAL: In every range loop, use $ for root context and include calls (e.g. {{
   console.log(`   Description: "${description.substring(0, 100)}..."`);
   console.log(`   Framework: ${framework}, HPA: ${includeHPA}, Ingress: ${includeIngress}, Overlays: ${generateEnvOverlays}`);
 
-  const completion = await openai.chat.completions.create({
+  const completion = await aiChatCompletion({
     model: 'gpt-4o-mini',
     messages: [
       { role: 'system', content: systemPrompt },
@@ -267,7 +264,7 @@ CRITICAL: In every range loop, use $ for root context and include calls (e.g. {{
     temperature: 0.3,
     max_tokens: 8000,
     response_format: { type: 'json_object' },
-  });
+  }, { timeout: 90000 });
 
   const raw = completion.choices[0]?.message?.content?.trim() || '{}';
   let parsed: { chartName?: string; files?: Record<string, string> };

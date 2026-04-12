@@ -3,6 +3,7 @@ import mermaid from "mermaid";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { generateBuildId, saveBuildHistory } from "@/lib/build-history";
 import { useSecretsConfig } from "@/hooks/useSecretsConfig";
 import Header from "@/components/Header";
 import AIMessage from "@/components/AIMessage";
@@ -16,8 +17,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import CodeEditor from "@/components/CodeEditor";
-import { FileCode, Package, Package2, Home, Cloud, Loader2, Upload, FileText, RefreshCw, CheckCircle2, AlertTriangle, AlertCircle, FolderOpen, ShieldCheck, BarChart3, Hash, Box, Network, Shield, Lock, Activity, Database, PlayCircle, ChevronRight, Layers, Clock3, Globe, Download } from "lucide-react";
+import { FileCode, Package, Package2, Home, Cloud, Loader2, Upload, FileText, RefreshCw, CheckCircle2, AlertTriangle, AlertCircle, XCircle, FolderOpen, ShieldCheck, BarChart3, Hash, Box, Network, Shield, Lock, Activity, Database, PlayCircle, ChevronRight, Layers, Clock3, Globe, Download } from "lucide-react";
 import ActivityPanel from "@/components/ActivityPanel";
+import BuildHistoryPanel from "@/components/BuildHistoryPanel";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -132,7 +134,7 @@ export default function KubernetesWorkflow() {
   const [helmChartName, setHelmChartName] = useState<string>('');
 
   // Helm Generator — auto-scan state
-  type HelmScanState = 'idle' | 'scanning' | 'done' | 'empty' | 'error';
+  type HelmScanState = 'idle' | 'scanning' | 'done' | 'empty' | 'error' | 'no-app-code';
   const [helmScanState, setHelmScanState] = useState<HelmScanState>('idle');
   const [repoAnalysis, setRepoAnalysis] = useState<{
     appType: string;
@@ -289,7 +291,18 @@ export default function KubernetesWorkflow() {
     { label: 'Repo Provider',  value: provider === 'github' ? 'GitHub' : provider === 'azure' ? 'Azure DevOps' : 'Not selected' },
     { label: 'Repository',     value: selectedRepo || 'Not selected' },
     { label: 'Files Generated', value: generatedFiles.length > 0 ? `${generatedFiles.length} file${generatedFiles.length !== 1 ? 's' : ''}` : 'None' },
-    { label: 'Build Status',   value: buildId ? `✓ ${buildId}` : scanCompleted ? 'Complete' : currentStep >= 6 ? 'Ready' : 'Pending' },
+    {
+      label: 'Build Status',
+      value: buildId
+        ? `Build ${buildId}`
+        : scanCompleted
+          ? 'Complete'
+          : pipelineRunning
+            ? `Running (${completedPipelineStages.length}/3 stages)`
+            : currentStep >= 5
+              ? 'Ready to build'
+              : 'Pending',
+    },
   ];
 
   const getNextActionLabel = () => {
@@ -302,10 +315,13 @@ export default function KubernetesWorkflow() {
       return 'Describe your workload';
     }
     if (currentStep === 4) return workflowType === 'helm-generator' ? 'Generate Helm chart' : 'Generate Kubernetes manifests';
-    if (currentStep === 5) return 'Review generated files';
-    if (currentStep === 6 && !scanCompleted) return 'Run the Build pipeline';
-    if (currentStep === 6 && scanCompleted && !buildId) return 'Finish Build & approve stages';
-    if (buildId) return 'Proceed to commit';
+    if (currentStep === 5) {
+      if (pipelineRunning) return 'Pipeline running...';
+      if (buildId) return 'Proceed to commit';
+      if (scanCompleted) return 'View build report';
+      return 'Run the Build pipeline';
+    }
+    if (currentStep === 6) return buildId ? 'Commit to repository' : 'Proceed to commit';
     return 'Proceed to commit';
   };
 
@@ -575,7 +591,7 @@ export default function KubernetesWorkflow() {
     if (!sessionId || !selectedRepo || !provider) return;
 
     const repo = repositories.find(r => r.id === selectedRepo);
-    const repoName = repo?.name || selectedRepo;
+    const repoName = repo?.fullName || repo?.name || selectedRepo;
 
     setHelmScanState('scanning');
     setRepoAnalysis(null);
@@ -586,13 +602,18 @@ export default function KubernetesWorkflow() {
       const res = await apiRequest('POST', `/api/sessions/${sessionId}/scan-repo-for-helm`, {
         provider,
         repoName,
-        branch: 'main',
+        branch: repo?.branch || 'main',
       });
       const data = await res.json();
 
       if (data.isEmpty) {
         setWorkloadDescription('');
         setHelmScanState('empty');
+        return;
+      }
+
+      if (data.noAppCode) {
+        setHelmScanState('no-app-code');
         return;
       }
 
@@ -688,6 +709,7 @@ export default function KubernetesWorkflow() {
           value={workloadDescription}
           onChange={(e) => setWorkloadDescription(e.target.value)}
           className="h-32 font-mono text-sm"
+          data-testid="k8s-input-description"
         />
       </div>
       <div className="grid grid-cols-2 gap-4">
@@ -697,6 +719,7 @@ export default function KubernetesWorkflow() {
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             value={helmGenOptions.framework}
             onChange={(e) => setHelmGenOptions(o => ({ ...o, framework: e.target.value }))}
+            data-testid="k8s-select-framework"
           >
             {['generic', 'node', 'python', 'java', 'go', 'dotnet', 'ruby', 'php'].map(f => (
               <option key={f} value={f}>{f.charAt(0).toUpperCase() + f.slice(1)}</option>
@@ -720,10 +743,11 @@ export default function KubernetesWorkflow() {
         </div>
       </div>
       <div className="flex gap-3">
-        <Button variant="outline" onClick={onBack}>← Back</Button>
+        <Button variant="outline" onClick={onBack} data-testid="k8s-btn-back">← Back</Button>
         <Button
           onClick={() => { setCurrentStep(4); generateHelmChartMutation.mutate(workloadDescription); }}
           disabled={!workloadDescription.trim() || generateHelmChartMutation.isPending}
+          data-testid="k8s-btn-generate"
         >
           <Package2 className="w-4 h-4 mr-2" />Generate Helm Chart
         </Button>
@@ -732,14 +756,19 @@ export default function KubernetesWorkflow() {
   );
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 via-emerald-50/30 to-white relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-24 -left-20 h-72 w-72 rounded-full bg-emerald-300/20 blur-3xl" />
+        <div className="absolute top-24 -right-24 h-80 w-80 rounded-full bg-cyan-300/20 blur-3xl" />
+        <div className="absolute bottom-0 left-1/3 h-64 w-64 rounded-full bg-violet-300/15 blur-3xl" />
+      </div>
       <Header />
 
-      <main className="container mx-auto px-4 py-6 max-w-7xl">
-        <div className="mb-6">
+      <main className="container mx-auto px-4 py-6 max-w-7xl relative z-10">
+        <div className="mb-6 rounded-2xl border border-emerald-100/70 bg-white/80 backdrop-blur-sm px-4 py-4 shadow-sm">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-primary/10">
+              <div className="p-2 rounded-lg bg-gradient-to-br from-emerald-100 to-cyan-100 border border-emerald-200/60">
                 <Package className="w-6 h-6 text-primary" />
               </div>
               <div>
@@ -755,6 +784,7 @@ export default function KubernetesWorkflow() {
                 size="sm"
                 onClick={handleRefresh}
                 disabled={isGenerating || isValidating}
+                data-testid="k8s-btn-refresh"
               >
                 <RefreshCw className="w-4 h-4 mr-2" />
                 Refresh
@@ -763,6 +793,7 @@ export default function KubernetesWorkflow() {
                 variant="outline"
                 size="sm"
                 onClick={handleGoHome}
+                data-testid="k8s-btn-home"
               >
                 <Home className="w-4 h-4 mr-2" />
                 Home
@@ -817,12 +848,28 @@ export default function KubernetesWorkflow() {
                   <div className="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs">
                     {(buildId || scanCompleted) ? (
                       <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    ) : pipelineRunning ? (
+                      <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
                     ) : (
                       <Clock3 className="w-4 h-4 text-amber-600" />
                     )}
                     <span className="font-medium">Next Action: {getNextActionLabel()}</span>
                   </div>
                 </div>
+
+                {/* Pipeline progress notice — shown during/after build */}
+                {currentStep >= 5 && completedPipelineStages.length > 0 && (
+                  <div className={`rounded-md border px-3 py-2 text-xs ${
+                    buildId
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300'
+                      : 'border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-300'
+                  }`}>
+                    {buildId
+                      ? `Build ${buildId} completed successfully — ${completedPipelineStages.length} pipeline stages passed`
+                      : `Pipeline: ${completedPipelineStages.map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' → ')}${pipelineRunning ? ' → ...' : ''}`}
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
                   {workflowSummaryItems.map((item) => (
                     <div key={item.label} className="rounded-lg border bg-muted/30 p-3">
@@ -919,7 +966,7 @@ export default function KubernetesWorkflow() {
                       {!config?.hasGithub && !config?.hasAzureDevOps && (
                         <div className="col-span-2 text-center py-12">
                           <p className="text-muted-foreground mb-4">No repository providers configured.</p>
-                          <Button onClick={() => setLocation('/settings')}>Go to Settings</Button>
+                          <Button onClick={() => setLocation('/settings')} data-testid="k8s-btn-settings">Go to Settings</Button>
                         </div>
                       )}
                     </div>
@@ -937,6 +984,7 @@ export default function KubernetesWorkflow() {
                       <Button
                         variant="outline"
                         onClick={() => setProvider(null)}
+                        data-testid="k8s-btn-back-provider"
                       >
                         ← Back
                       </Button>
@@ -1001,6 +1049,7 @@ export default function KubernetesWorkflow() {
                       setCurrentStep(2);
                       setSelectedRepo('');
                     }}
+                    data-testid="k8s-btn-back-step3"
                   >
                     ← Back
                   </Button>
@@ -1062,15 +1111,15 @@ export default function KubernetesWorkflow() {
                   </div>
 
                   {/* ── Tab bar ── */}
-                  <div className="flex gap-1 border-b">
+                  <div className="flex gap-2 p-1 rounded-xl bg-muted/60">
                     {(['overview', 'build', 'code', 'report'] as const).map(mode => (
                       <button
                         key={mode}
                         onClick={() => setActivityViewMode(mode)}
-                        className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors -mb-px ${
+                        className={`px-4 py-2 text-sm font-semibold rounded-lg transition-all duration-200 ${
                           activityViewMode === mode
-                            ? 'border-primary text-primary'
-                            : 'border-transparent text-muted-foreground hover:text-foreground'
+                            ? 'bg-gradient-to-r from-emerald-500 to-green-500 text-white shadow-md shadow-emerald-200 dark:shadow-emerald-900/40'
+                            : 'text-muted-foreground hover:bg-gradient-to-r hover:from-emerald-50 hover:to-green-50 hover:text-emerald-700 dark:hover:from-emerald-950/40 dark:hover:to-green-950/40 dark:hover:text-emerald-300'
                         }`}
                       >
                         {mode === 'build' ? 'Build Pipeline' : mode.charAt(0).toUpperCase() + mode.slice(1)}
@@ -1102,383 +1151,16 @@ export default function KubernetesWorkflow() {
                         ))}
                       </div>
 
-                      {/* Badge pills — like TF's variables/outputs row */}
-                      {(uniqueKinds.length > 0 || namespaceCount > 0 || serviceCount > 0 || containerCount > 0) && (
-                        <div className="flex flex-wrap gap-2">
-                          {uniqueKinds.length > 0 && (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
-                              <Box className="w-3 h-3" /> {uniqueKinds.length} kind{uniqueKinds.length !== 1 ? 's' : ''}
-                            </span>
-                          )}
-                          {namespaceCount > 0 && (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
-                              <Layers className="w-3 h-3" /> {namespaceCount} namespace{namespaceCount !== 1 ? 's' : ''}
-                            </span>
-                          )}
-                          {serviceCount > 0 && (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
-                              <ChevronRight className="w-3 h-3" /> {serviceCount} service{serviceCount !== 1 ? 's' : ''}
-                            </span>
-                          )}
-                          {containerCount > 0 && (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted border">
-                              <Box className="w-3 h-3" /> {containerCount} container{containerCount !== 1 ? 's' : ''}
-                            </span>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Manifest validation alert (manifest workflow) */}
-                      {manifestValidationResult && !manifestValidationResult.valid && (
-                        <Alert variant="destructive">
-                          <AlertTriangle className="h-4 w-4" />
-                          <AlertTitle>
-                            {manifestValidationResult.schemaErrors} schema error{manifestValidationResult.schemaErrors !== 1 ? 's' : ''} found
-                            {manifestValidationResult.warnings > 0 && `, ${manifestValidationResult.warnings} warning${manifestValidationResult.warnings !== 1 ? 's' : ''}`}
-                          </AlertTitle>
-                          <AlertDescription>
-                            Run the <button className="underline" onClick={() => setActivityViewMode('build')}>Build pipeline</button> to auto-fix with AI.
-                          </AlertDescription>
-                        </Alert>
-                      )}
-                      {manifestValidationResult?.valid && (
-                        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-800">
-                          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                          <AlertTitle className="text-emerald-800">Manifests validated successfully</AlertTitle>
-                          <AlertDescription className="text-emerald-700">
-                            No schema errors.{manifestValidationResult.warnings > 0 && ` ${manifestValidationResult.warnings} warning(s) — run Build pipeline for details.`}
-                          </AlertDescription>
-                        </Alert>
-                      )}
-
-                      {/* Helm-generator lint result */}
-                      {workflowType === 'helm-generator' && helmGenLintResult && (
-                        <div className={`rounded-2xl border p-4 flex items-center gap-3 ${
-                          helmGenLintResult.status === 'passed' ? 'border-emerald-200 bg-emerald-50'
-                          : helmGenLintResult.status === 'warning' ? 'border-amber-200 bg-amber-50'
-                          : 'border-rose-200 bg-rose-50'
-                        }`}>
-                          {helmGenLintResult.status === 'passed'
-                            ? <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                            : <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />}
-                          <div>
-                            <p className="text-sm font-semibold">
-                              Helm Lint: {helmGenLintResult.status === 'passed' ? 'Passed' : helmGenLintResult.status === 'warning' ? 'Passed with warnings' : 'Failed'}
-                            </p>
-                            {(helmGenLintResult as any).chart && <p className="text-xs text-muted-foreground mt-0.5">Chart: {(helmGenLintResult as any).chart}</p>}
-                            {helmGenLintResult.errors.map((e, i) => <p key={i} className="text-xs text-rose-700 mt-0.5">{e}</p>)}
-                            {helmGenLintResult.warnings.map((w, i) => <p key={i} className="text-xs text-amber-700 mt-0.5">{w}</p>)}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Helm validation results (helm workflow) */}
-                      {workflowType === 'helm' && validationResults && (() => {
-                        const da = validationResults.deepAnalysis;
-                        const gradeColor: Record<string, string> = {
-                          A: 'text-emerald-600 border-emerald-400 bg-emerald-50 dark:bg-emerald-950',
-                          B: 'text-teal-600 border-teal-400 bg-teal-50 dark:bg-teal-950',
-                          C: 'text-yellow-600 border-yellow-400 bg-yellow-50 dark:bg-yellow-950',
-                          D: 'text-orange-600 border-orange-400 bg-orange-50 dark:bg-orange-950',
-                          F: 'text-red-600 border-red-400 bg-red-50 dark:bg-red-950',
-                        };
-                        const barColor = (score: number) =>
-                          score >= 80 ? 'bg-emerald-500' : score >= 60 ? 'bg-yellow-500' : 'bg-red-500';
-                        return (
-                          <div className="space-y-4">
-                            {da && (
-                              <Card>
-                                <CardHeader>
-                                  <CardTitle>Production Readiness Score</CardTitle>
-                                  <CardDescription>{da.passedChecks} of {da.totalChecks} checks passed</CardDescription>
-                                </CardHeader>
-                                <CardContent>
-                                  <div className="flex items-center gap-8">
-                                    <div className={`w-20 h-20 rounded-full border-4 flex flex-col items-center justify-center shrink-0 ${gradeColor[da.grade]}`}>
-                                      <span className="text-2xl font-bold leading-none">{da.grade}</span>
-                                      <span className="text-xs font-medium">{da.score}/100</span>
-                                    </div>
-                                    <div className="flex-1 space-y-2">
-                                      {[
-                                        { key: 'security', label: 'Security' },
-                                        { key: 'reliability', label: 'Reliability' },
-                                        { key: 'resources', label: 'Resources' },
-                                        { key: 'helmStructure', label: 'Helm Structure' },
-                                        { key: 'operations', label: 'Operations' },
-                                      ].map(cat => (
-                                        <div key={cat.key} className="flex items-center gap-3">
-                                          <span className="text-xs text-muted-foreground w-28 shrink-0">{cat.label}</span>
-                                          <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                                            <div className={`h-full rounded-full ${barColor(da.categoryScores[cat.key])}`}
-                                              style={{ width: `${da.categoryScores[cat.key]}%` }} />
-                                          </div>
-                                          <span className="text-xs font-mono w-8 text-right">{da.categoryScores[cat.key]}%</span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                </CardContent>
-                              </Card>
-                            )}
-                            {validationResults.summary && (
-                              <Card>
-                                <CardHeader><CardTitle>Validation Summary</CardTitle></CardHeader>
-                                <CardContent>
-                                  <div className="grid grid-cols-4 gap-4 text-center">
-                                    <div><p className="text-2xl font-bold">{validationResults.summary.totalIssues}</p><p className="text-xs text-muted-foreground">Issues</p></div>
-                                    <div><p className="text-2xl font-bold text-red-600">{validationResults.summary.errors}</p><p className="text-xs text-muted-foreground">Errors</p></div>
-                                    <div><p className="text-2xl font-bold text-yellow-600">{validationResults.summary.warnings}</p><p className="text-xs text-muted-foreground">Warnings</p></div>
-                                    <div><p className="text-2xl font-bold text-blue-600">{validationResults.summary.info}</p><p className="text-xs text-muted-foreground">Info</p></div>
-                                  </div>
-                                </CardContent>
-                              </Card>
-                            )}
-                          </div>
-                        );
-                      })()}
-
-                      {/* Infrastructure kind chips */}
-                      {uniqueKinds.length > 0 && (
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
-                            Infrastructure Components
-                          </p>
-                          <div className="flex flex-wrap gap-2">
-                            {uniqueKinds.map(kind => {
-                              const { label, icon: Icon } = k8sKindLabel(kind);
-                              return (
-                                <span key={kind} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border bg-card hover:bg-muted/60 transition-colors">
-                                  <Icon className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                                  {label}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* File cards grid */}
-                      {(generatedFiles ?? []).length > 0 && (
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
-                            Generated Files
-                          </p>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                            {generatedFiles.map(f => {
-                              const lines = (f.content ?? '').split('\n').length;
-                              const docs = ((f.content ?? '').match(/^---/gm) ?? []).length;
-                              const kinds = ((f.content ?? '').match(/^kind:\s*\w+/gm) ?? []).length;
-                              const isHelm = f.fileName.includes('Chart') || f.fileName.includes('values');
-                              const isTemplate = f.fileName.includes('templates/') || f.fileName.includes('deployment') || f.fileName.includes('service');
-                              return (
-                                <button key={f.fileName}
-                                  onClick={() => setActivityViewMode('code')}
-                                  className="group text-left rounded-2xl border bg-card p-4 hover:border-primary/40 hover:shadow-sm transition-all space-y-2"
-                                >
-                                  <div className="flex items-start justify-between gap-2">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <FileCode className={`w-4 h-4 shrink-0 ${isHelm ? 'text-orange-500' : isTemplate ? 'text-blue-500' : 'text-muted-foreground'}`} />
-                                      <span className="text-xs font-mono font-semibold truncate">{f.fileName}</span>
-                                    </div>
-                                    <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5" />
-                                  </div>
-                                  <div className="flex gap-3 text-xs text-muted-foreground">
-                                    <span>{lines} lines</span>
-                                    {kinds > 0 && <span className="text-emerald-600 dark:text-emerald-400">{kinds} manifest{kinds !== 1 ? 's' : ''}</span>}
-                                    {docs > 0 && !kinds && <span>{docs} doc{docs !== 1 ? 's' : ''}</span>}
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* ── Post-build analysis (visible only after pipeline runs) ── */}
-                      {scanCompleted && (
-                        <Card>
-                          <CardHeader className="pb-3">
-                            <div className="flex items-center justify-between">
-                              <CardTitle className="flex items-center gap-2 text-base">
-                                <ShieldCheck className="w-5 h-5 text-primary" />
-                                Security Context Score
-                              </CardTitle>
-                              <Button size="sm" variant="outline" onClick={async () => {
-                                try {
-                                  const res = await fetch(`/api/sessions/${sessionId}/security-score`, { method: 'POST' });
-                                  const data = await res.json();
-                                  if (res.ok) setSecurityScore(data.score);
-                                  else toast({ title: 'Scoring failed', description: data.error, variant: 'destructive' });
-                                } catch (err: any) {
-                                  toast({ title: 'Scoring failed', description: err.message, variant: 'destructive' });
-                                }
-                              }}>
-                                {securityScore ? 'Re-score' : 'Run Score'}
-                              </Button>
-                            </div>
-                          </CardHeader>
-                          {securityScore && (
-                            <CardContent>
-                              <div className="flex items-center gap-4 mb-4">
-                                <div className={`text-4xl font-bold ${securityScore.overallScore >= 75 ? 'text-emerald-600' : securityScore.overallScore >= 50 ? 'text-yellow-600' : 'text-red-600'}`}>
-                                  {securityScore.grade}
-                                </div>
-                                <div>
-                                  <div className="text-2xl font-semibold">{securityScore.overallScore}/100</div>
-                                  <div className="text-xs text-muted-foreground">{securityScore.totalWorkloads} workload(s) analysed</div>
-                                </div>
-                              </div>
-                              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs mb-3">
-                                {[
-                                  { key: 'runAsNonRoot', label: 'runAsNonRoot', val: securityScore.metrics.runAsNonRoot, isPercent: true },
-                                  { key: 'readOnlyRootFilesystem', label: 'readOnlyRootFS', val: securityScore.metrics.readOnlyRootFilesystem, isPercent: true },
-                                  { key: 'resourceLimitsDefined', label: 'Resource Limits', val: securityScore.metrics.resourceLimitsDefined, isPercent: true },
-                                  { key: 'privilegedContainers', label: 'Privileged', val: securityScore.metrics.privilegedContainers, isPercent: false },
-                                  { key: 'hostNamespaces', label: 'Host Namespaces', val: securityScore.metrics.hostNamespaces, isPercent: false },
-                                  { key: 'latestImageTag', label: ':latest Images', val: securityScore.metrics.latestImageTag, isPercent: false },
-                                ].map(m => (
-                                  <div key={m.key} className="bg-muted/50 rounded p-2">
-                                    <div className="font-medium">{m.label}</div>
-                                    {m.isPercent
-                                      ? <div className={m.val.percent === 100 ? 'text-emerald-600' : 'text-yellow-600'}>{m.val.percent}% ({m.val.count}/{m.val.total})</div>
-                                      : <div className={m.val.count === 0 ? 'text-emerald-600' : 'text-red-600'}>{m.val.count} container(s)</div>
-                                    }
-                                  </div>
-                                ))}
-                              </div>
-                              {securityScore.recommendations?.length > 0 && (
-                                <ul className="text-xs space-y-1 text-muted-foreground">
-                                  {securityScore.recommendations.map((r: string, i: number) => (
-                                    <li key={i} className="flex items-start gap-1">
-                                      <AlertTriangle className="w-3 h-3 mt-0.5 text-yellow-500 shrink-0" />
-                                      {r}
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
-                            </CardContent>
-                          )}
-                        </Card>
-                      )}
-
-                      {scanCompleted && (workflowType === 'manifest' || workflowType === 'helm-generator') && (
-                        <Card>
-                          <CardHeader className="pb-3">
-                            <div className="flex items-center justify-between">
-                              <CardTitle className="flex items-center gap-2 text-base">
-                                <Activity className="w-5 h-5 text-primary" />
-                                Resource Rightsizing
-                              </CardTitle>
-                              <Button size="sm" variant="outline" disabled={isRightsizing} onClick={async () => {
-                                setIsRightsizing(true);
-                                try {
-                                  const res = await fetch(`/api/sessions/${sessionId}/rightsize-kubernetes`, { method: 'POST' });
-                                  const data = await res.json();
-                                  if (res.ok) setRightsizingResult(data.result);
-                                  else toast({ title: 'Rightsizing failed', description: data.error, variant: 'destructive' });
-                                } catch (err: any) {
-                                  toast({ title: 'Rightsizing failed', description: err.message, variant: 'destructive' });
-                                } finally {
-                                  setIsRightsizing(false);
-                                }
-                              }}>
-                                {isRightsizing ? <><Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> Analysing…</> : rightsizingResult ? 'Re-analyse' : 'Analyse'}
-                              </Button>
-                            </div>
-                          </CardHeader>
-                          {rightsizingResult && (
-                            <CardContent>
-                              <div className="grid grid-cols-4 gap-2 text-center mb-4">
-                                {[
-                                  { label: 'Critical', count: rightsizingResult.criticalCount, color: 'text-red-600' },
-                                  { label: 'High',     count: rightsizingResult.highCount,     color: 'text-orange-600' },
-                                  { label: 'Medium',   count: rightsizingResult.mediumCount,   color: 'text-yellow-600' },
-                                  { label: 'Low',      count: rightsizingResult.lowCount,      color: 'text-blue-600' },
-                                ].map(s => (
-                                  <div key={s.label} className="bg-muted/50 rounded p-2">
-                                    <div className={`text-xl font-bold ${s.color}`}>{s.count}</div>
-                                    <div className="text-xs text-muted-foreground">{s.label}</div>
-                                  </div>
-                                ))}
-                              </div>
-                              {rightsizingResult.recommendations?.length > 0 ? (
-                                <ul className="space-y-2">
-                                  {rightsizingResult.recommendations.map((r: any, i: number) => (
-                                    <li key={i} className="flex gap-2 text-xs">
-                                      <span className={`shrink-0 font-semibold uppercase ${r.severity === 'critical' ? 'text-red-600' : r.severity === 'high' ? 'text-orange-600' : r.severity === 'medium' ? 'text-yellow-600' : 'text-blue-600'}`}>
-                                        {r.severity}
-                                      </span>
-                                      <span className="text-muted-foreground">{r.message} — <span className="text-foreground">{r.suggestion}</span></span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              ) : (
-                                <p className="text-xs text-emerald-600 flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5" /> No rightsizing issues found — resources look well-configured.</p>
-                              )}
-                            </CardContent>
-                          )}
-                        </Card>
-                      )}
-
-                      {/* Policy Compliance card */}
-                      {scanCompleted && (workflowType === 'manifest' || workflowType === 'helm-generator') && (
-                        <Card>
-                          <CardHeader className="pb-3">
-                            <div className="flex items-center justify-between">
-                              <CardTitle className="flex items-center gap-2 text-base">
-                                <Shield className="w-5 h-5 text-primary" />
-                                Policy Compliance (OPA / Kyverno)
-                              </CardTitle>
-                              <Button size="sm" variant="outline" disabled={isPolicyChecking} onClick={async () => {
-                                setIsPolicyChecking(true);
-                                try {
-                                  const res = await fetch(`/api/sessions/${sessionId}/policy-check`, { method: 'POST' });
-                                  const data = await res.json();
-                                  if (res.ok) setPolicyCheckResult(data);
-                                  else toast({ title: 'Policy check failed', description: data.error, variant: 'destructive' });
-                                } catch (err: any) {
-                                  toast({ title: 'Policy check failed', description: err.message, variant: 'destructive' });
-                                } finally {
-                                  setIsPolicyChecking(false);
-                                }
-                              }}>
-                                {isPolicyChecking ? <><Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> Checking…</> : policyCheckResult ? 'Re-check' : 'Run Check'}
-                              </Button>
-                            </div>
-                          </CardHeader>
-                          {policyCheckResult && (
-                            <CardContent>
-                              {policyCheckResult.totalViolations === 0 ? (
-                                <p className="text-xs text-emerald-600 flex items-center gap-1.5">
-                                  <CheckCircle2 className="w-3.5 h-3.5" /> All policy rules passed — no violations found.
-                                </p>
-                              ) : (
-                                <div className="space-y-3">
-                                  <p className="text-xs text-muted-foreground">
-                                    <span className="font-semibold text-orange-600">{policyCheckResult.totalViolations}</span> violation{policyCheckResult.totalViolations !== 1 ? 's' : ''} across {policyCheckResult.results?.length} rule{policyCheckResult.results?.length !== 1 ? 's' : ''}
-                                  </p>
-                                  {policyCheckResult.results?.map((r: any, i: number) => (
-                                    <div key={i} className="rounded-lg border p-3 space-y-1">
-                                      <div className="flex items-center gap-2">
-                                        <span className={`text-xs font-semibold uppercase px-1.5 py-0.5 rounded ${r.hint.severity === 'critical' ? 'bg-red-100 text-red-700' : r.hint.severity === 'high' ? 'bg-orange-100 text-orange-700' : r.hint.severity === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'}`}>
-                                          {r.hint.severity}
-                                        </span>
-                                        <span className="text-xs font-semibold">{r.hint.title}</span>
-                                        <span className="ml-auto text-xs text-muted-foreground font-mono">{r.hint.engine}</span>
-                                      </div>
-                                      <p className="text-xs text-muted-foreground">{r.hint.remediation}</p>
-                                      {r.violations.map((v: any, j: number) => (
-                                        <p key={j} className="text-xs text-rose-700 font-mono pl-2">↳ {v.resource}: {v.reason}</p>
-                                      ))}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </CardContent>
-                          )}
-                        </Card>
-                      )}
-
+                      {/* Build status sentence — matches Terraform Overview pattern */}
+                      <p className="text-xs text-muted-foreground">
+                        {buildAutoRun || pipelineRunning
+                          ? 'Build pipeline is running. Stay in Build Pipeline tab for live stage status.'
+                          : buildId
+                            ? `Build ${buildId} completed successfully. You can proceed to commit.`
+                            : scanCompleted
+                              ? 'Build stage completed. Proceed to commit when ready.'
+                              : 'Run Build Pipeline to validate architecture, best-practice, and security gates.'}
+                      </p>
                     </div>
                   )}
 
@@ -1491,11 +1173,12 @@ export default function KubernetesWorkflow() {
                         pipelineLayout="sidebar"
                         autoRun={buildAutoRun}
                         onRequestRunPipeline={() => {
-                          setBuildAutoRun(false); // sidebar manages its own run
+                          setBuildAutoRun(false);
                           setPipelineRunning(true);
                           setCompletedPipelineStages([]);
                         }}
                         onDiagramResult={(result) => { setBuildDiagramResult(result); }}
+                        onViewBuildSummary={() => setActivityViewMode('overview')}
                         onScanResult={(result) => { setBuildScanResult(result); }}
                         onScanComplete={() => {
                           // Files may have been updated by security fixes; refresh but don't unlock commit yet
@@ -1504,7 +1187,10 @@ export default function KubernetesWorkflow() {
                         }}
                         onFixesApproved={() => {
                           queryClient.invalidateQueries({ queryKey: ['/api/sessions', sessionId, 'files'] });
-                          toast({ title: 'Fixes Applied', description: 'Security fixes applied. Files updated.' });
+                          toast({
+                            title: 'Changes approved',
+                            description: 'Manifests were updated when you ran Fix. Refreshing files — continuing to Security scan.',
+                          });
                         }}
                         onPipelineStageComplete={(stage) => {
                           setCompletedPipelineStages(prev => [...prev, stage]);
@@ -1513,10 +1199,8 @@ export default function KubernetesWorkflow() {
                           setBuildAutoRun(false);
                           setPipelineRunning(false);
                           setScanCompleted(true);
-                          const now = new Date();
-                          const pad = (n: number) => String(n).padStart(2, '0');
-                          const id = `BUILD-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-                          setBuildId(id);
+                          setCompletedPipelineStages(['diagram', 'validate', 'security']);
+                          const id = generateBuildId('kubernetes');
                           try {
                             const [ssRes, rsRes, pcRes] = await Promise.all([
                               fetch(`/api/sessions/${sessionId}/security-score`, { method: 'POST' }),
@@ -1528,8 +1212,18 @@ export default function KubernetesWorkflow() {
                             if (rs.result) setRightsizingResult(rs.result);
                             if (pc.success) setPolicyCheckResult(pc);
                           } catch (_) { /* non-fatal */ }
+                          await saveBuildHistory({
+                            sessionId: sessionId!,
+                            module: workflowType === 'helm-generator' ? 'helm' : 'kubernetes',
+                            buildId: id,
+                            pipelineStages: ['diagram', 'validate', 'security'],
+                            filesGenerated: generatedFiles?.length || 0,
+                            repositoryName: selectedRepo || undefined,
+                          });
+                          setBuildId(id);
+                          // Auto-navigate to overview so build complete status is visible
+                          setActivityViewMode('overview');
                           toast({ title: 'Build Complete', description: `${id} — ready to commit.` });
-                          setActivityViewMode('report');
                         }}
                       />
                     </div>
@@ -1690,10 +1384,11 @@ export default function KubernetesWorkflow() {
                       </div>
                     )}
                     <div className="flex gap-3 justify-center">
-                      <Button variant="outline" onClick={() => setCurrentStep(3)}>← Back</Button>
+                      <Button variant="outline" onClick={() => setCurrentStep(3)} data-testid="k8s-btn-back">← Back</Button>
                       <Button
                         disabled={!scanCompleted}
                         title={!scanCompleted ? 'Run the Build pipeline first to continue' : undefined}
+                        data-testid="k8s-btn-continue-to-commit"
                         onClick={() => {
                           setCurrentStep(6);
                           apiRequest('PATCH', `/api/sessions/${sessionId}`, { currentStep: '6' });
@@ -1743,6 +1438,7 @@ export default function KubernetesWorkflow() {
                             type="file"
                             accept=".tgz,.tar.gz"
                             onChange={(e) => setHelmFile(e.target.files?.[0] || null)}
+                            data-testid="k8s-input-helm-upload"
                           />
                           {helmFile && (
                             <p className="text-xs text-green-600">Selected: {helmFile.name}</p>
@@ -1784,6 +1480,7 @@ export default function KubernetesWorkflow() {
                           }}
                           disabled={!helmFile || isValidating}
                           className="w-full"
+                          data-testid="k8s-btn-upload-validate"
                         >
                           {isValidating ? (
                             <>
@@ -1824,6 +1521,7 @@ export default function KubernetesWorkflow() {
                       setCurrentStep(2);
                       setSelectedRepo('');
                     }}
+                    data-testid="k8s-btn-back"
                   >
                     ← Back
                   </Button>
@@ -1854,6 +1552,7 @@ export default function KubernetesWorkflow() {
                       placeholder="e.g., ./overlays/production"
                       value={kustomizePath}
                       onChange={(e) => setKustomizePath(e.target.value)}
+                      data-testid="k8s-input-kustomize-path"
                     />
                     <Button
                       className="w-full"
@@ -1893,7 +1592,7 @@ export default function KubernetesWorkflow() {
                   </CardContent>
                 </Card>
                 <div className="flex gap-4 justify-center">
-                  <Button variant="outline" onClick={() => setCurrentStep(2)}>← Back</Button>
+                  <Button variant="outline" onClick={() => setCurrentStep(2)} data-testid="k8s-btn-back">← Back</Button>
                 </div>
               </div>
             )}
@@ -1916,8 +1615,8 @@ export default function KubernetesWorkflow() {
                       <span className="font-medium">{selectedRepo || 'Not selected'}</span>
                     </div>
                     <div className="flex gap-3">
-                      <Button variant="outline" onClick={() => setCurrentStep(2)}>← Back</Button>
-                      <Button onClick={validateSelectedRepositoryForHelm} disabled={!selectedRepo || !provider}>
+                      <Button variant="outline" onClick={() => setCurrentStep(2)} data-testid="k8s-btn-back-helm-repo">← Back</Button>
+                      <Button onClick={validateSelectedRepositoryForHelm} disabled={!selectedRepo || !provider} data-testid="k8s-btn-validate-repo">
                         Validate Repository
                       </Button>
                     </div>
@@ -1953,6 +1652,25 @@ export default function KubernetesWorkflow() {
 
                 {/* Empty / new repo */}
                 {helmScanState === 'empty' && renderHelmDescribeForm(() => setCurrentStep(2), true)}
+
+                {/* Repo has files but no application code detected */}
+                {helmScanState === 'no-app-code' && (
+                  <Card className="p-6 space-y-4">
+                    <Alert variant="destructive">
+                      <XCircle className="w-4 h-4" />
+                      <AlertTitle>No Application Detected</AlertTitle>
+                      <AlertDescription>
+                        The repository contains files but no recognisable application code was found
+                        (e.g. package.json, Dockerfile, requirements.txt, go.mod, pom.xml).
+                        Helm chart generation requires an application codebase to analyse.
+                      </AlertDescription>
+                    </Alert>
+                    <div className="flex gap-3">
+                      <Button variant="outline" onClick={() => setCurrentStep(2)}>← Select Another Repo</Button>
+                      <Button variant="secondary" onClick={validateSelectedRepositoryForHelm}>Retry</Button>
+                    </div>
+                  </Card>
+                )}
 
                 {/* Existing repo: show analysis + editable description */}
                 {helmScanState === 'done' && repoAnalysis && (
@@ -1995,6 +1713,7 @@ export default function KubernetesWorkflow() {
                         value={workloadDescription}
                         onChange={(e) => { setWorkloadDescription(e.target.value); setHelmAppContext(e.target.value); }}
                         className="h-28 font-mono text-sm"
+                        data-testid="k8s-input-description"
                       />
                     </div>
 
@@ -2030,10 +1749,11 @@ export default function KubernetesWorkflow() {
                     </div>
 
                     <div className="flex gap-3">
-                      <Button variant="outline" onClick={() => setCurrentStep(2)}>← Back</Button>
+                      <Button variant="outline" onClick={() => setCurrentStep(2)} data-testid="k8s-btn-back">← Back</Button>
                       <Button
                         onClick={() => { setCurrentStep(4); generateHelmChartMutation.mutate(workloadDescription); }}
                         disabled={!workloadDescription.trim() || generateHelmChartMutation.isPending}
+                        data-testid="k8s-btn-generate"
                       >
                         <Package2 className="w-4 h-4 mr-2" />Generate Helm Chart
                       </Button>
@@ -2045,7 +1765,7 @@ export default function KubernetesWorkflow() {
 
             {/* Step 4: Helm Generator — Generation spinner */}
             {currentStep === 4 && workflowType === 'helm-generator' && (
-              <Card className="rounded-3xl border-dashed border-border/40 bg-white/80 p-10 text-center shadow-lg">
+              <Card className="rounded-2xl border-dashed border-border/40 bg-white/80 p-10 text-center shadow-lg">
                 <div className="flex flex-col items-center gap-4">
                   <Loader2 className="w-10 h-10 animate-spin text-primary" />
                   <p className="text-xl font-semibold text-slate-900">Generating Helm Chart...</p>
@@ -2180,6 +1900,7 @@ export default function KubernetesWorkflow() {
                             value={commitMessage}
                             onChange={(e) => setCommitMessage(e.target.value)}
                             rows={3}
+                            data-testid="k8s-input-commit-message"
                           />
                         </div>
                       </CardContent>
@@ -2190,6 +1911,7 @@ export default function KubernetesWorkflow() {
                       <Button
                         variant="outline"
                         onClick={() => setCurrentStep(5)}
+                        data-testid="k8s-btn-back"
                       >
                         ← Back
                       </Button>
@@ -2197,6 +1919,7 @@ export default function KubernetesWorkflow() {
                         onClick={() => commitMutation.mutate()}
                         disabled={commitMutation.isPending || generatedFiles.length === 0}
                         className="flex-1"
+                        data-testid="k8s-btn-commit"
                       >
                         {commitMutation.isPending ? (
                           <>

@@ -1,20 +1,20 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Shield, DollarSign, Wrench, Loader2, Network, PlayCircle, CheckCircle2, Activity, ChevronRight } from "lucide-react";
+import { Shield, DollarSign, Wrench, Loader2, Network, PlayCircle, CheckCircle2, Activity, ChevronRight, RefreshCw } from "lucide-react";
 import CheckovScanner, { CheckovScannerRef } from "./CheckovScanner";
 import CostAnalyzer, { CostAnalyzerRef } from "./CostAnalyzer";
 import KubernetesCostEstimator, { KubernetesCostEstimatorRef } from "./KubernetesCostEstimator";
 import RefactorValidator, { RefactorValidatorRef } from "./RefactorValidator";
 import ArchitectureDiagram, { ArchitectureDiagramRef } from "./ArchitectureDiagram";
 import KubernetesValidator, { KubernetesValidatorRef } from "./KubernetesValidator";
-import KubernetesBestPractices, { KubernetesBestPracticesRef } from "./KubernetesBestPractices";
 import DockerBestPractices, { DockerBestPracticesRef } from "./DockerBestPractices";
+import MigrateSyncValidator from "./MigrateSyncValidator";
 
-interface ActivityPanelProps {
+export interface ActivityPanelProps {
   sessionId: string;
   onScanComplete?: (result?: any) => void;
   onFixesApproved?: () => void;
-  workflowType?: 'terraform' | 'kubernetes' | 'docker' | 'archme';
+  workflowType?: 'terraform' | 'kubernetes' | 'docker' | 'archme' | 'migrateops' | 'automation' | 'scoreme';
   moduleApproach?: 'child-module' | 'standalone-root' | 'aggregated-root' | null;
   checkovFramework?: 'terraform' | 'kubernetes' | 'docker';
   /** When true, automatically runs all pipeline stages in sequence on mount */
@@ -31,6 +31,14 @@ interface ActivityPanelProps {
   onDiagramResult?: (result: any) => void;
   /** Called with raw scan result when security stage completes (in addition to onScanComplete) */
   onScanResult?: (result: any) => void;
+  /** Called with raw cost result when cost stage completes */
+  onCostResult?: (result: any) => void;
+  /** Called when user clicks "View Build Summary" after all stages complete (replaces auto-navigate) */
+  onViewBuildSummary?: () => void;
+  /** After applying a cost rightsizing suggestion to session .tf files (Terraform / MigrateOps cost stage) */
+  onTerraformFilesChanged?: () => void;
+  onUpdateFiles?: (newFiles: any) => void;
+  generatedFiles?: any[];
 }
 
 const STAGE_INFO: Record<string, { label: string; icon: React.ComponentType<any> }> = {
@@ -39,12 +47,13 @@ const STAGE_INFO: Record<string, { label: string; icon: React.ComponentType<any>
   cost:     { label: 'Cost Analysis',    icon: DollarSign },
   diagram:  { label: 'Architecture',     icon: Network },
   refactor: { label: 'Best Approach',    icon: Wrench },
+  sync:     { label: 'Sync',             icon: RefreshCw },
 };
 
-type Activity = 'security' | 'cost' | 'refactor' | 'diagram' | 'validate';
+type Activity = 'security' | 'cost' | 'refactor' | 'diagram' | 'validate' | 'sync';
 type RunningActivity = Activity | null;
 
-export default function ActivityPanel({ sessionId, onScanComplete, onFixesApproved, workflowType = 'terraform', moduleApproach = null, checkovFramework, autoRun = false, onPipelineStageComplete, onPipelineComplete, pipelineLayout = 'default', onRequestRunPipeline, onDiagramResult, onScanResult }: ActivityPanelProps) {
+export default function ActivityPanel({ sessionId, onScanComplete, onFixesApproved, workflowType = 'terraform', moduleApproach = null, checkovFramework, autoRun = false, onPipelineStageComplete, onPipelineComplete, pipelineLayout = 'default', onRequestRunPipeline, onDiagramResult, onScanResult, onCostResult, onViewBuildSummary, onTerraformFilesChanged }: ActivityPanelProps) {
   const [runningActivity, setRunningActivity] = useState<RunningActivity>(null);
   const [activeView, setActiveView] = useState<RunningActivity>(null);
   // Track which activities have completed at least once - don't re-trigger on view switch
@@ -54,6 +63,8 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
   const pipelineQueueRef = useRef<Activity[]>([]);
   const pipelineActiveRef = useRef(false);
   const pipelineStartedRef = useRef(false);
+  /** K8s sidebar: after Best Practices fix+approve, auto-advance to Security instead of pausing again */
+  const skipNextSidebarPauseRef = useRef(false);
   const [internalPipelineRunning, setInternalPipelineRunning] = useState(false);
   // Sidebar approval state: next stage waiting for user approval, or 'done' when all finished
   const [pendingNextStage, setPendingNextStage] = useState<Activity | null>(null);
@@ -65,33 +76,41 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
   const [shouldTriggerRefactor, setShouldTriggerRefactor] = useState(false);
   const [shouldTriggerDiagram, setShouldTriggerDiagram] = useState(false);
   const [shouldTriggerValidate, setShouldTriggerValidate] = useState(false);
+  const [syncRunSignal, setSyncRunSignal] = useState(0);
   const [isFixing, setIsFixing] = useState(false);
+  // Security scan completed with failures — user must fix/approve before pipeline advances
+  const [securityPendingCompletion, setSecurityPendingCompletion] = useState(false);
+  // Track how many security scans have completed (max 2: initial + 1 re-scan after fix)
+  const securityScanCountRef = useRef(0);
+  // Active fix operation: 'refactor' | 'security' | null — shows the terminal during fix
+  const [fixingActivity, setFixingActivity] = useState<Activity | null>(null);
   const checkovRef = useRef<CheckovScannerRef>(null);
   const costRef = useRef<CostAnalyzerRef>(null);
   const k8sCostRef = useRef<KubernetesCostEstimatorRef>(null);
   const refactorRef = useRef<RefactorValidatorRef>(null);
   const diagramRef = useRef<ArchitectureDiagramRef>(null);
   const kubernetesValidatorRef = useRef<KubernetesValidatorRef>(null);
-  const kubernetesBestPracticesRef = useRef<KubernetesBestPracticesRef>(null);
   const dockerBestPracticesRef = useRef<DockerBestPracticesRef>(null);
 
   // ── Terminal log lines per stage ─────────────────────────────────────────
+  const isTerraform = workflowType === 'terraform' || workflowType === 'migrateops';
+  const isDocker = workflowType === 'docker';
   const STAGE_LOGS: Record<string, string[]> = {
     diagram: [
       '$ Generating architecture diagram...',
-      '  → Parsing Kubernetes manifests',
+      isTerraform ? '  → Parsing Terraform resource graph' : isDocker ? '  → Parsing Docker Compose services' : '  → Parsing Kubernetes manifests',
       '  → Detecting resource kinds',
       '  → Mapping service relationships',
-      '  → Resolving ingress routes',
+      isTerraform ? '  → Resolving module dependencies' : '  → Resolving ingress routes',
       '  → Building node graph',
       '  → Laying out diagram',
       '  → Rendering architecture...',
     ],
     validate: [
-      '$ Analysing Kubernetes manifests...',
+      isTerraform ? '$ Analysing Terraform configuration...' : isDocker ? '$ Analysing Dockerfile...' : '$ Analysing Kubernetes manifests...',
       '  → Loading YAML files',
       '  → Running schema validation',
-      '  → Checking apiVersion compatibility',
+      isTerraform ? '  → Checking provider version constraints' : '  → Checking apiVersion compatibility',
       '  → Evaluating resource configurations',
       '  → Analysing best practices',
       '  → Checking security context',
@@ -99,11 +118,11 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     ],
     security: [
       '$ Initialising security scanner...',
-      '  → Loading Kubernetes resources',
-      '  → Checking privilege escalation rules',
-      '  → Scanning container security contexts',
-      '  → Validating RBAC policies',
-      '  → Checking host namespace isolation',
+      isTerraform ? '  → Loading Terraform state files' : isDocker ? '  → Loading Dockerfile layers' : '  → Loading Kubernetes resources',
+      isTerraform ? '  → Running Checkov policy checks' : '  → Checking privilege escalation rules',
+      isTerraform ? '  → Scanning IAM and network rules' : '  → Scanning container security contexts',
+      isTerraform ? '  → Validating encryption settings' : '  → Validating RBAC policies',
+      isTerraform ? '  → Checking public exposure rules' : '  → Checking host namespace isolation',
       '  → Analysing image policies',
       '  → Evaluating resource limits',
     ],
@@ -115,27 +134,75 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     ],
     cost: [
       '$ Parsing resource specifications...',
-      '  → Reading CPU/memory requests',
+      isTerraform ? '  → Reading Terraform resource definitions' : '  → Reading CPU/memory requests',
       '  → Fetching cloud pricing data',
-      '  → Calculating container costs',
+      isTerraform ? '  → Calculating infrastructure costs' : '  → Calculating container costs',
+    ],
+    sync: [
+      '$ Running strict sync validation...',
+      '  → Reading Terraform resource blocks',
+      '  → Reading import mapping',
+      '  → Comparing imported Azure IDs',
+      '  → Evaluating drift risk',
+      '  → Finalizing sync report',
     ],
   };
 
-  // Drive terminal log lines while a stage is running
+  // ── Terminal log lines while a FIX is running ────────────────────────────
+  const STAGE_FIX_LOGS: Record<string, string[]> = {
+    refactor: [
+      '$ Applying best-approach fixes...',
+      '  → Reading Terraform source files',
+      '  → Extracting hardcoded values into variables',
+      '  → Updating variable declarations',
+      '  → Applying resource naming conventions',
+      '  → Fixing missing tfvars entries',
+      '  → Re-validating patched files',
+      '  ✓ Fixes written — re-scanning...',
+    ],
+    security: [
+      '$ Applying security remediations...',
+      '  → Loading selected failed checks',
+      '  → Analysing fix strategies',
+      '  → Patching resource configurations',
+      '  → Disabling privilege escalation',
+      '  → Enforcing read-only root filesystem',
+      '  → Dropping unnecessary capabilities',
+      '  → Writing patched files',
+      '  ✓ Patches applied — reviewing diffs...',
+    ],
+    validate: [
+      '$ Applying best-practice fixes...',
+      '  → Loading Kubernetes manifests',
+      '  → Analysing resource configurations',
+      '  → Adding security contexts',
+      '  → Setting resource limits',
+      '  → Configuring health probes',
+      '  → Writing patched files',
+      '  ✓ Fixes written — re-validating...',
+    ],
+  };
+
+  // Drive terminal log lines while a stage is running OR a fix is in progress
   useEffect(() => {
-    // Clear any pending timers
     terminalTimersRef.current.forEach(t => clearTimeout(t));
     terminalTimersRef.current = [];
 
-    if (!runningActivity || pipelineLayout !== 'sidebar') return;
+    if (pipelineLayout !== 'sidebar') return;
 
-    const lines = STAGE_LOGS[runningActivity] ?? [`$ Running ${runningActivity}...`];
+    const activeForTerminal = runningActivity ?? fixingActivity;
+    if (!activeForTerminal) return;
+
+    const lines = fixingActivity
+      ? (STAGE_FIX_LOGS[fixingActivity] ?? [`$ Applying fixes for ${fixingActivity}...`])
+      : (STAGE_LOGS[activeForTerminal] ?? [`$ Running ${activeForTerminal}...`]);
+
     setTerminalLines([]);
 
     lines.forEach((line, i) => {
       const t = setTimeout(() => {
         setTerminalLines(prev => [...prev, line]);
-      }, i * 600);
+      }, i * 550);
       terminalTimersRef.current.push(t);
     });
 
@@ -144,7 +211,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
       terminalTimersRef.current = [];
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runningActivity, pipelineLayout]);
+  }, [runningActivity, fixingActivity, pipelineLayout]);
 
   // Trigger effects - fire action when component is ready
   useEffect(() => {
@@ -248,18 +315,38 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     setShouldTriggerValidate(true);
   };
 
+  const handleSyncValidate = () => {
+    if (completedActivities.has('sync')) {
+      setActiveView('sync');
+      return;
+    }
+    setRunningActivity('sync');
+    setActiveView('sync');
+    setSyncRunSignal((prev) => prev + 1);
+  };
+
   const handleActivityComplete = (activity: Activity) => {
     setRunningActivity(null);
     markCompleted(activity);
+
     if (pipelineActiveRef.current) {
+      // Running via "Run Pipeline" — orchestrated mode
       const allStages = getPipelineStages();
       const stageIndex = allStages.indexOf(activity);
       onPipelineStageComplete?.(activity, stageIndex, allStages.length);
       if (pipelineQueueRef.current.length > 0) {
         if (pipelineLayout === 'sidebar') {
-          // Pause: show Continue button; user must approve before next stage
-          setPendingNextStage(pipelineQueueRef.current[0]);
-          setInternalPipelineRunning(false);
+          const next = pipelineQueueRef.current[0];
+          if (skipNextSidebarPauseRef.current) {
+            skipNextSidebarPauseRef.current = false;
+            pipelineQueueRef.current.shift();
+            setPendingNextStage(null);
+            setInternalPipelineRunning(true);
+            setTimeout(() => triggerActivity(next), 300);
+          } else {
+            setPendingNextStage(next);
+            setInternalPipelineRunning(false);
+          }
         } else {
           const next = pipelineQueueRef.current.shift()!;
           setTimeout(() => triggerActivity(next), 300);
@@ -267,12 +354,29 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
       } else {
         pipelineActiveRef.current = false;
         setInternalPipelineRunning(false);
-        if (pipelineLayout === 'sidebar') {
-          // Pause: show Finish Build button; user must approve to complete
+        const autoCompleteSidebar = workflowType === 'migrateops';
+        if (pipelineLayout === 'sidebar' && !autoCompleteSidebar) {
           setBuildFinishPending(true);
+          // Sidebar (non-MigrateOps): let user review final results before completing.
+          // onPipelineComplete fires when user clicks "Complete Build".
         } else {
           onPipelineComplete?.();
         }
+      }
+    } else {
+      // Manual mode: user clicked individual stage buttons.
+      // Check if ALL pipeline stages are now complete — if so, auto-save build history.
+      const allStages = getPipelineStages();
+      // Use updated set: current completedActivities + this activity
+      const updatedCompleted = new Set(completedActivities);
+      updatedCompleted.add(activity);
+      if (allStages.length > 0 && allStages.every(s => updatedCompleted.has(s))) {
+        // All stages done — show "Complete Build" button
+        setBuildFinishPending(true);
+        if (pipelineLayout !== 'sidebar') {
+          onPipelineComplete?.();
+        }
+        // For sidebar: deferred to "Complete Build" button click
       }
     }
   };
@@ -288,17 +392,14 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     setTimeout(() => triggerActivity(next), 150);
   };
 
-  // Called when user clicks "Finish Build" after last stage
-  const finishBuild = () => {
-    setBuildFinishPending(false);
-    onPipelineComplete?.();
-  };
-
   const getPipelineStages = (): Activity[] => {
     if (workflowType === 'kubernetes') return ['diagram', 'validate', 'security'];
     if (workflowType === 'docker') return ['refactor', 'security'];
-    if (moduleApproach === 'aggregated-root') return ['cost', 'diagram'];
-    return ['refactor', 'diagram', 'cost', 'security'];
+    if (workflowType === 'archme') return ['security', 'cost'];
+    if (workflowType === 'migrateops') return ['diagram', 'sync'];
+    // Terraform (all module approaches): architecture → best approach → security → cost
+    if (workflowType === 'terraform') return ['diagram', 'refactor', 'security', 'cost'];
+    return ['diagram', 'refactor', 'security', 'cost'];
   };
 
   const triggerActivity = (activity: Activity) => {
@@ -309,6 +410,7 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     else if (activity === 'refactor') setShouldTriggerRefactor(true);
     else if (activity === 'diagram') setShouldTriggerDiagram(true);
     else if (activity === 'validate') setShouldTriggerValidate(true);
+    else if (activity === 'sync') setSyncRunSignal((prev) => prev + 1);
   };
 
   // Trigger pipeline programmatically (used by sidebar "Run Pipeline" button)
@@ -321,6 +423,9 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     setInternalPipelineRunning(true);
     setPendingNextStage(null);
     setBuildFinishPending(false);
+    setSecurityPendingCompletion(false);
+    securityScanCountRef.current = 0;
+    skipNextSidebarPauseRef.current = false;
     setCompletedActivities(new Set());
     triggerActivity(stages[0]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -340,6 +445,8 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     setInternalPipelineRunning(true);
     setPendingNextStage(null);
     setBuildFinishPending(false);
+    securityScanCountRef.current = 0;
+    skipNextSidebarPauseRef.current = false;
     setCompletedActivities(new Set()); // reset so stages re-run
     triggerActivity(stages[0]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -351,53 +458,109 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
   const isRefactorRunning = runningActivity === 'refactor';
   const isDiagramRunning = runningActivity === 'diagram';
   const isValidateRunning = runningActivity === 'validate';
+  const isSyncRunning = runningActivity === 'sync';
   const getActivityButtonClassName = (_activity: Activity) => "flex-1";
+
+  // Check if all prior pipeline stages are completed before allowing a stage
+  const isStageLocked = (stage: Activity): boolean => {
+    const stages = getPipelineStages();
+    const idx = stages.indexOf(stage);
+    if (idx <= 0) return false; // first stage is never locked
+    return !stages.slice(0, idx).every(s => completedActivities.has(s));
+  };
 
   // ── Shared content panes (hidden/visible via display:none to preserve state) ──
   const contentPanes = (
     <>
-      {/* Security Scan */}
-      {!(workflowType === 'terraform' && moduleApproach === 'aggregated-root') && (
-        <div style={{ display: activeView === 'security' ? undefined : 'none' }}>
-          <CheckovScanner
-            ref={checkovRef}
-            sessionId={sessionId}
-            framework={checkovFramework || (workflowType === 'kubernetes' ? 'kubernetes' : workflowType === 'docker' ? 'docker' : 'terraform')}
-            onScanComplete={(result) => {
-              if (result != null) {
-                onScanResult?.(result);
-                handleActivityComplete('security');
-              } else if (pipelineActiveRef.current) {
-                handleActivityComplete('security');
+      {/* Security Scan — rendered for all workflow types */}
+      <div style={{ display: activeView === 'security' ? undefined : 'none' }}>
+        <CheckovScanner
+          ref={checkovRef}
+          sessionId={sessionId}
+          showDiffView={true}
+          framework={checkovFramework || (workflowType === 'kubernetes' ? 'kubernetes' : workflowType === 'docker' ? 'docker' : 'terraform')}
+          moduleApproach={moduleApproach}
+          onScanComplete={(result) => {
+            setRunningActivity(null);
+            onScanResult?.(result);
+            onScanComplete?.(result);
+            if (result != null) {
+              securityScanCountRef.current += 1;
+              const hasFailed = (result?.summary?.failed ?? 0) > 0;
+              if (hasFailed && securityScanCountRef.current < 2) {
+                // First scan found issues — pause pipeline until user fixes/approves
+                setSecurityPendingCompletion(true);
+                setInternalPipelineRunning(false);
+                pipelineActiveRef.current = false;
               } else {
-                setRunningActivity(null);
+                // Clean scan OR 2nd scan reached — advance pipeline (auto-complete build)
+                handleActivityComplete('security');
               }
-              onScanComplete?.(result);
-            }}
-            onScanStart={() => { setRunningActivity('security'); setActiveView('security'); }}
-            onFixesApproved={() => { onFixesApproved?.(); }}
-          />
-        </div>
-      )}
+            } else {
+              // Null result (error / no files) — always advance to keep pipeline moving
+              handleActivityComplete('security');
+            }
+          }}
+          onScanStart={() => { setRunningActivity('security'); setActiveView('security'); }}
+          onFixStart={() => setFixingActivity('security')}
+          onFixComplete={() => setFixingActivity(null)}
+          onFixesApproved={() => {
+            // Fixes approved — re-scan will auto-run and call onScanComplete,
+            // which advances the pipeline when the re-scan passes.
+            // Just reset the pending state so the re-scan can run freely.
+            setSecurityPendingCompletion(false);
+            pipelineActiveRef.current = true;
+            onFixesApproved?.();
+          }}
+        />
+      </div>
 
       <div style={{ display: activeView === 'cost' ? undefined : 'none' }}>
         {workflowType === 'kubernetes' ? (
           <KubernetesCostEstimator ref={k8sCostRef} sessionId={sessionId} onComplete={() => handleActivityComplete('cost')} />
         ) : (
           <CostAnalyzer ref={costRef} sessionId={sessionId}
+            onCostComplete={(result) => onCostResult?.(result)}
             onAnalysisComplete={() => handleActivityComplete('cost')}
             onAnalysisStart={() => { setRunningActivity('cost'); setActiveView('cost'); }}
+            onTerraformFilesChanged={onTerraformFilesChanged}
           />
         )}
       </div>
 
-      {workflowType === 'terraform' && (
+      {(workflowType === 'terraform' || workflowType === 'migrateops') && (
         <div style={{ display: activeView === 'refactor' ? undefined : 'none' }}>
           <RefactorValidator ref={refactorRef} sessionId={sessionId}
-            onValidationComplete={() => handleActivityComplete('refactor')}
+            onValidationComplete={() => {
+              // Validation API returned — stop the spinner. Advancement is handled by onValidationResult.
+              setRunningActivity(null);
+            }}
+            onValidationResult={(hasIssues) => {
+              if (!hasIssues) {
+                // Clean validation — advance pipeline immediately
+                handleActivityComplete('refactor');
+              } else {
+                // Issues found — pause pipeline, let user fix + approve before advancing
+                // Do NOT call handleActivityComplete here. The pipeline waits.
+                if (pipelineActiveRef.current) {
+                  pipelineActiveRef.current = false;
+                  setInternalPipelineRunning(false);
+                }
+              }
+            }}
             onValidationStart={() => { setRunningActivity('refactor'); setActiveView('refactor'); }}
-            onFixStart={() => { setIsFixing(true); setRunningActivity(null); }}
-            onFixComplete={() => { setIsFixing(false); setRunningActivity(null); }}
+            onFixStart={() => { setIsFixing(true); setFixingActivity('refactor'); }}
+            onFixComplete={() => { setIsFixing(false); setFixingActivity(null); }}
+            onFixesApproved={() => {
+              // Files were approved — refresh the code editor
+              onFixesApproved?.();
+            }}
+            onFixCycleComplete={() => {
+              // User approved fixes + re-validation done — now advance the pipeline
+              pipelineActiveRef.current = true;
+              setInternalPipelineRunning(true);
+              handleActivityComplete('refactor');
+            }}
           />
         </div>
       )}
@@ -414,17 +577,85 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
       {workflowType === 'kubernetes' && (
         <div style={{ display: activeView === 'validate' ? undefined : 'none' }}>
           <KubernetesValidator ref={kubernetesValidatorRef} sessionId={sessionId}
-            onValidationComplete={() => handleActivityComplete('validate')}
+            onValidationComplete={() => {
+              // Validation API returned — stop spinner. Advancement handled by onValidationResult.
+              setRunningActivity(null);
+            }}
+            onValidationResult={(hasIssues) => {
+              if (!hasIssues) {
+                // Clean validation — advance pipeline immediately
+                handleActivityComplete('validate');
+              } else {
+                // Issues found — pause pipeline, let user fix + approve before advancing
+                if (pipelineActiveRef.current) {
+                  pipelineActiveRef.current = false;
+                  setInternalPipelineRunning(false);
+                }
+              }
+            }}
             onValidationStart={() => { setRunningActivity('validate'); setActiveView('validate'); }}
+            onFixStart={() => { setIsFixing(true); setFixingActivity('validate'); }}
+            onFixComplete={() => { setIsFixing(false); setFixingActivity(null); }}
+            onFixesApproved={() => {
+              onFixesApproved?.();
+            }}
+            onFixCycleComplete={() => {
+              // User approved fixes + re-validation done — resume pipeline
+              pipelineActiveRef.current = true;
+              setInternalPipelineRunning(true);
+              if (workflowType === 'kubernetes' && pipelineLayout === 'sidebar') {
+                skipNextSidebarPauseRef.current = true;
+              }
+              handleActivityComplete('validate');
+            }}
           />
         </div>
       )}
 
       {workflowType !== 'docker' && workflowType !== 'archme' && (
         <div style={{ display: activeView === 'diagram' ? undefined : 'none' }}>
-          <ArchitectureDiagram ref={diagramRef} sessionId={sessionId} useArchMeEndpoint={false} workflowType={workflowType}
+          <ArchitectureDiagram ref={diagramRef} sessionId={sessionId} useArchMeEndpoint={false} workflowType={(workflowType === 'migrateops' ? 'terraform' : workflowType) as 'terraform' | 'kubernetes'}
             onDiagramComplete={(result) => { if (result) onDiagramResult?.(result); handleActivityComplete('diagram'); }}
             onDiagramStart={() => { setRunningActivity('diagram'); setActiveView('diagram'); }}
+          />
+        </div>
+      )}
+
+      {workflowType === 'migrateops' && (
+        <div style={{ display: activeView === 'sync' ? undefined : 'none' }}>
+          <MigrateSyncValidator
+            sessionId={sessionId}
+            autoRunSignal={syncRunSignal}
+            onRunStateChange={(state, result) => {
+              if (state === 'running') {
+                setRunningActivity('sync');
+                setActiveView('sync');
+                return;
+              }
+              if (state === 'error') {
+                setRunningActivity(null);
+                if (pipelineActiveRef.current) {
+                  pipelineActiveRef.current = false;
+                  setInternalPipelineRunning(false);
+                }
+                return;
+              }
+              if (state === 'done') {
+                if (result?.summary?.status === 'in_sync') {
+                  handleActivityComplete('sync');
+                  return;
+                }
+                // Drift found: keep stage open for review and block pipeline completion.
+                setRunningActivity(null);
+                if (pipelineActiveRef.current) {
+                  pipelineActiveRef.current = false;
+                  setInternalPipelineRunning(false);
+                }
+              }
+            }}
+            onComplete={(result) => {
+              // keep callback for compatibility; stage advancement handled by onRunStateChange
+            }}
           />
         </div>
       )}
@@ -451,26 +682,42 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
               const isRunning = runningActivity === stage;
               const isActive = activeView === stage;
               const info = STAGE_INFO[stage] ?? { label: stage, icon: Activity };
+              // A stage is locked if any prior stage hasn't completed yet
+              const isLocked = idx > 0 && !stages.slice(0, idx).every(s => completedActivities.has(s));
               return (
                 <button
                   key={stage}
-                  onClick={() => setActiveView(stage)}
+                  onClick={() => { if (!isLocked) setActiveView(stage); }}
+                  disabled={isLocked}
                   className={`w-full flex items-center gap-2.5 px-4 py-2.5 text-left transition-colors ${
-                    isActive
-                      ? 'bg-zinc-800 text-white'
-                      : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                    isLocked
+                      ? 'opacity-40 cursor-not-allowed'
+                      : isActive
+                        ? 'bg-zinc-800 text-white'
+                        : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
                   }`}
+                  title={isLocked ? `Complete ${STAGE_INFO[stages[idx - 1]]?.label ?? stages[idx - 1]} first` : undefined}
                 >
                   <span className="flex-shrink-0 w-4 h-4 flex items-center justify-center">
                     {isRunning
                       ? <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                      : isCompleted
-                        ? <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                        : <span className="w-3.5 h-3.5 rounded-full border-2 border-zinc-600 block" />}
+                      : (securityPendingCompletion && stage === 'security')
+                        ? <span className="w-3.5 h-3.5 rounded-full border-2 border-amber-500 bg-amber-500/20 block" title="Issues found — fix before completing" />
+                        : isCompleted
+                          ? <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                          : isLocked
+                            ? <span className="w-3.5 h-3.5 rounded-full border-2 border-zinc-700 block" />
+                            : <span className="w-3.5 h-3.5 rounded-full border-2 border-zinc-600 block" />}
                   </span>
                   <span className="text-sm leading-tight">
                     <span className="text-zinc-600 mr-1">{idx + 1}.</span>
-                    <span className={isRunning ? 'text-blue-300' : isCompleted ? 'text-zinc-100' : ''}>{info.label}</span>
+                    <span className={
+                      isRunning ? 'text-blue-300'
+                      : (securityPendingCompletion && stage === 'security') ? 'text-amber-400'
+                      : isCompleted ? 'text-zinc-100'
+                      : isLocked ? 'text-zinc-600'
+                      : ''
+                    }>{info.label}</span>
                   </span>
                 </button>
               );
@@ -484,6 +731,24 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400 flex-shrink-0" />
                 <span>Running…</span>
               </div>
+            ) : securityPendingCompletion ? (
+              <Button
+                size="sm"
+                data-testid="btn-complete-build"
+                className="w-full gap-1.5 text-xs"
+                onClick={() => {
+                  // Security is the last pipeline stage — mark done and show
+                  // the "Complete Build" footer so user can review final state.
+                  setSecurityPendingCompletion(false);
+                  pipelineActiveRef.current = false;
+                  setInternalPipelineRunning(false);
+                  setBuildFinishPending(true);
+                  markCompleted('security');
+                  setRunningActivity(null);
+                }}
+              >
+                Complete Build <ChevronRight className="w-3.5 h-3.5" />
+              </Button>
             ) : pendingNextStage ? (
               <div className="text-xs text-zinc-500 py-1.5 px-1 text-center">Review results →</div>
             ) : buildFinishPending ? (
@@ -514,21 +779,32 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
               <div className="text-center space-y-3">
                 <Activity className="w-12 h-12 mx-auto text-zinc-700" />
                 <p className="text-sm font-medium text-zinc-400">Click a stage or Run Pipeline to start</p>
-                <p className="text-xs text-zinc-600">Architecture → Best Practices → Security</p>
+                <p className="text-xs text-zinc-600">
+                  {workflowType === 'migrateops'
+                    ? 'Architecture → Sync'
+                    : workflowType === 'terraform'
+                      ? 'Architecture → Best Approach → Security → Cost'
+                      : 'Architecture → Best Practices → Security'}
+                </p>
               </div>
             </div>
           )}
 
-          {/* Terminal console — shown while a stage is actively running */}
-          {runningActivity && (
+          {/* Terminal console — shown while a stage is running OR a fix is in progress */}
+          {(runningActivity || fixingActivity) && (
             <div className="flex-1 p-5 overflow-auto font-mono text-sm">
               <div className="mb-3 flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-red-500" />
                 <span className="w-2.5 h-2.5 rounded-full bg-yellow-500" />
                 <span className="w-2.5 h-2.5 rounded-full bg-green-500" />
                 <span className="ml-2 text-xs text-zinc-500 uppercase tracking-widest">
-                  {STAGE_INFO[runningActivity]?.label ?? runningActivity}
+                  {fixingActivity
+                    ? `${STAGE_INFO[fixingActivity]?.label ?? fixingActivity} — Fixing`
+                    : (STAGE_INFO[runningActivity!]?.label ?? runningActivity)}
                 </span>
+                {fixingActivity && (
+                  <span className="ml-auto text-[10px] text-amber-400 uppercase tracking-widest animate-pulse">applying fixes</span>
+                )}
               </div>
               <div className="space-y-1">
                 {terminalLines.map((line, i) => (
@@ -552,13 +828,23 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             </div>
           )}
 
-          {/* Stage results — shown after stage completes; always mounted so refs work */}
+          {/* Stage results — shown after stage completes AND no fix is running */}
           <div
-            style={{ display: (!runningActivity && activeView) ? undefined : 'none' }}
+            style={{ display: (!runningActivity && !fixingActivity && activeView) ? undefined : 'none' }}
             className="flex-1 bg-background overflow-auto p-5"
           >
             {contentPanes}
           </div>
+
+          {/* Security issues banner — shown when scan found failures and awaiting user action */}
+          {securityPendingCompletion && !fixingActivity && (
+            <div className="flex-shrink-0 border-t border-amber-800 bg-amber-950/60 px-5 py-3 flex items-center gap-3">
+              <Shield className="w-4 h-4 text-amber-400 flex-shrink-0" />
+              <span className="text-sm text-amber-300">
+                Security issues found — select checks above, apply fixes, then click <strong className="text-amber-200">Complete Build</strong> in the left panel.
+              </span>
+            </div>
+          )}
 
           {/* Stage approval footer — shown after each stage completes */}
           {pendingNextStage && (
@@ -574,15 +860,18 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             </div>
           )}
 
-          {/* Finish Build footer — shown after last stage completes */}
+          {/* Build complete footer — shown after all stages finish */}
           {buildFinishPending && (
             <div className="flex-shrink-0 border-t border-emerald-800 bg-emerald-950/60 px-5 py-3 flex items-center justify-between gap-4">
-              <span className="text-sm text-emerald-400 flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-                All pipeline stages complete — review then finish
-              </span>
-              <Button size="sm" className="gap-2 flex-shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white" onClick={finishBuild}>
-                <CheckCircle2 className="w-4 h-4" /> Finish Build
+              <div className="flex items-center gap-3">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                <span className="text-sm text-emerald-400">All pipeline stages complete</span>
+              </div>
+              <Button size="sm" className="gap-2 flex-shrink-0" onClick={() => {
+                onPipelineComplete?.();
+                onViewBuildSummary?.();
+              }} data-testid="button-view-build-summary">
+                Complete Build <ChevronRight className="w-4 h-4" />
               </Button>
             </div>
           )}
@@ -596,14 +885,15 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
     <div className="w-full space-y-6" role="region" aria-label="Activity panel">
       {/* Horizontal Button Bar */}
       <div className="flex flex-wrap gap-3 mb-6" role="toolbar" aria-label="Activity actions">
-        {/* Best Approach - Terraform (not aggregated-root) and Docker */}
-        {((workflowType === 'terraform' && moduleApproach !== 'aggregated-root') || workflowType === 'docker') && !isFixing && (
+        {/* Best Approach - shown when refactor stage is in the pipeline */}
+        {getPipelineStages().includes('refactor') && !isFixing && (
           <Button
             onClick={handleRefactorValidate}
-            disabled={isAnyRunning}
+            disabled={isAnyRunning || isStageLocked('refactor')}
             variant={activeView === 'refactor' ? 'default' : 'outline'}
             className={getActivityButtonClassName('refactor')}
             data-testid="button-refactor-validate"
+            title={isStageLocked('refactor') ? 'Complete prior stages first' : undefined}
           >
             {isRefactorRunning ? (
               <>
@@ -622,10 +912,11 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
         {workflowType !== 'docker' && workflowType !== 'archme' && !isFixing && (
           <Button
             onClick={handleDiagramGenerate}
-            disabled={isAnyRunning}
+            disabled={isAnyRunning || isStageLocked('diagram')}
             variant={activeView === 'diagram' ? 'default' : 'outline'}
             className={getActivityButtonClassName('diagram')}
             data-testid="button-draw"
+            title={isStageLocked('diagram') ? 'Complete prior stages first' : undefined}
           >
             {isDiagramRunning ? (
               <>
@@ -642,13 +933,14 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
         )}
 
         {/* Cost Analysis - Terraform, Kubernetes, and ArchMe */}
-        {(workflowType === 'terraform' || workflowType === 'kubernetes' || (workflowType === 'archme' && checkovFramework !== 'kubernetes')) && !isFixing && (
+        {(workflowType === 'terraform' || workflowType === 'kubernetes' || workflowType === 'archme') && !isFixing && (
           <Button
             onClick={handleCostAnalysis}
-            disabled={isAnyRunning}
+            disabled={isAnyRunning || isStageLocked('cost')}
             variant={activeView === 'cost' ? 'default' : 'outline'}
             className={getActivityButtonClassName('cost')}
             data-testid="button-cost-analysis"
+            title={isStageLocked('cost') ? 'Complete prior stages first' : undefined}
           >
             {isCostRunning ? (
               <>
@@ -663,14 +955,38 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
             )}
           </Button>
         )}
-        {/* Security Scan - not for aggregated-root */}
-        {!isFixing && !(workflowType === 'terraform' && moduleApproach === 'aggregated-root') && (
+
+        {getPipelineStages().includes('sync') && !isFixing && (
+          <Button
+            onClick={handleSyncValidate}
+            disabled={isAnyRunning || isStageLocked('sync')}
+            variant={activeView === 'sync' ? 'default' : 'outline'}
+            className={getActivityButtonClassName('sync')}
+            data-testid="button-sync-validation"
+            title={isStageLocked('sync') ? 'Complete prior stages first' : undefined}
+          >
+            {isSyncRunning ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Syncing...
+              </>
+            ) : (
+              <>
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Sync
+              </>
+            )}
+          </Button>
+        )}
+        {/* Security Scan */}
+        {!isFixing && getPipelineStages().includes('security') && (
           <Button
             onClick={handleSecurityScan}
-            disabled={isAnyRunning}
+            disabled={isAnyRunning || isStageLocked('security')}
             variant={activeView === 'security' ? 'default' : 'outline'}
             className={getActivityButtonClassName('security')}
             data-testid="button-security-scan"
+            title={isStageLocked('security') ? 'Complete prior stages first' : undefined}
           >
             {isSecurityRunning ? (
               <>
@@ -690,10 +1006,11 @@ export default function ActivityPanel({ sessionId, onScanComplete, onFixesApprov
         {workflowType === 'kubernetes' && !isFixing && (
           <Button
             onClick={handleValidate}
-            disabled={isAnyRunning}
+            disabled={isAnyRunning || isStageLocked('validate')}
             variant={activeView === 'validate' ? 'default' : 'outline'}
             className={getActivityButtonClassName('validate')}
             data-testid="button-validate"
+            title={isStageLocked('validate') ? 'Complete prior stages first' : undefined}
           >
             {isValidateRunning ? (
               <>

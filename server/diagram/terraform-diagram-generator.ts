@@ -78,42 +78,63 @@ export async function generateArchitectureDiagram(
   let mermaidSyntax: string;
   
   if (diagramType === 'flowchart') {
-    // Use existing flowchart generator
+    // Generate base WITHOUT per-node Azure styling. Azure styling class directives
+    // use node IDs that can become stale when the AI enhancement renames nodes,
+    // causing Mermaid to throw in strict security mode. Styling is re-applied
+    // after AI enhancement using actual node IDs from the final output.
     const baseOptions: MermaidOptions = {
       diagramType: 'graph',
-      theme: cloudProvider === 'azure' ? 'azure' : 'default',
+      theme: 'default',
       groupByCategory: true,
       showLabels: true,
-      costMap: costAnnotations, // Fix #5: inject cost labels when available
+      costMap: costAnnotations,
     };
     mermaidSyntax = generateMermaidSyntax(graph, baseOptions);
   } else {
     // Convert to other diagram types
+    const getResourceDisplayName = (resource: any): string => {
+      const attrs = resource.attributes || {};
+      const configuredName = ['name', 'account_name', 'server_name', 'workspace_name', 'cluster_name']
+        .map((key) => attrs[key])
+        .find((value) => typeof value === 'string' && value.trim().length > 0) as string | undefined;
+      if (configuredName) return configuredName.trim();
+      if (attrs.isModule && typeof attrs.source === 'string' && attrs.source.trim()) {
+        const source = attrs.source.replace(/\\/g, '/');
+        const sourceName = source.split('/').filter(Boolean).pop() || source;
+        return `${resource.name} (${sourceName})`;
+      }
+      return resource.name;
+    };
+    const referenceToDisplay = new Map<string, string>();
+    graph.resources.forEach((r) => {
+      referenceToDisplay.set(`${r.type}.${r.name}`, getResourceDisplayName(r));
+    });
+
     const diagramData = {
       resources: graph.resources.map(r => ({
         type: r.type,
-        name: r.name,
+        name: getResourceDisplayName(r),
         category: getResourceCategory(r.type),
       })),
       relationships: graph.relationships.map(r => ({
-        from: r.from,
-        to: r.to,
+        from: referenceToDisplay.get(r.from) || r.from,
+        to: referenceToDisplay.get(r.to) || r.to,
         type: r.type,
       })),
     };
-    
+
     console.log(`   📊 Converting to ${diagramType}...`);
     console.log(`   📦 Resources: ${diagramData.resources.length}, Relationships: ${diagramData.relationships.length}`);
-    
+
     mermaidSyntax = convertToDiagramType(diagramData, diagramType);
-    
+
     // If conversion returns empty, fallback to flowchart
     if (!mermaidSyntax || mermaidSyntax.trim() === '') {
       console.warn(`   ⚠️  ${diagramType} conversion returned empty, using flowchart`);
       console.warn(`   📊 Diagram data:`, JSON.stringify(diagramData, null, 2));
       const baseOptions: MermaidOptions = {
         diagramType: 'graph',
-        theme: cloudProvider === 'azure' ? 'azure' : 'default',
+        theme: 'default',
         groupByCategory: true,
         showLabels: true
       };
@@ -125,7 +146,7 @@ export async function generateArchitectureDiagram(
       console.log(`   📝 Syntax starts with: ${mermaidSyntax.split('\n')[0]}`);
     }
   }
-  
+
   console.log(`   ✅ Generated ${diagramType} diagram (${mermaidSyntax.split('\n').length} lines)`);
 
   // Step 3: Enhance with AI only for flowchart (AI is unreliable for other Mermaid types)
@@ -140,6 +161,12 @@ export async function generateArchitectureDiagram(
     }
   } else if (useAI && diagramType !== 'flowchart') {
     console.log(`   ⏭️  Skipping AI enhancement for ${diagramType} (base generator output used directly)`);
+  }
+
+  // Step 3b: Re-apply Azure styling AFTER AI enhancement, using node IDs actually
+  // present in the final syntax. This avoids stale class directives.
+  if (cloudProvider === 'azure' && diagramType === 'flowchart') {
+    mermaidSyntax = applyAzureStylingToFinalSyntax(mermaidSyntax, graph.resources);
   }
 
   // Step 4: Extract categories
@@ -182,6 +209,84 @@ export async function generateArchitectureDiagram(
   console.log(`   📁 Categories: ${result.metadata.categories.join(', ')}`);
 
   return result;
+}
+
+/**
+ * Apply Azure colour styling AFTER AI enhancement.
+ * Extracts real node IDs from the final Mermaid syntax so class directives
+ * only reference nodes that actually exist — prevents strict-mode parse errors.
+ */
+function applyAzureStylingToFinalSyntax(
+  syntax: string,
+  resources: Array<{ type: string; name: string }>
+): string {
+  // Extract node IDs that actually appear in the syntax
+  // Matches:  identifier["..."]  identifier[...]  identifier(...)  etc.
+  const existingNodeIds = new Set<string>();
+  const nodePattern = /^\s{0,8}(\w+)\s*[\[({]/gm;
+  let m;
+  while ((m = nodePattern.exec(syntax)) !== null) {
+    // Skip subgraph keyword itself
+    if (m[1] !== 'subgraph' && m[1] !== 'end') {
+      existingNodeIds.add(m[1]);
+    }
+  }
+
+  const categoryMap: Record<string, string> = {
+    compute: 'fill:#0078d4,stroke:#005a9e,stroke-width:2px,color:#fff',
+    storage: 'fill:#ff6b35,stroke:#d84315,stroke-width:2px,color:#fff',
+    network: 'fill:#00bcf2,stroke:#0097a7,stroke-width:2px,color:#fff',
+    database: 'fill:#6264a7,stroke:#484883,stroke-width:2px,color:#fff',
+    security: 'fill:#107c10,stroke:#0e6b0e,stroke-width:2px,color:#fff',
+    resourceGroup: 'fill:#243a5e,stroke:#1a2a46,stroke-width:2px,color:#fff',
+  };
+
+  const getCategory = (type: string): string => {
+    if (type.includes('resource_group')) return 'resourceGroup';
+    if (type.includes('app_service') || type.includes('function_app') || type.includes('container') || type.includes('kubernetes') || type.includes('virtual_machine') || type.includes('_vm')) return 'compute';
+    if (type.includes('storage') || type.includes('blob') || type.includes('file_share')) return 'storage';
+    if (type.includes('virtual_network') || type.includes('subnet') || type.includes('network') || type.includes('load_balancer') || type.includes('public_ip')) return 'network';
+    if (type.includes('sql') || type.includes('database') || type.includes('cosmosdb') || type.includes('postgresql') || type.includes('mysql') || type.includes('redis')) return 'database';
+    if (type.includes('key_vault') || type.includes('role_assignment') || type.includes('managed_identity')) return 'security';
+    return '';
+  };
+
+  // Build classDef block
+  const usedCategories = new Set<string>();
+  for (const r of resources) {
+    const cat = getCategory(r.type);
+    if (cat) usedCategories.add(cat);
+  }
+  if (usedCategories.size === 0) return syntax;
+
+  let styling = '\n';
+  for (const cat of usedCategories) {
+    styling += `    classDef ${cat} ${categoryMap[cat]}\n`;
+  }
+
+  // Build per-node class assignments, only for nodes present in the final syntax.
+  // Node IDs in the final output may differ from the original resource.type_resource.name
+  // pattern if the AI renamed them, so we match by prefix heuristic.
+  for (const r of resources) {
+    const cat = getCategory(r.type);
+    if (!cat) continue;
+
+    // Canonical ID from the original generator
+    const canonicalId = `${r.type}_${r.name}`.replace(/[^a-zA-Z0-9_]/g, '_');
+    if (existingNodeIds.has(canonicalId)) {
+      styling += `    class ${canonicalId} ${cat}\n`;
+      continue;
+    }
+
+    // Fallback: look for a node whose ID contains the resource name
+    const safeName = r.name.replace(/[^a-zA-Z0-9_]/g, '_');
+    const match = [...existingNodeIds].find(id => id === safeName || id.endsWith(`_${safeName}`) || id.startsWith(`${safeName}_`));
+    if (match) {
+      styling += `    class ${match} ${cat}\n`;
+    }
+  }
+
+  return syntax + styling;
 }
 
 // Per-type enhancement instructions and validation patterns
@@ -275,6 +380,10 @@ STRICT RULES:
 - Keep the syntax valid and parseable by Mermaid
 - Maintain all existing resources and relationships
 - Do not invent resources that are not in the list above
+- PRESERVE all existing node identifiers exactly as they appear (the alphanumeric part before the bracket). You may change the display label inside the brackets but never rename the identifier.
+- Every node label MUST be on a single line, wrapped in double-quotes: nodeId["label text"]
+- Do NOT include classDef or class directives — styling is applied separately
+- Do NOT use parentheses () in node labels without proper quoting
 
 Return the improved Mermaid syntax:`;
 

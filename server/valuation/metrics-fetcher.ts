@@ -4,6 +4,25 @@
  */
 
 import type { UsageMetrics } from '@shared/schema';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('Metrics');
+
+// Known VM sizes and their memory in GB for accurate memory percentage calculation
+const VM_SIZE_MEMORY_GB: Record<string, number> = {
+  'Standard_B1s': 1, 'Standard_B1ms': 2, 'Standard_B2s': 4, 'Standard_B2ms': 8,
+  'Standard_B4ms': 16, 'Standard_B8ms': 32, 'Standard_B12ms': 48, 'Standard_B16ms': 64,
+  'Standard_D2s_v5': 8, 'Standard_D4s_v5': 16, 'Standard_D8s_v5': 32, 'Standard_D16s_v5': 64,
+  'Standard_D32s_v5': 128, 'Standard_D2s_v4': 8, 'Standard_D4s_v4': 16, 'Standard_D8s_v4': 32,
+  'Standard_D2s_v3': 8, 'Standard_D4s_v3': 16, 'Standard_D8s_v3': 32,
+  'Standard_D2as_v5': 8, 'Standard_D4as_v5': 16, 'Standard_D8as_v5': 32,
+  'Standard_E2s_v5': 16, 'Standard_E4s_v5': 32, 'Standard_E8s_v5': 64, 'Standard_E16s_v5': 128,
+  'Standard_E2s_v4': 16, 'Standard_E4s_v4': 32, 'Standard_E2s_v3': 16, 'Standard_E4s_v3': 32,
+  'Standard_F2s_v2': 4, 'Standard_F4s_v2': 8, 'Standard_F8s_v2': 16, 'Standard_F16s_v2': 32,
+  'Standard_DS1_v2': 3.5, 'Standard_DS2_v2': 7, 'Standard_DS3_v2': 14, 'Standard_DS4_v2': 28,
+  'Standard_A1_v2': 2, 'Standard_A2_v2': 4, 'Standard_A4_v2': 8,
+};
+
 import {
   METRICS_DEFAULT_TIMESPAN,
   METRICS_DEFAULT_INTERVAL,
@@ -73,12 +92,13 @@ export async function fetchResourceMetrics(
   resourceId: string,
   resourceType: string,
   accessToken: string,
-  timespan: string = METRICS_DEFAULT_TIMESPAN
+  timespan: string = METRICS_DEFAULT_TIMESPAN,
+  vmSize?: string
 ): Promise<UsageMetrics | null> {
 
   const metricNames = METRIC_DEFINITIONS[resourceType];
   if (!metricNames || metricNames.length === 0) {
-    console.log(`   ⚠️  No metrics defined for ${resourceType}`);
+    log.info('No metrics defined for resource type', { resourceType });
     return null;
   }
 
@@ -101,14 +121,14 @@ export async function fetchResourceMetrics(
 
     if (!response.ok) {
       const statusText = response.statusText || response.status;
-      console.warn(`   ⚠️  Metrics fetch failed for ${resourceId.split('/').pop()}: ${statusText}`);
+      log.warn('Metrics fetch failed', { resource: resourceId.split('/').pop(), status: String(statusText) });
       return null;
     }
 
     const data = await response.json();
 
     // Calculate statistics for recommendation engine
-    const statistics = calculateMetricStatistics(data.value || [], resourceType);
+    const statistics = calculateMetricStatistics(data.value || [], resourceType, vmSize);
 
     // Calculate timespan from the configured analysis period
     const now = new Date();
@@ -126,7 +146,7 @@ export async function fetchResourceMetrics(
     };
 
   } catch (error: any) {
-    console.error(`   ❌ Failed to fetch metrics for ${resourceId}:`, error.message);
+    log.error('Failed to fetch metrics', { resourceId, error: error.message });
     return null;
   }
 }
@@ -136,7 +156,7 @@ export async function fetchResourceMetrics(
  * @param metrics - Raw metrics from Azure Monitor API
  * @param resourceType - Resource type for context
  */
-function calculateMetricStatistics(metrics: any[], resourceType: string): any {
+function calculateMetricStatistics(metrics: any[], resourceType: string, vmSize?: string): any {
   const stats: any = { sampleCount: 0 };
 
   for (const metric of metrics) {
@@ -155,13 +175,15 @@ function calculateMetricStatistics(metrics: any[], resourceType: string): any {
       stats.avgCpuPercent = average(averages);
       stats.maxCpuPercent = maximums.length > 0 ? Math.max(...maximums) : stats.avgCpuPercent;
     } else if (metricName === 'Available Memory Bytes') {
-      // Convert available bytes → used percentage using the assumed VM max memory.
+      // Convert available bytes → used percentage using actual VM memory if known.
       // If available memory is high, usage is low.
       const avgAvailable = average(averages);
-      const maxBytes = VM_ASSUMED_MAX_MEMORY_GB * BYTES_PER_GB;
+      const vmMemoryGB = vmSize ? (VM_SIZE_MEMORY_GB[vmSize] || VM_ASSUMED_MAX_MEMORY_GB) : VM_ASSUMED_MAX_MEMORY_GB;
+      const maxBytes = vmMemoryGB * BYTES_PER_GB;
       stats.avgMemoryPercent = avgAvailable > 0
         ? Math.min(100, 100 - (avgAvailable / maxBytes) * 100)
         : 50;
+      stats.maxMemoryGB = vmMemoryGB;  // Expose for frontend chart
     } else if (metricName === 'MemoryPercentage' || metricName === 'memory_percent') {
       stats.avgMemoryPercent = average(averages);
     } else if (metricName === 'MemoryWorkingSet') {
@@ -199,22 +221,22 @@ function average(numbers: number[]): number {
  * @param accessToken - Azure access token
  */
 export async function fetchMetricsForResources(
-  resources: Array<{ id: string; type: string }>,
+  resources: Array<{ id: string; type: string; vmSize?: string }>,
   accessToken: string
 ): Promise<Map<string, UsageMetrics>> {
   const metricsMap = new Map<string, UsageMetrics>();
   const batchSize = METRICS_BATCH_SIZE; // See config/constants.ts for rationale
 
-  console.log(`\n📊 Fetching usage metrics for ${resources.length} resource(s)...`);
+  log.info(`Fetching usage metrics for ${resources.length} resource(s)`);
 
   for (let i = 0; i < resources.length; i += batchSize) {
     const batch = resources.slice(i, i + batchSize);
 
     const batchPromises = batch.map(async (resource) => {
-      const metrics = await fetchResourceMetrics(resource.id, resource.type, accessToken);
+      const metrics = await fetchResourceMetrics(resource.id, resource.type, accessToken, METRICS_DEFAULT_TIMESPAN, resource.vmSize);
       if (metrics) {
         metricsMap.set(resource.id, metrics);
-        console.log(`   ✅ Fetched metrics for ${resource.id.split('/').pop()} (${metrics.statistics?.sampleCount || 0} samples)`);
+        log.info('Fetched metrics', { resource: resource.id.split('/').pop(), samples: metrics.statistics?.sampleCount || 0 });
       }
     });
 
@@ -226,6 +248,6 @@ export async function fetchMetricsForResources(
     }
   }
 
-  console.log(`   ✅ Successfully fetched metrics for ${metricsMap.size}/${resources.length} resource(s)\n`);
+  log.info('Metrics fetch complete', { fetched: metricsMap.size, total: resources.length });
   return metricsMap;
 }

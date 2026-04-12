@@ -7,6 +7,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -61,6 +62,8 @@ interface CostAnalyzerProps {
   onCostComplete?: (result: CostAnalysisResult) => void;
   onAnalysisStart?: () => void;
   onAnalysisComplete?: () => void;
+  /** After applying a rightsizing suggestion to session .tf files */
+  onTerraformFilesChanged?: () => void;
 }
 
 export interface CostAnalyzerRef {
@@ -85,8 +88,12 @@ const STATUS_CONFIG = {
   },
 } as const;
 
+function rightsizingRecKey(rec: RightsizingRecommendation): string {
+  return `${rec.resourceType}.${rec.resourceName}.${rec.attribute}`;
+}
+
 const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
-  ({ sessionId, onCostComplete, onAnalysisStart, onAnalysisComplete }, ref) => {
+  ({ sessionId, onCostComplete, onAnalysisStart, onAnalysisComplete, onTerraformFilesChanged }, ref) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [costResult, setCostResult] = useState<CostAnalysisResult | null>(null);
   const [profile, setProfile] = useState<UsageProfile>('medium');
@@ -95,6 +102,9 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
   const [editValues, setEditValues] = useState<Record<string, string>>({});
   const [rightsizingResult, setRightsizingResult] = useState<RightsizingResult | null>(null);
   const [isRightsizing, setIsRightsizing] = useState(false);
+  const [rightsizingApplyTarget, setRightsizingApplyTarget] = useState<RightsizingRecommendation | null>(null);
+  const [rightsizingApplyConfirmed, setRightsizingApplyConfirmed] = useState(false);
+  const [applyingRightsizingKey, setApplyingRightsizingKey] = useState<string | null>(null);
   const { toast } = useToast();
 
   const checkRightsizing = async () => {
@@ -131,6 +141,53 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
       toast({ title: 'Rightsizing failed', description: err.message, variant: 'destructive' });
     } finally {
       setIsRightsizing(false);
+    }
+  };
+
+  const applyRightsizingToCode = async () => {
+    const rec = rightsizingApplyTarget;
+    if (!rec || !rightsizingApplyConfirmed) return;
+    const key = rightsizingRecKey(rec);
+    setApplyingRightsizingKey(key);
+    try {
+      const res = await apiRequest('POST', `/api/sessions/${sessionId}/apply-rightsizing`, {
+        resourceType: rec.resourceType,
+        resourceName: rec.resourceName,
+        attribute: rec.attribute,
+        currentValue: rec.currentValue,
+        suggestedValue: rec.suggestedValue,
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        fileName?: string;
+        message?: string;
+      };
+      toast({
+        title: 'Suggestion applied to Terraform',
+        description: data.message || (data.fileName ? `Updated ${data.fileName}` : 'File updated.'),
+      });
+      setRightsizingApplyTarget(null);
+      setRightsizingApplyConfirmed(false);
+      setRightsizingResult((prev) => {
+        if (!prev) return prev;
+        const nextRecs = prev.recommendations.filter((r) => rightsizingRecKey(r) !== key);
+        const totalSaving = nextRecs.reduce(
+          (s, r) => s + (r.estimatedMonthlySaving ?? 0),
+          0,
+        );
+        return {
+          ...prev,
+          recommendations: nextRecs,
+          totalRecommendations: nextRecs.length,
+          totalEstimatedMonthlySaving: Math.round(totalSaving * 100) / 100,
+        };
+      });
+      onTerraformFilesChanged?.();
+    } catch (err: any) {
+      const msg = err?.message || 'Could not apply rightsizing';
+      toast({ title: 'Apply failed', description: msg, variant: 'destructive' });
+    } finally {
+      setApplyingRightsizingKey(null);
     }
   };
 
@@ -342,6 +399,95 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
             </Button>
             <Button size="sm" onClick={saveUsageValues}>
               Apply & Recalculate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Approve applying suggested SKU to .tf files */}
+      <Dialog
+        open={!!rightsizingApplyTarget}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRightsizingApplyTarget(null);
+            setRightsizingApplyConfirmed(false);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-base">Apply suggested SKU to Terraform?</DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-3 text-left pt-1">
+                <p className="text-xs font-mono text-muted-foreground">
+                  {rightsizingApplyTarget?.resourceType}.{rightsizingApplyTarget?.resourceName}
+                </p>
+                <div className="rounded-lg border bg-muted/30 p-3 text-sm space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-muted-foreground w-24 shrink-0">Attribute</span>
+                    <code className="text-xs">{rightsizingApplyTarget?.attribute}</code>
+                  </div>
+                  <div className="flex flex-wrap items-start gap-2">
+                    <span className="text-muted-foreground w-24 shrink-0">Change</span>
+                    <div className="flex flex-wrap items-center gap-2 min-w-0">
+                      <code className="text-xs break-all">{rightsizingApplyTarget?.currentValue}</code>
+                      <ArrowRight className="w-4 h-4 shrink-0 text-muted-foreground" />
+                      <code className="text-xs text-emerald-700 dark:text-emerald-400 break-all">
+                        {rightsizingApplyTarget?.suggestedValue}
+                      </code>
+                    </div>
+                  </div>
+                  {rightsizingApplyTarget?.rationale ? (
+                    <p className="text-xs text-muted-foreground pt-1 border-t">{rightsizingApplyTarget.rationale}</p>
+                  ) : null}
+                </div>
+                {rightsizingApplyTarget?.risk === 'high' && (
+                  <Alert variant="destructive" className="py-2">
+                    <ShieldAlert className="w-4 h-4" />
+                    <AlertTitle className="text-sm">High risk</AlertTitle>
+                    <AlertDescription className="text-xs">
+                      This change may affect availability or features. Review in source control before committing.
+                    </AlertDescription>
+                  </Alert>
+                )}
+                <div className="flex items-start gap-2 pt-1">
+                  <Checkbox
+                    id="rightsizing-apply-confirm"
+                    checked={rightsizingApplyConfirmed}
+                    onCheckedChange={(v) => setRightsizingApplyConfirmed(v === true)}
+                  />
+                  <label htmlFor="rightsizing-apply-confirm" className="text-sm text-muted-foreground leading-snug cursor-pointer">
+                    I approve updating the Terraform file in this session: set{' '}
+                    <code className="text-xs">{rightsizingApplyTarget?.attribute}</code> to the suggested value.
+                  </label>
+                </div>
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setRightsizingApplyTarget(null);
+                setRightsizingApplyConfirmed(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={!rightsizingApplyConfirmed || applyingRightsizingKey !== null}
+              onClick={() => void applyRightsizingToCode()}
+            >
+              {applyingRightsizingKey ? (
+                <>
+                  <RefreshCw className="w-3 h-3 mr-2 animate-spin" />
+                  Applying…
+                </>
+              ) : (
+                'Apply to code'
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -572,11 +718,12 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
                             <TableHead>Suggested SKU</TableHead>
                             <TableHead className="text-right">Save</TableHead>
                             <TableHead>Risk</TableHead>
+                            <TableHead className="text-right w-[120px]">Apply</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           {rightsizingResult.recommendations.map((rec, i) => (
-                            <TableRow key={i}>
+                            <TableRow key={rightsizingRecKey(rec)}>
                               <TableCell>
                                 <div>
                                   <p className="font-medium text-sm">{rec.resourceName}</p>
@@ -629,6 +776,21 @@ const CostAnalyzer = forwardRef<CostAnalyzerRef, CostAnalyzerProps>(
                                     </TooltipContent>
                                   </Tooltip>
                                 </TooltipProvider>
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  size="sm"
+                                  className="h-7 text-xs"
+                                  disabled={applyingRightsizingKey !== null}
+                                  onClick={() => {
+                                    setRightsizingApplyTarget(rec);
+                                    setRightsizingApplyConfirmed(false);
+                                  }}
+                                >
+                                  Review & apply
+                                </Button>
                               </TableCell>
                             </TableRow>
                           ))}

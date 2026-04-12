@@ -7,7 +7,10 @@ export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),
   email: text("email").notNull().unique(),
-  password: text("password").notNull(),
+  password: text("password"),                          // nullable — SSO users have no local password
+  microsoftId: text("microsoft_id").unique(),          // Microsoft OID/sub claim from Azure AD
+  awsSub: text("aws_sub").unique(),                    // AWS Cognito sub claim
+  authProvider: text("auth_provider").notNull().default("local"), // 'local' | 'microsoft' | 'aws'
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -104,6 +107,47 @@ export const userActivities = pgTable("user_activities", {
   userCreatedIdx: index("idx_user_activities_user_created").on(table.userId, table.createdAt),
 }));
 
+// Architecture version history for ArchMe
+export const architectureVersions = pgTable("architecture_versions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  sessionId: varchar("session_id").notNull().references(() => sessions.id),
+  version: integer("version").notNull(),
+  label: text("label"),
+  analysisSnapshot: text("analysis_snapshot").notNull(), // JSON string of ArchitectureAnalysis
+  mermaidSyntax: text("mermaid_syntax"),
+  diagramType: text("diagram_type"),
+  componentsSnapshot: jsonb("components_snapshot"), // Array of extracted components
+  codeSnapshot: jsonb("code_snapshot"), // Array of { fileName, content }
+  compliancePresets: jsonb("compliance_presets"), // Array of preset IDs
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  sessionVersionIdx: index("idx_arch_version_session").on(table.sessionId, table.version),
+}));
+
+// Build history tracking per module
+export const buildHistory = pgTable("build_history", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").references(() => users.id),
+  sessionId: varchar("session_id").notNull().references(() => sessions.id),
+  module: text("module").notNull(), // 'terraform' | 'kubernetes' | 'docker' | 'archme' | 'helm' | 'automation'
+  buildId: text("build_id").notNull(), // e.g. BUILD-20260320-143022
+  status: text("status").notNull().default('completed'), // 'running' | 'completed' | 'failed'
+  stages: jsonb("stages"), // Array of { name, status, startedAt, completedAt, result? }
+  pipelineStages: jsonb("pipeline_stages"), // Ordered list of stage names for this build
+  totalDurationMs: integer("total_duration_ms"), // Total pipeline duration in ms
+  filesGenerated: integer("files_generated"), // Number of files produced
+  repositoryName: text("repository_name"),
+  repositoryBranch: text("repository_branch"),
+  metadata: jsonb("metadata"), // Flexible JSON: scan results, cost estimates, diagram info, etc.
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+}, (table) => ({
+  userModuleIdx: index("idx_build_history_user_module").on(table.userId, table.module),
+  sessionIdx: index("idx_build_history_session").on(table.sessionId),
+  buildIdIdx: index("idx_build_history_build_id").on(table.buildId),
+  createdIdx: index("idx_build_history_created").on(table.createdAt),
+}));
+
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).pick({
   username: true,
@@ -160,6 +204,14 @@ export type UserFixPreference = typeof userFixPreferences.$inferSelect;
 export const insertUserActivitySchema = createInsertSchema(userActivities).omit({ id: true, createdAt: true });
 export type InsertUserActivity = z.infer<typeof insertUserActivitySchema>;
 export type UserActivity = typeof userActivities.$inferSelect;
+
+export const insertArchitectureVersionSchema = createInsertSchema(architectureVersions).omit({ id: true, createdAt: true });
+export type InsertArchitectureVersion = z.infer<typeof insertArchitectureVersionSchema>;
+export type ArchitectureVersion = typeof architectureVersions.$inferSelect;
+
+export const insertBuildHistorySchema = createInsertSchema(buildHistory).omit({ id: true, createdAt: true });
+export type InsertBuildHistory = z.infer<typeof insertBuildHistorySchema>;
+export type BuildHistory = typeof buildHistory.$inferSelect;
 
 // Additional types for API
 export const repositorySchema = z.object({
@@ -220,7 +272,7 @@ export const scoreMeFileDetailSchema = z.object({
 });
 
 export const scoreMeInventorySchema = z.object({
-  type: z.enum(['terraform', 'kubernetes', 'helm', 'automation', 'bicep', 'arm', 'dockerfile', 'docker-compose']),
+  type: z.enum(['terraform', 'kubernetes', 'helm', 'automation', 'bicep', 'arm', 'dockerfile', 'docker-compose', 'cicd']),
   path: z.string(),
   summary: z.string(),
   files: z.array(z.string()).optional(),
@@ -387,6 +439,7 @@ export const valuationResourceSchema = z.object({
   currency: z.string().default('USD'),
   remediation: remediationPlanSchema.optional(),
   pricingDetails: z.any().optional(),
+  pricingError: z.boolean().optional().default(false), // True when pricing API returned no data
   usageMetrics: z.lazy(() => usageMetricsSchema).optional(), // Azure Monitor metrics
   metricsAvailable: z.boolean().default(false), // Whether metrics were fetched
 });

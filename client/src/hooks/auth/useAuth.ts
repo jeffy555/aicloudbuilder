@@ -1,5 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { signup, login, logout, getCurrentUser, type SignupRequest, type LoginRequest } from '@/lib/api/auth';
+import {
+  signup,
+  login,
+  logout,
+  getCurrentUser,
+  persistAuthToken,
+  type SignupRequest,
+  type LoginRequest,
+} from '@/lib/api/auth';
 
 const AUTH_QUERY_KEY = ['auth', 'currentUser'];
 
@@ -10,20 +18,25 @@ export function useAuth() {
   const queryClient = useQueryClient();
 
   // Get current user query
+  // JWT is valid for 7 days — no need to re-validate frequently.
+  // Short staleTime caused the app to redirect to /login after idle periods
+  // when the server had restarted (MemStorage lost users) or on transient errors.
   const currentUserQuery = useQuery({
     queryKey: AUTH_QUERY_KEY,
     queryFn: getCurrentUser,
-    retry: false,
-    staleTime: 5 * 60 * 1000, // 5 minutes
+    retry: 1,
+    retryDelay: 2000,
+    staleTime: 60 * 60 * 1000, // 1 hour — matches reasonable session duration
+    gcTime: 2 * 60 * 60 * 1000, // 2 hours — keep cached auth data longer
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 
   // Signup mutation
   const signupMutation = useMutation({
     mutationFn: (data: SignupRequest) => signup(data),
     onSuccess: (data) => {
-      // Store token
-      localStorage.setItem('token', data.token);
-      // Invalidate and refetch current user
+      persistAuthToken(data.token, true);
       queryClient.invalidateQueries({ queryKey: AUTH_QUERY_KEY });
     },
   });
@@ -32,13 +45,7 @@ export function useAuth() {
   const loginMutation = useMutation({
     mutationFn: (data: LoginRequest) => login(data),
     onSuccess: (data, variables) => {
-      // Store token based on rememberMe
-      if (variables.rememberMe) {
-        localStorage.setItem('token', data.token);
-      } else {
-        sessionStorage.setItem('token', data.token);
-      }
-      // Invalidate and refetch current user
+      persistAuthToken(data.token, Boolean(variables.rememberMe));
       queryClient.invalidateQueries({ queryKey: AUTH_QUERY_KEY });
     },
   });

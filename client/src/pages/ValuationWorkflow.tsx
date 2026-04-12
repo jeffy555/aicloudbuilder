@@ -260,7 +260,7 @@ export default function ValuationWorkflow() {
               Analyze live Azure resources and identify cost savings
             </p>
           </div>
-          <Button variant="outline" onClick={() => setLocation("/")}>
+          <Button variant="outline" onClick={() => setLocation("/")} data-testid="valuation-btn-home">
             <Home className="w-4 h-4 mr-2" />
             Home
           </Button>
@@ -282,6 +282,7 @@ export default function ValuationWorkflow() {
                 <Button
                   onClick={() => connectMutation.mutate()}
                   disabled={connectMutation.isPending}
+                  data-testid="valuation-btn-connect"
                 >
                   {connectMutation.isPending && (
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -315,6 +316,7 @@ export default function ValuationWorkflow() {
                         size="sm"
                         variant="outline"
                         onClick={() => setSelectedRgIds(resourceGroups.map(rg => rg.id))}
+                        data-testid="valuation-btn-select-all"
                       >
                         Select All
                       </Button>
@@ -322,6 +324,7 @@ export default function ValuationWorkflow() {
                         size="sm"
                         variant="outline"
                         onClick={() => setSelectedRgIds([])}
+                        data-testid="valuation-btn-deselect-all"
                       >
                         Deselect All
                       </Button>
@@ -347,6 +350,7 @@ export default function ValuationWorkflow() {
                               }
                             }}
                             className="w-4 h-4 rounded border-gray-300"
+                            data-testid={`valuation-checkbox-rg-${rg.id}`}
                           />
                           <div className="flex-1">
                             <div className="font-medium">{rg.name}</div>
@@ -362,6 +366,7 @@ export default function ValuationWorkflow() {
                       onClick={() => scanMutation.mutate()}
                       disabled={selectedRgIds.length === 0 || scanMutation.isPending}
                       className="mt-4"
+                      data-testid="valuation-btn-continue-to-scan"
                     >
                       {scanMutation.isPending && (
                         <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -405,6 +410,7 @@ export default function ValuationWorkflow() {
                 <Button
                   onClick={() => analyzeMutation.mutate()}
                   disabled={analyzeMutation.isPending}
+                  data-testid="valuation-btn-analyze"
                 >
                   {analyzeMutation.isPending && (
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -487,16 +493,16 @@ export default function ValuationWorkflow() {
               {/* 4-Tab FinOps Results */}
               <Tabs value={activeResultTab} onValueChange={setActiveResultTab}>
                 <TabsList className="grid w-full grid-cols-4">
-                  <TabsTrigger value="cost" className="flex items-center gap-2">
+                  <TabsTrigger value="cost" className="flex items-center gap-2" data-testid="valuation-tab-cost">
                     <Wallet className="w-4 h-4" /> Cost & Rightsizing
                   </TabsTrigger>
-                  <TabsTrigger value="reserved" className="flex items-center gap-2">
+                  <TabsTrigger value="reserved" className="flex items-center gap-2" data-testid="valuation-tab-ri">
                     <Shield className="w-4 h-4" /> Reserved Instances
                   </TabsTrigger>
-                  <TabsTrigger value="budget" className="flex items-center gap-2">
+                  <TabsTrigger value="budget" className="flex items-center gap-2" data-testid="valuation-tab-budget">
                     <Bell className="w-4 h-4" /> Budget Alerts
                   </TabsTrigger>
-                  <TabsTrigger value="multicloud" className="flex items-center gap-2">
+                  <TabsTrigger value="multicloud" className="flex items-center gap-2" data-testid="valuation-tab-multicloud">
                     <Globe className="w-4 h-4" /> Multi-Cloud
                   </TabsTrigger>
                 </TabsList>
@@ -520,7 +526,7 @@ export default function ValuationWorkflow() {
                     </CardHeader>
                     <CardContent className="space-y-4">
                       {!riResult && (
-                        <Button onClick={() => riMutation.mutate()} disabled={riMutation.isPending}>
+                        <Button onClick={() => riMutation.mutate()} disabled={riMutation.isPending} data-testid="valuation-btn-analyse-ri">
                           {riMutation.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
                           Analyse Reserved Pricing
                         </Button>
@@ -597,7 +603,7 @@ export default function ValuationWorkflow() {
                             </div>
                           )}
 
-                          <Button variant="outline" size="sm" onClick={() => { setRiResult(null); riMutation.reset(); }}>
+                          <Button variant="outline" size="sm" onClick={() => { setRiResult(null); riMutation.reset(); }} data-testid="valuation-btn-reanalyse-ri">
                             Re-analyse
                           </Button>
                         </div>
@@ -629,6 +635,7 @@ export default function ValuationWorkflow() {
                               onChange={e => setBudgetAmount(e.target.value)}
                               placeholder={`${analysisResult.summary.totalMonthlyCost.toFixed(0)} (current spend)`}
                               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              data-testid="valuation-input-budget-amount"
                             />
                             <p className="text-xs text-muted-foreground">Leave blank to use your current monthly spend as the budget ceiling</p>
                           </div>
@@ -641,6 +648,7 @@ export default function ValuationWorkflow() {
                               onChange={e => setBudgetEmails(e.target.value)}
                               placeholder="devops@company.com, cto@company.com"
                               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              data-testid="valuation-input-budget-emails"
                             />
                             <p className="text-xs text-muted-foreground">Comma-separated. Leave blank if you will configure contacts in the portal.</p>
                           </div>
@@ -662,7 +670,7 @@ export default function ValuationWorkflow() {
                             </div>
                           </div>
 
-                          <Button onClick={() => budgetMutation.mutate()} disabled={budgetMutation.isPending}>
+                          <Button onClick={() => budgetMutation.mutate()} disabled={budgetMutation.isPending} data-testid="valuation-btn-create-budget">
                             {budgetMutation.isPending
                               ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating in Azure...</>
                               : <><Bell className="w-4 h-4 mr-2" />Create Budget Alert</>
@@ -720,7 +728,7 @@ export default function ValuationWorkflow() {
                             View in Azure Cost Management Portal
                           </a>
 
-                          <Button variant="outline" size="sm" onClick={() => { setBudgetResult(null); budgetMutation.reset(); }}>
+                          <Button variant="outline" size="sm" onClick={() => { setBudgetResult(null); budgetMutation.reset(); }} data-testid="valuation-btn-create-another-budget">
                             Create Another Budget
                           </Button>
                         </div>
@@ -743,7 +751,7 @@ export default function ValuationWorkflow() {
                     </CardHeader>
                     <CardContent className="space-y-4">
                       {!multiCloudResult && (
-                        <Button onClick={() => multiCloudMutation.mutate()} disabled={multiCloudMutation.isPending}>
+                        <Button onClick={() => multiCloudMutation.mutate()} disabled={multiCloudMutation.isPending} data-testid="valuation-btn-compare-cloud">
                           {multiCloudMutation.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
                           Compare Cloud Prices
                         </Button>
@@ -839,7 +847,7 @@ export default function ValuationWorkflow() {
                             ))}
                           </div>
 
-                          <Button variant="outline" size="sm" onClick={() => { setMultiCloudResult(null); multiCloudMutation.reset(); }}>
+                          <Button variant="outline" size="sm" onClick={() => { setMultiCloudResult(null); multiCloudMutation.reset(); }} data-testid="valuation-btn-recompare-cloud">
                             Re-compare
                           </Button>
                         </div>
@@ -851,8 +859,8 @@ export default function ValuationWorkflow() {
 
               {/* Action Buttons */}
               <div className="flex justify-between">
-                <Button variant="outline" onClick={() => setCurrentStep(1)}>Start New Analysis</Button>
-                <Button variant="outline" onClick={() => setLocation("/")}>Return Home</Button>
+                <Button variant="outline" onClick={() => setCurrentStep(1)} data-testid="valuation-btn-new-analysis">Start New Analysis</Button>
+                <Button variant="outline" onClick={() => setLocation("/")} data-testid="valuation-btn-return-home">Return Home</Button>
               </div>
             </div>
           )}

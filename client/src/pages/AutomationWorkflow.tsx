@@ -350,6 +350,7 @@ export default function AutomationWorkflow() {
                   size="sm"
                   onClick={handleRefresh}
                   disabled={commitMutation.isPending}
+                  data-testid="automation-btn-refresh"
                 >
                   <RefreshCw className="w-4 h-4 mr-2" />
                   Refresh
@@ -358,6 +359,7 @@ export default function AutomationWorkflow() {
                   variant="outline"
                   size="sm"
                   onClick={handleGoHome}
+                  data-testid="automation-btn-home"
                 >
                   <Home className="w-4 h-4 mr-2" />
                   Home
@@ -428,6 +430,7 @@ export default function AutomationWorkflow() {
                         key={lang.id}
                         className={`cursor-pointer hover:shadow-lg transition-all duration-200 ease-in-out hover:-translate-y-1 ${cardBgColor} ${cardBorderColor}`}
                         onClick={() => handleLanguageSelect(lang.id)}
+                        data-testid={`automation-card-lang-${lang.id}`}
                       >
                         <CardHeader>
                           <div className="flex items-center gap-3">
@@ -463,6 +466,7 @@ export default function AutomationWorkflow() {
                     <Card
                       className="cursor-pointer hover:shadow-lg transition-all duration-200 ease-in-out hover:-translate-y-1 border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/50"
                       onClick={() => handleProviderSelect('github')}
+                      data-testid="automation-card-provider-github"
                     >
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2 text-green-900 dark:text-green-100">
@@ -483,6 +487,7 @@ export default function AutomationWorkflow() {
                     <Card
                       className="cursor-pointer hover:shadow-lg transition-all duration-200 ease-in-out hover:-translate-y-1 border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/50"
                       onClick={() => handleProviderSelect('azure')}
+                      data-testid="automation-card-provider-azure"
                     >
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2 text-blue-900 dark:text-blue-100">
@@ -615,6 +620,7 @@ export default function AutomationWorkflow() {
                   onSend={handleAutomationSubmit}
                   disabled={generateScriptMutation.isPending}
                   placeholder="Describe what you want to automate (e.g., 'Deploy Docker containers to Azure', 'Run Terraform plan and apply')..."
+                  data-testid="automation-input-prompt"
                 />
 
                 {generateScriptMutation.isPending && (
@@ -678,6 +684,7 @@ export default function AutomationWorkflow() {
                             onChange={(e) => setCommitMessage(e.target.value)}
                             placeholder={`Add automation script: ${automationPrompt}`}
                             className="w-full"
+                            data-testid="automation-input-commit-message"
                           />
                           <p className="text-xs text-muted-foreground">
                             {existingRepoFiles.length > 0 
@@ -692,6 +699,7 @@ export default function AutomationWorkflow() {
                               handleCommit(message);
                             }}
                             disabled={commitMutation.isPending}
+                            data-testid="automation-btn-commit"
                           >
                             {commitMutation.isPending ? 'Pushing...' : 'Push to Repository'}
                           </Button>
@@ -715,6 +723,7 @@ export default function AutomationWorkflow() {
                             onClick={() => setLocation('/')}
                             variant="default"
                             size="lg"
+                            data-testid="automation-btn-go-home"
                           >
                             Go Back Home
                           </Button>

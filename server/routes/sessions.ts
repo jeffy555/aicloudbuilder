@@ -3,6 +3,9 @@ import { storage } from "../storage";
 import { insertSessionSchema, type InsertSession } from "@shared/schema";
 import { openaiService, type ChatMessage } from "../openai-service";
 import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { sessionIdParams } from "@shared/api-contracts/common";
+import { updateSessionBody, resetSessionBody, chatBody, systemMessageBody } from "@shared/api-contracts/sessions";
 
 /**
  * Session management routes
@@ -29,12 +32,20 @@ export function registerSessionRoutes(app: Express): void {
         return res.status(404).json({ error: 'Session not found' });
       }
       
-      // If session has a user, and requester is a different user, deny access
-      if (session.userId && req.userId && session.userId !== req.userId) {
+      // If session has a user, deny access to any different user (including unauthenticated)
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Session access denied: sessionId=${req.params.id} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
         return res.status(403).json({ error: 'Access denied to this session' });
       }
       
-      res.json(session);
+      // Fetch files and attach them as terraformFiles to satisfy MigrateOps frontend expectation
+      const files = await storage.getFilesBySession(req.params.id);
+      const sessionWithFiles = {
+        ...session,
+        terraformFiles: files.map(f => ({ path: f.fileName, content: f.content }))
+      };
+      
+      res.json(sessionWithFiles);
     } catch (error) {
       console.error('Error getting session:', error);
       res.status(500).json({ error: 'Failed to get session' });
@@ -42,11 +53,11 @@ export function registerSessionRoutes(app: Express): void {
   });
 
   // Update session
-  app.patch("/api/sessions/:id", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.patch("/api/sessions/:id", optionalAuth, validateRequest({ params: sessionIdParams, body: updateSessionBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const session = await storage.getSession(req.params.id);
       if (!session) return res.status(404).json({ error: 'Session not found' });
-      if (session.userId && req.userId && session.userId !== req.userId) {
+      if (!session.userId || session.userId !== req.userId) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
@@ -58,7 +69,41 @@ export function registerSessionRoutes(app: Express): void {
       }
       
       const updatedSession = await storage.updateSession(req.params.id, parsed);
-      res.json(updatedSession);
+
+      // Sync terraformFiles to files table if provided (used by MigrateOps CodeEditor).
+      // Upsert by file name — do NOT delete all files first. A partial list (e.g. one edited file
+      // while React state was stale) would otherwise wipe main.tf, variables.tf, etc.
+      const reqBody = req.body as any;
+      if (reqBody.terraformFiles && Array.isArray(reqBody.terraformFiles)) {
+        try {
+          console.log(`[SYNC] Upserting ${reqBody.terraformFiles.length} terraform file(s) for session ${req.params.id}`);
+          const existing = await storage.getFilesBySession(req.params.id);
+          const byName = new Map(existing.map((f) => [f.fileName, f]));
+          for (const f of reqBody.terraformFiles) {
+            const fileName = f.path || f.fileName || 'unknown.tf';
+            const content = f.content ?? '';
+            const prev = byName.get(fileName);
+            if (prev) {
+              await storage.updateFile(prev.id, content);
+            } else {
+              const created = await storage.createFile({
+                sessionId: req.params.id,
+                fileName,
+                content,
+              });
+              byName.set(fileName, created);
+            }
+          }
+        } catch (syncError) {
+          console.error('[SYNC] Error syncing terraformFiles to files table:', syncError);
+        }
+      }
+
+      const filesAfter = await storage.getFilesBySession(req.params.id);
+      res.json({
+        ...updatedSession,
+        terraformFiles: filesAfter.map((f) => ({ path: f.fileName, content: f.content })),
+      });
     } catch (error) {
       console.error('Error updating session:', error);
       res.status(500).json({ error: 'Failed to update session' });
@@ -66,7 +111,7 @@ export function registerSessionRoutes(app: Express): void {
   });
 
   // Reset/Refresh session - Clear files and optionally reset state
-  app.post("/api/sessions/:id/reset", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/reset", optionalAuth, validateRequest({ params: sessionIdParams, body: resetSessionBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { clearFiles = true, resetState = false, keepProvider = true } = req.body || {};
@@ -75,7 +120,7 @@ export function registerSessionRoutes(app: Express): void {
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
-      if (session.userId && req.userId && session.userId !== req.userId) {
+      if (!session.userId || session.userId !== req.userId) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
@@ -136,7 +181,7 @@ export function registerSessionRoutes(app: Express): void {
   app.get("/api/sessions/:id/messages", optionalAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const session = await storage.getSession(req.params.id);
-      if (session?.userId && req.userId && session.userId !== req.userId) {
+      if (!session?.userId || session.userId !== req.userId) {
         return res.status(403).json({ error: 'Access denied' });
       }
       const messages = await storage.getMessagesBySession(req.params.id);
@@ -152,7 +197,7 @@ export function registerSessionRoutes(app: Express): void {
     try {
       const sessionId = req.params.id;
       const session = await storage.getSession(sessionId);
-      if (session?.userId && req.userId && session.userId !== req.userId) {
+      if (!session?.userId || session.userId !== req.userId) {
         return res.status(403).json({ error: 'Access denied' });
       }
       const files = await storage.getFilesBySession(sessionId);
@@ -179,13 +224,13 @@ export function registerSessionRoutes(app: Express): void {
   });
 
   // Create system message (without AI response)
-  app.post("/api/sessions/:id/messages/system", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/messages/system", optionalAuth, validateRequest({ params: sessionIdParams, body: systemMessageBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const { message } = req.body;
       const sessionId = req.params.id;
       
       const session = await storage.getSession(sessionId);
-      if (session?.userId && req.userId && session.userId !== req.userId) {
+      if (!session?.userId || session.userId !== req.userId) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
@@ -203,7 +248,7 @@ export function registerSessionRoutes(app: Express): void {
   });
 
   // Send a chat message
-  app.post("/api/sessions/:id/chat", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/chat", optionalAuth, validateRequest({ params: sessionIdParams, body: chatBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const { message } = req.body;
       const sessionId = req.params.id;
@@ -213,7 +258,7 @@ export function registerSessionRoutes(app: Express): void {
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
-      if (session.userId && req.userId && session.userId !== req.userId) {
+      if (!session.userId || session.userId !== req.userId) {
         return res.status(403).json({ error: 'Access denied' });
       }
 

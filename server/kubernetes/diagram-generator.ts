@@ -1,10 +1,6 @@
 import yaml from 'js-yaml';
-import OpenAI from 'openai';
+import { aiChatCompletion } from '../utils/ai-client.js';
 import { convertToDiagramType, DiagramType } from '../diagram/diagram-type-generator';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
 export interface KubernetesResource {
   kind: string;
@@ -782,7 +778,7 @@ ${baseSyntax}
 Make it clearer and more visually appealing while keeping all resources and relationships.`;
 
   try {
-    const completion = await openai.chat.completions.create({
+    const completion = await aiChatCompletion({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt },

@@ -1,5 +1,9 @@
 import type { Express } from "express";
 import { storage } from "../storage";
+import { validateRequest } from "../middleware/validate";
+import { sessionIdParams, fileIdParams } from "@shared/api-contracts/common";
+import { createFileBody, bulkFilesBody, updateFileBody } from "@shared/api-contracts/files";
+import { fileBasenameKey } from "../utils/generated-files-dedupe";
 
 /**
  * File management routes
@@ -33,7 +37,7 @@ export function registerFileRoutes(app: Express): void {
   });
 
   // Create a file (for testing)
-  app.post("/api/sessions/:id/files", async (req, res) => {
+  app.post("/api/sessions/:id/files", validateRequest({ params: sessionIdParams, body: createFileBody }), async (req, res) => {
     try {
       const sessionId = req.params.id;
       const { fileName, content } = req.body;
@@ -44,7 +48,8 @@ export function registerFileRoutes(app: Express): void {
 
       // Check if file already exists for this session
       const existingFiles = await storage.getFilesBySession(sessionId);
-      const existingFile = existingFiles.find(f => f.fileName === fileName);
+      const key = fileBasenameKey(fileName);
+      const existingFile = existingFiles.find((f) => fileBasenameKey(f.fileName) === key);
 
       if (existingFile) {
         // Update existing file
@@ -68,7 +73,7 @@ export function registerFileRoutes(app: Express): void {
   });
 
   // Bulk update files (for saving edited files from UI)
-  app.post("/api/sessions/:id/files/bulk", async (req, res) => {
+  app.post("/api/sessions/:id/files/bulk", validateRequest({ params: sessionIdParams, body: bulkFilesBody }), async (req, res) => {
     try {
       const sessionId = req.params.id;
       const { files } = req.body; // Array of { fileName, content }
@@ -81,7 +86,9 @@ export function registerFileRoutes(app: Express): void {
 
       // Get existing files for this session
       const existingFiles = await storage.getFilesBySession(sessionId);
-      const existingFilesMap = new Map(existingFiles.map(f => [f.fileName, f]));
+      const existingFilesMap = new Map(
+        existingFiles.map((f) => [fileBasenameKey(f.fileName), f] as const),
+      );
 
       const results = [];
       let createdCount = 0;
@@ -95,7 +102,7 @@ export function registerFileRoutes(app: Express): void {
           continue;
         }
 
-        const existingFile = existingFilesMap.get(fileName);
+        const existingFile = existingFilesMap.get(fileBasenameKey(fileName));
 
         if (existingFile) {
           // Update existing file
@@ -110,6 +117,7 @@ export function registerFileRoutes(app: Express): void {
             fileName,
             content,
           });
+          existingFilesMap.set(fileBasenameKey(fileName), created);
           results.push(created);
           createdCount++;
           console.log(`   ➕ Created: ${fileName} (${content.length} bytes)`);
@@ -132,7 +140,7 @@ export function registerFileRoutes(app: Express): void {
   });
 
   // Update a file
-  app.patch("/api/files/:id", async (req, res) => {
+  app.patch("/api/files/:id", validateRequest({ params: fileIdParams, body: updateFileBody }), async (req, res) => {
     try {
       const { content } = req.body;
       const file = await storage.updateFile(req.params.id, content);

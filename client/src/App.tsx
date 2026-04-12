@@ -24,8 +24,11 @@ import DockerWorkflow from "@/pages/DockerWorkflow";
 import DockerIntro from "@/pages/DockerIntro";
 import ValuationWorkflow from "@/pages/ValuationWorkflow";
 import ValuationIntro from "@/pages/ValuationIntro";
+import MigrateOpsWorkflow from "@/pages/MigrateOpsWorkflow";
+import MigrateOpsIntro from "@/pages/MigrateOpsIntro";
 import History from "@/pages/History";
 import NotFound from "@/pages/not-found";
+import AuthCallback from "@/pages/AuthCallback";
 
 /**
  * ProtectedRoute component
@@ -74,6 +77,10 @@ function Router() {
         <PageTransition>
           <Login />
         </PageTransition>
+      </Route>
+      <Route path="/auth/callback">
+        {/* No ProtectedRoute — this page receives the token and stores it */}
+        <AuthCallback />
       </Route>
       <Route path="/settings">
         <ProtectedRoute>
@@ -177,6 +184,20 @@ function Router() {
         <ProtectedRoute>
           <PageTransition>
             <ValuationWorkflow />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/migrateops">
+        <ProtectedRoute>
+          <PageTransition>
+            <MigrateOpsIntro />
+          </PageTransition>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/migrateops/app">
+        <ProtectedRoute>
+          <PageTransition>
+            <MigrateOpsWorkflow />
           </PageTransition>
         </ProtectedRoute>
       </Route>

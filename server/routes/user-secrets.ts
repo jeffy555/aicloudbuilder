@@ -1,5 +1,8 @@
 import type { Express } from "express";
 import { requireAuth, optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { secretTypeParams } from "@shared/api-contracts/common";
+import { saveSecretBody } from "@shared/api-contracts/user-secrets";
 import { bitwardenService, isBitwardenConfigured } from "../services/bitwarden-service";
 
 /**
@@ -9,13 +12,15 @@ function getEnvFallbackConfig() {
   const hasGithubEnv = !!(process.env.GITHUB_TOKEN && process.env.GITHUB_OWNER);
   const hasAzureDevOpsEnv = !!(process.env.AZURE_DEVOPS_ORG && process.env.AZURE_DEVOPS_PAT && process.env.AZURE_DEVOPS_PROJECT);
   const hasAzureCloudEnv = !!(process.env.AZURE_CLIENT_ID && process.env.AZURE_TENANT_ID && process.env.AZURE_SUBSCRIPTION_ID);
+  const hasAwsEnv = !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
+  const hasGcpEnv = !!(process.env.GCP_PROJECT_ID && process.env.GCP_CLIENT_EMAIL && process.env.GCP_PRIVATE_KEY);
 
   return {
     hasGithub: hasGithubEnv,
     hasAzureDevOps: hasAzureDevOpsEnv,
     hasAzureCloud: hasAzureCloudEnv,
-    hasAws: false,
-    hasGcp: false,
+    hasAws: hasAwsEnv,
+    hasGcp: hasGcpEnv,
     azureDevOps: hasAzureDevOpsEnv ? {
       org: process.env.AZURE_DEVOPS_ORG!,
       project: process.env.AZURE_DEVOPS_PROJECT!,
@@ -29,8 +34,14 @@ function getEnvFallbackConfig() {
     github: hasGithubEnv ? {
       owner: process.env.GITHUB_OWNER!,
     } : null,
-    aws: null,
-    gcp: null,
+    aws: hasAwsEnv ? {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+      region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1',
+    } : null,
+    gcp: hasGcpEnv ? {
+      projectId: process.env.GCP_PROJECT_ID!,
+      region: process.env.GCP_REGION || 'us-central1',
+    } : null,
   };
 }
 
@@ -94,7 +105,7 @@ export function registerUserSecretsRoutes(app: Express) {
    * PUT /api/user/secrets/:type
    * Save user secrets to Bitwarden
    */
-  app.put("/api/user/secrets/:type", requireAuth, async (req: AuthenticatedRequest, res) => {
+  app.put("/api/user/secrets/:type", requireAuth, validateRequest({ params: secretTypeParams, body: saveSecretBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const userId = req.userId!;
       const type = req.params.type as 'azure-devops' | 'azure-cloud' | 'github' | 'aws' | 'gcp';

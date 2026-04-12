@@ -231,16 +231,16 @@ export default function ScoreMe() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={() => window.location.reload()}>
+            <Button variant="ghost" size="sm" onClick={() => window.location.reload()} data-testid="scoreme-btn-refresh">
               Refresh
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => (window.location.href = "/")}>
+            <Button variant="ghost" size="sm" onClick={() => (window.location.href = "/")} data-testid="scoreme-btn-home">
               Home
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => setProvider("github")}>
+            <Button variant="secondary" size="sm" onClick={() => setProvider("github")} data-testid="scoreme-card-provider-github">
               GitHub
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => setProvider("azure")}>
+            <Button variant="secondary" size="sm" onClick={() => setProvider("azure")} data-testid="scoreme-card-provider-azure">
               Azure DevOps
             </Button>
           </div>
@@ -277,6 +277,7 @@ export default function ScoreMe() {
                 <Button
                   onClick={handleRunScore}
                   disabled={isRunning || repositories.length === 0 || !selectedRepoId}
+                  data-testid="scoreme-btn-run"
                 >
                 {isRunning ? "Analyzing..." : "Run ScoreMe"} <ArrowRight className="w-4 h-4 ml-2" />
               </Button>
@@ -300,9 +301,9 @@ export default function ScoreMe() {
                 <div className="flex items-center gap-3">
                   <div className="text-center">
                     <p className="text-xs uppercase tracking-widest text-muted-foreground">Final score</p>
-                    <p className="text-4xl font-bold text-primary">{report.finalScore.toFixed(1)}%</p>
+                    <p className="text-4xl font-bold text-primary" data-testid="scoreme-score-badge">{report.finalScore.toFixed(1)}%</p>
                   </div>
-                  <Button variant="outline" size="sm" className="gap-1" onClick={handleDownloadReport}>
+                  <Button variant="outline" size="sm" className="gap-1" onClick={handleDownloadReport} data-testid="scoreme-btn-download">
                     <Download className="w-4 h-4" />
                     Download ScoreSheet
                   </Button>
@@ -364,7 +365,7 @@ export default function ScoreMe() {
 
               <div className="space-y-4">
                 <h3 className="text-xl font-semibold">Findings & Remediation</h3>
-                <div className="grid gap-3">
+                <div className="grid gap-3" data-testid="scoreme-findings-table">
                   {report.findings.map((finding) => (
                     <div
                       key={`${finding.category}-${finding.message}`}

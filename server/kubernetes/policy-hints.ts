@@ -1,8 +1,32 @@
 /**
  * OPA / Kyverno Policy Hints
- * Static library of common Kubernetes policy rules with remediation guidance.
+ * AI-driven policy analysis using GPT-4o-mini for contextual Kubernetes policy recommendations.
  */
-import yaml from 'js-yaml';
+import { aiChatCompletion } from '../utils/ai-client.js';
+import { z } from 'zod';
+import { sanitizeContent } from '../utils/sanitize-prompt.js';
+
+// ─── Zod schemas for AI response validation ─────────────────────────────────
+
+const aiPolicyViolationSchema = z.object({
+  resource: z.string(),
+  kind: z.string(),
+  reason: z.string(),
+});
+const aiPolicyHintSchema = z.object({
+  id: z.string().optional().default(''),
+  engine: z.enum(['kyverno', 'opa']).catch('kyverno'),
+  severity: z.enum(['critical', 'high', 'medium', 'low']).catch('medium'),
+  title: z.string().optional().default('Policy violation'),
+  description: z.string().optional().default(''),
+  remediation: z.string().optional().default(''),
+  affectedKinds: z.array(z.string()).catch([]),
+  docsUrl: z.string().optional(),
+  violations: z.array(aiPolicyViolationSchema).catch([]),
+});
+const aiPolicyHintsResponseSchema = z.object({
+  hints: z.array(aiPolicyHintSchema).catch([]),
+});
 
 export interface PolicyHint {
   id: string;
@@ -20,225 +44,102 @@ export interface PolicyCheckResult {
   violations: Array<{ resource: string; kind: string; reason: string }>;
 }
 
-// ─── Static Policy Library ───────────────────────────────────────────────────
-
-export const POLICY_HINTS: PolicyHint[] = [
-  {
-    id: 'kyverno-require-labels',
-    engine: 'kyverno',
-    severity: 'medium',
-    title: 'Workloads must have owner and env labels',
-    description: 'All workload resources should declare owner and env labels for governance and cost attribution.',
-    remediation: 'Add `labels: { owner: <team>, env: <environment> }` to spec.template.metadata.labels.',
-    affectedKinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob'],
-  },
-  {
-    id: 'kyverno-disallow-latest-tag',
-    engine: 'kyverno',
-    severity: 'high',
-    title: 'Container images must not use :latest tag',
-    description: 'Using :latest prevents reproducible deployments and makes rollbacks unreliable.',
-    remediation: 'Pin image tags to a specific version: e.g., `nginx:1.25.3` instead of `nginx:latest`.',
-    affectedKinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod', 'Job', 'CronJob'],
-  },
-  {
-    id: 'kyverno-require-resource-limits',
-    engine: 'kyverno',
-    severity: 'high',
-    title: 'All containers must specify CPU and memory limits',
-    description: 'Missing resource limits can lead to resource contention and noisy-neighbour problems.',
-    remediation: 'Set `resources.limits.cpu` and `resources.limits.memory` on every container spec.',
-    affectedKinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod', 'Job', 'CronJob'],
-  },
-  {
-    id: 'opa-privileged-containers',
-    engine: 'opa',
-    severity: 'critical',
-    title: 'Privileged containers are not allowed',
-    description: 'Privileged containers bypass most container isolation and gain full access to the host.',
-    remediation: 'Set `securityContext.privileged: false` or omit the field (defaults to false).',
-    affectedKinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod', 'Job', 'CronJob'],
-  },
-  {
-    id: 'opa-host-namespaces',
-    engine: 'opa',
-    severity: 'critical',
-    title: 'Host namespaces (hostPID/hostIPC/hostNetwork) must not be enabled',
-    description: 'Sharing host namespaces breaks container isolation and is a major security risk.',
-    remediation: 'Ensure `spec.hostPID`, `spec.hostIPC`, and `spec.hostNetwork` are all `false` or absent.',
-    affectedKinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod'],
-  },
-  {
-    id: 'kyverno-disallow-root-user',
-    engine: 'kyverno',
-    severity: 'high',
-    title: 'Containers must not run as root (UID 0)',
-    description: 'Running as root inside a container increases the blast radius of a container escape.',
-    remediation: 'Set `securityContext.runAsNonRoot: true` and `securityContext.runAsUser: <uid>` (≥ 1000).',
-    affectedKinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod', 'Job', 'CronJob'],
-  },
-  {
-    id: 'kyverno-readonly-root-fs',
-    engine: 'kyverno',
-    severity: 'medium',
-    title: 'Containers should use a read-only root filesystem',
-    description: 'A writable root filesystem allows attackers to persist changes after a container restart.',
-    remediation: 'Set `securityContext.readOnlyRootFilesystem: true` on container specs.',
-    affectedKinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod', 'Job', 'CronJob'],
-  },
-  {
-    id: 'opa-no-default-service-account',
-    engine: 'opa',
-    severity: 'medium',
-    title: 'Pods should not use the default service account',
-    description: 'The default service account often has overly broad permissions. Use dedicated service accounts.',
-    remediation: 'Set `spec.serviceAccountName` to a dedicated account and set `automountServiceAccountToken: false` when possible.',
-    affectedKinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod'],
-  },
-];
-
-// ─── Policy Checker ───────────────────────────────────────────────────────────
+// ─── AI-Powered Policy Checker ───────────────────────────────────────────────
 
 /**
- * Run all policy hints against a list of YAML manifest strings.
+ * Run AI-powered policy analysis against a list of YAML manifest strings.
  * Returns results only for policies that have at least one violation.
  */
-export function checkPolicyHints(manifests: string[]): PolicyCheckResult[] {
-  const results: PolicyCheckResult[] = [];
+export async function checkPolicyHints(manifests: string[]): Promise<PolicyCheckResult[]> {
+  const manifestContent = manifests
+    .join('\n---\n')
+    .substring(0, 14000);
 
-  for (const hint of POLICY_HINTS) {
-    const violations: PolicyCheckResult['violations'] = [];
-
-    for (const manifestYAML of manifests) {
-      try {
-        const docs = manifestYAML.split(/^---\s*$/m).filter(s => s.trim());
-        for (const doc of docs) {
-          const parsed = yaml.load(doc) as any;
-          if (!parsed?.kind || !hint.affectedKinds.includes(parsed.kind)) continue;
-          const resourceName = `${parsed.kind}/${parsed.metadata?.name ?? '?'}`;
-          const violation = evaluatePolicy(hint.id, parsed, resourceName);
-          if (violation) violations.push(violation);
-        }
-      } catch {
-        // skip unparseable
-      }
-    }
-
-    if (violations.length > 0) {
-      results.push({ hint, violations });
-    }
+  if (!manifestContent.trim()) {
+    return [];
   }
 
-  return results;
+  try {
+    console.log(`🤖 Running AI-powered policy hints analysis...`);
+
+    const completion = await aiChatCompletion({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system' as const,
+          content: `You are a Kubernetes policy expert specializing in Kyverno and OPA/Gatekeeper. Analyze these manifests and suggest applicable policies. For each policy, specify: id, engine (kyverno/opa), severity (critical/high/medium/low), title, description, remediation steps, and affected Kubernetes kinds.
+
+For each policy you identify, also check the manifests for violations. A violation means a specific resource in the manifests does not comply with the policy.
+
+Return ONLY this JSON (no markdown fencing):
+{
+  "hints": [
+    {
+      "id": "<unique-id like kyverno-require-labels or opa-privileged-containers>",
+      "engine": "kyverno|opa",
+      "severity": "critical|high|medium|low",
+      "title": "<concise policy title>",
+      "description": "<what the policy enforces and why>",
+      "remediation": "<specific steps to fix violations>",
+      "affectedKinds": ["Deployment", "StatefulSet", ...],
+      "violations": [
+        {
+          "resource": "<Kind/name>",
+          "kind": "<Kind>",
+          "reason": "<why this resource violates the policy>"
+        }
+      ]
+    }
+  ]
 }
 
-// ─── Per-Policy Evaluators ────────────────────────────────────────────────────
+Only include policies that have at least one violation in the provided manifests. Focus on real, actionable findings — not theoretical policies that don't apply.`,
+        },
+        {
+          role: 'user' as const,
+          content: `Analyze these Kubernetes manifests for policy violations:\n\n${sanitizeContent(manifestContent)}`,
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 4000,
+      response_format: { type: 'json_object' },
+    });
 
-function evaluatePolicy(
-  policyId: string,
-  resource: any,
-  resourceName: string
-): { resource: string; kind: string; reason: string } | null {
-  const kind: string = resource.kind;
-  const spec = resource.spec ?? {};
-  const podSpec: any =
-    spec.template?.spec ??     // Deployment / StatefulSet / DaemonSet / Job / CronJob
-    spec.jobTemplate?.spec?.template?.spec ??  // CronJob
-    (kind === 'Pod' ? spec : null);
+    const raw = completion.choices[0]?.message?.content?.trim() || '{}';
+    let rawParsed: any = {};
+    try { rawParsed = JSON.parse(raw); } catch { /* use defaults */ }
 
-  if (!podSpec && policyId !== 'opa-host-namespaces' && policyId !== 'kyverno-require-labels') {
-    return null; // no pod spec to check
+    const result = aiPolicyHintsResponseSchema.safeParse(rawParsed);
+    if (!result.success) {
+      console.warn('[policy-hints] AI response validation failed:', result.error.message);
+      return [];
+    }
+
+    const results: PolicyCheckResult[] = [];
+
+    for (const h of result.data.hints) {
+      const violations = h.violations.filter(v => v.resource && v.kind && v.reason);
+
+      if (violations.length === 0) continue;
+
+      const hint: PolicyHint = {
+        id: h.id || `policy-${results.length + 1}`,
+        engine: h.engine,
+        severity: h.severity,
+        title: h.title,
+        description: h.description,
+        remediation: h.remediation,
+        affectedKinds: h.affectedKinds,
+        ...(h.docsUrl ? { docsUrl: h.docsUrl } : {}),
+      };
+
+      results.push({ hint, violations });
+    }
+
+    console.log(`✅ AI policy analysis complete: ${results.length} policies with violations found`);
+    return results;
+  } catch (aiError: any) {
+    console.warn(`⚠️  AI policy hints analysis failed: ${aiError?.message ?? 'unknown error'} — returning empty results`);
+    return [];
   }
-
-  switch (policyId) {
-    case 'kyverno-require-labels': {
-      const labels: Record<string, string> = spec.template?.metadata?.labels ?? resource.metadata?.labels ?? {};
-      if (!labels.owner || !labels.env) {
-        const missing = [!labels.owner && 'owner', !labels.env && 'env'].filter(Boolean).join(', ');
-        return { resource: resourceName, kind, reason: `Missing labels: ${missing}` };
-      }
-      break;
-    }
-
-    case 'kyverno-disallow-latest-tag': {
-      const containers: any[] = [
-        ...(podSpec?.containers ?? []),
-        ...(podSpec?.initContainers ?? []),
-      ];
-      for (const c of containers) {
-        const image: string = c.image ?? '';
-        if (!image || image.endsWith(':latest') || !image.includes(':')) {
-          return { resource: resourceName, kind, reason: `Container "${c.name}" uses latest/untagged image: ${image}` };
-        }
-      }
-      break;
-    }
-
-    case 'kyverno-require-resource-limits': {
-      const containers: any[] = podSpec?.containers ?? [];
-      for (const c of containers) {
-        if (!c.resources?.limits?.cpu || !c.resources?.limits?.memory) {
-          return { resource: resourceName, kind, reason: `Container "${c.name}" missing CPU/memory limits` };
-        }
-      }
-      break;
-    }
-
-    case 'opa-privileged-containers': {
-      const containers: any[] = [
-        ...(podSpec?.containers ?? []),
-        ...(podSpec?.initContainers ?? []),
-      ];
-      for (const c of containers) {
-        if (c.securityContext?.privileged === true) {
-          return { resource: resourceName, kind, reason: `Container "${c.name}" runs as privileged` };
-        }
-      }
-      break;
-    }
-
-    case 'opa-host-namespaces': {
-      const s = kind === 'Pod' ? spec : spec.template?.spec ?? {};
-      if (s.hostPID || s.hostIPC || s.hostNetwork) {
-        const enabled = [s.hostPID && 'hostPID', s.hostIPC && 'hostIPC', s.hostNetwork && 'hostNetwork'].filter(Boolean).join(', ');
-        return { resource: resourceName, kind, reason: `Host namespaces enabled: ${enabled}` };
-      }
-      break;
-    }
-
-    case 'kyverno-disallow-root-user': {
-      const containers: any[] = podSpec?.containers ?? [];
-      for (const c of containers) {
-        const runAsNonRoot = c.securityContext?.runAsNonRoot ?? podSpec?.securityContext?.runAsNonRoot;
-        const runAsUser = c.securityContext?.runAsUser ?? podSpec?.securityContext?.runAsUser;
-        if (runAsNonRoot === false || runAsUser === 0) {
-          return { resource: resourceName, kind, reason: `Container "${c.name}" explicitly runs as root` };
-        }
-        if (runAsNonRoot === undefined && runAsUser === undefined) {
-          return { resource: resourceName, kind, reason: `Container "${c.name}" does not set runAsNonRoot or runAsUser` };
-        }
-      }
-      break;
-    }
-
-    case 'kyverno-readonly-root-fs': {
-      const containers: any[] = podSpec?.containers ?? [];
-      for (const c of containers) {
-        if (c.securityContext?.readOnlyRootFilesystem !== true) {
-          return { resource: resourceName, kind, reason: `Container "${c.name}" does not set readOnlyRootFilesystem: true` };
-        }
-      }
-      break;
-    }
-
-    case 'opa-no-default-service-account': {
-      const sa: string = podSpec?.serviceAccountName ?? 'default';
-      if (sa === 'default') {
-        return { resource: resourceName, kind, reason: 'Using default service account' };
-      }
-      break;
-    }
-  }
-
-  return null;
 }

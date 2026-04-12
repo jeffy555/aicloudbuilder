@@ -505,15 +505,15 @@ function SlideCommit() {
 }
 
 const slides: Slide[] = [
-  { step: 1, title: "Workflow Selection", subtitle: "Choose: Manifest Generation or Helm Chart Validation", icon: Package, content: <SlideWorkflowSelection /> },
-  { step: 2, title: "Provider Selection", subtitle: "Select GitHub or Azure DevOps", icon: Cloud, content: <SlideProviderSelection /> },
-  { step: 3, title: "Repository", subtitle: "Select or create a repository", icon: GitBranch, content: <SlideRepoSelection /> },
-  { step: 4, title: "Describe Workload", subtitle: "Natural language description of your Kubernetes workload", icon: FileText, content: <SlideDescribeWorkload /> },
-  { step: 5, title: "Generate Manifests", subtitle: "AI generates production-ready Kubernetes manifests", icon: Loader2, content: <SlideGenerating /> },
-  { step: 6, title: "Review Files", subtitle: "Review and edit generated manifests in CodeEditor", icon: FileCode, content: <SlideReviewFiles /> },
-  { step: 7, title: "Security Scan", subtitle: "Scan for vulnerabilities and misconfigurations", icon: Shield, content: <SlideSecurityScan /> },
-  { step: 8, title: "Best Practices", subtitle: "Validate Kubernetes best practices", icon: Wrench, content: <SlideBestPractices /> },
-  { step: 9, title: "Commit & Push", subtitle: "Commit manifests to repository", icon: Package, content: <SlideCommit /> },
+  { step: 1, title: "Pick Your Path", subtitle: "Manifest generation, Kustomize, Helm validate, or AI Helm generation — one tool for every K8s pattern", icon: Package, content: <SlideWorkflowSelection /> },
+  { step: 2, title: "Connect Your Repo", subtitle: "Link GitHub or Azure DevOps — your manifests commit straight to your own branch", icon: Cloud, content: <SlideProviderSelection /> },
+  { step: 3, title: "Choose Your Repository", subtitle: "Select any existing repo or create new — no branch migration, no config files to edit", icon: GitBranch, content: <SlideRepoSelection /> },
+  { step: 4, title: "Describe Once, Get Everything", subtitle: "Plain English → Deployment, Service, Ingress, HPA, ConfigMap — all generated simultaneously", icon: FileText, content: <SlideDescribeWorkload /> },
+  { step: 5, title: "AI Writes Production-Grade Manifests", subtitle: "Correct resource limits, liveness probes, and RBAC — enforced by AI, not hoped for", icon: Loader2, content: <SlideGenerating /> },
+  { step: 6, title: "Review & Edit Live", subtitle: "Every YAML opens in the built-in editor — modify, save, and re-scan without switching tools", icon: FileCode, content: <SlideReviewFiles /> },
+  { step: 7, title: "Security Scan Before Deploy", subtitle: "Checkov detects misconfigs, missing policies, and RBAC gaps — one-click AI fix for every finding", icon: Shield, content: <SlideSecurityScan /> },
+  { step: 8, title: "K8s Best Practices Enforced", subtitle: "Liveness probes, resource quotas, image tags — AI validates and auto-fixes before commit", icon: Wrench, content: <SlideBestPractices /> },
+  { step: 9, title: "Commit & Done", subtitle: "AI writes the commit message — push all manifests directly to your branch in one click", icon: Package, content: <SlideCommit /> },
 ];
 
 const SLIDE_DURATION = 5000;

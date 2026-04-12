@@ -8,6 +8,10 @@ import { featureFlags } from "../middleware/feature-flags";
 import { fixLogStore } from "../audit/fix-log";
 import { getFixGuidance } from "../checkov-fix-guidance";
 import { runCheckovKubernetes } from "../kubernetes/checkov-validator";
+import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { sessionIdParams } from "@shared/api-contracts/common";
+import { fixIssuesBody } from "@shared/api-contracts/fixes";
 
 // Helper function to repair JSON (same as in openai-service.ts)
 function repairJson(jsonText: string): string {
@@ -431,7 +435,7 @@ async function verifyChecksWithCheckov(
 }
 
 export function registerFixesRoutes(app: Express): void {
-  app.post("/api/sessions/:id/fix-issues", async (req, res) => {
+  app.post("/api/sessions/:id/fix-issues", optionalAuth, validateRequest({ params: sessionIdParams, body: fixIssuesBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     const { failedChecks, framework = 'terraform' } = req.body;
 
@@ -448,6 +452,10 @@ export function registerFixesRoutes(app: Express): void {
           error: 'Session not found',
           details: `Session ${sessionId} does not exist`
         });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Fix session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       if (!failedChecks || !Array.isArray(failedChecks) || failedChecks.length === 0) {
@@ -571,7 +579,7 @@ export function registerFixesRoutes(app: Express): void {
         console.log(`   Issues to fix: ${checks.length}`);
 
         // Process checks in batches if there are too many (better success rate)
-        const BATCH_SIZE = 5; // Process 5 checks at a time for better AI focus
+        const BATCH_SIZE = 10; // Process 10 checks per batch — fewer sequential AI calls
         const checkBatches: any[][] = [];
         for (let i = 0; i < checks.length; i += BATCH_SIZE) {
           checkBatches.push(checks.slice(i, i + BATCH_SIZE));
@@ -896,12 +904,27 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
             continue; // Skip Terraform fix logic for Kubernetes
           }
 
-          // Build detailed issue descriptions using RAG to find remediation templates
-          // Priority 2 Fix: Extract base resource name and add count/for_each context
-          const detailedIssues = await Promise.all(
-            batchChecks.map(async (check: any, idx: number) => {
-              let description = `${idx + 1}. ${check.checkName} (${check.checkId})\n`;
-              description += `   - Resource Instance: ${check.resource}\n`;
+          // Fetch remediation data ONCE per check — used both for descriptions and prompt header
+          const remediationResults = await Promise.all(
+            batchChecks.map(async (check: any) => {
+              const resourceMatch = check.resource?.match(/^([a-z_]+)/);
+              const resourceType = resourceMatch?.[1] || '';
+              const remediation = await getRemediation(
+                check.checkId,
+                check.checkName,
+                check.guideline || '',
+                resourceType,
+                session.userId || undefined,
+                session.cloudProvider || 'azure'
+              );
+              return { check, remediation, resourceType };
+            })
+          );
+
+          // Build detailed issue descriptions from the already-fetched remediation data
+          const detailedIssues = remediationResults.map(({ check, remediation, resourceType }, idx) => {
+            let description = `${idx + 1}. ${check.checkName} (${check.checkId})\n`;
+            description += `   - Resource Instance: ${check.resource}\n`;
 
               // Priority 2: Extract base resource name for count/for_each resources
               const baseResourceName = extractBaseResourceName(check.resource);
@@ -926,32 +949,16 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
               if (check.file) {
                 description += `   - File: ${check.file}\n`;
               }
-              // Extract resource type from resource string (e.g., "azurerm_storage_account.example" -> "azurerm_storage_account")
-              const resourceMatch = check.resource?.match(/^([a-z_]+)/);
-              const resourceType = resourceMatch?.[1] || '';
               if (resourceType) {
                 description += `   - Resource Type: ${resourceType}\n`;
               }
 
-              // Use unified retrieval (intelligent when flag on, RAG otherwise)
-              const remediation = await getRemediation(
-                check.checkId,
-                check.checkName,
-                check.guideline || '',
-                resourceType,
-                session.userId || undefined,
-                session.cloudProvider || 'azure'
-              );
-
               if (remediation) {
                 const decision = remediationRAGService.shouldApplyFix(remediation.confidence);
-
-                // Handle both fix snippets and templates (backward compatibility)
                 const snippet = remediation.snippet;
                 const template = remediation.template;
 
                 if (snippet) {
-                  // New: Fix snippet
                   description += `\n   ${decision.apply ? '✅' : '⚠️'} REMEDIATION FIX SNIPPET FOUND:\n`;
                   description += `   - Check ID: ${snippet.checkId}\n`;
                   description += `   - Resource Type: ${snippet.resourceType}\n`;
@@ -960,13 +967,8 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
                   description += `   - Match: ${remediation.matchReason}\n`;
                   description += `   - Status: ${decision.reason}\n`;
                   description += `   - Remediation Snippet:\n`;
-
-                  const snippetLines = snippet.fixSnippet.split('\n');
-                  snippetLines.forEach(line => {
-                    description += `     ${line}\n`;
-                  });
+                  snippet.fixSnippet.split('\n').forEach(line => { description += `     ${line}\n`; });
                 } else if (template) {
-                  // Backward compatibility: Template
                   description += `\n   ${decision.apply ? '✅' : '⚠️'} REMEDIATION TEMPLATE FOUND:\n`;
                   description += `   - Template: ${template.check_id}\n`;
                   description += `   - Confidence: ${(remediation.confidence * 100).toFixed(1)}%\n`;
@@ -974,14 +976,9 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
                   description += `   - Status: ${decision.reason}\n`;
                   description += `   - Attribute: ${template.terraform_attribute}\n`;
                   description += `   - Remediation Snippet:\n`;
-
-                  const snippetLines = template.remediation_snippet.split('\n');
-                  snippetLines.forEach(line => {
-                    description += `     ${line}\n`;
-                  });
+                  template.remediation_snippet.split('\n').forEach(line => { description += `     ${line}\n`; });
                 }
 
-                // Priority 2: Add specific instructions for count/for_each resources
                 if (isCountForEach) {
                   description += `\n   🎯 FIX LOCATION FOR COUNT/FOR_EACH:\n`;
                   description += `      Apply the remediation snippet above to the resource block "${baseResourceName}".\n`;
@@ -997,27 +994,9 @@ Return ONLY the complete fixed YAML code in a code block, nothing else.`;
               }
 
               return description;
-            })
-          );
+          });
 
           const detailedIssuesText = detailedIssues.join('\n');
-
-        // Check which checks have remediation templates
-        const remediationResults = await Promise.all(
-          batchChecks.map(async (check: any) => {
-            const resourceMatch = check.resource?.match(/^([a-z_]+)/);
-            const resourceType = resourceMatch?.[1] || '';
-            const remediation = await getRemediation(
-              check.checkId,
-              check.checkName,
-              check.guideline || '',
-              resourceType,
-              session.userId || undefined,
-              session.cloudProvider || 'azure'
-            );
-            return { check, remediation };
-          })
-        );
 
         const checksWithRemediation = remediationResults.filter(r => r.remediation && r.remediation.confidence >= 0.7);
         const checksWithoutRemediation = remediationResults.filter(r => !r.remediation || r.remediation.confidence < 0.7);

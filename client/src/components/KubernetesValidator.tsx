@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import {
-  RefreshCw, CheckCircle2, AlertCircle, XCircle, Wrench, Loader2
+  RefreshCw, CheckCircle2, AlertCircle, XCircle, Wrench, Loader2, ThumbsUp
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -11,6 +11,16 @@ interface KubernetesValidatorProps {
   sessionId: string;
   onValidationStart?: () => void;
   onValidationComplete?: () => void;
+  /** Called after validation finishes — true if issues found, false if clean */
+  onValidationResult?: (hasIssues: boolean) => void;
+  /** Called when fix starts (show terminal) */
+  onFixStart?: () => void;
+  /** Called when fix finishes (hide terminal) */
+  onFixComplete?: () => void;
+  /** Called when user approves fixes (refresh code editor) */
+  onFixesApproved?: () => void;
+  /** Called after approve + re-validation cycle completes — pipeline should resume */
+  onFixCycleComplete?: () => void;
 }
 
 export interface KubernetesValidatorRef {
@@ -59,12 +69,16 @@ function stripCategory(message: string): string {
 }
 
 const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidatorProps>(
-  ({ sessionId, onValidationStart, onValidationComplete }, ref) => {
+  ({ sessionId, onValidationStart, onValidationComplete, onValidationResult, onFixStart, onFixComplete, onFixesApproved, onFixCycleComplete }, ref) => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
   const [fixSummary, setFixSummary] = useState<FixSummary | null>(null);
   const [isFixing, setIsFixing] = useState(false);
+  /** Tracks whether user has gone through fix→approve cycle (show approve button after fix) */
+  const [fixApplied, setFixApplied] = useState(false);
+  /** True once user clicks "Approve Changes" */
+  const [changesApproved, setChangesApproved] = useState(false);
 
   const fixMutation = useMutation({
     mutationFn: async (issues: IssueItem[]) => {
@@ -76,15 +90,16 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
     onSuccess: (result) => {
       setFixSummary(result);
       setValidationResult(null); // clear issues, show fix summary instead
+      setFixApplied(true);
 
       if (result.totalFixed > 0) {
         toast({
-          title: "✅ Fixes Applied",
+          title: "Fixes Applied",
           description: `Fixed ${result.totalFixed} file(s) with best practices applied.`,
         });
       } else {
         toast({
-          title: "⚠️ No Files Updated",
+          title: "No Files Updated",
           description: "Some issues may require manual fixes.",
           variant: "destructive",
         });
@@ -101,7 +116,10 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
         variant: "destructive",
       });
     },
-    onSettled: () => setIsFixing(false),
+    onSettled: () => {
+      setIsFixing(false);
+      onFixComplete?.();
+    },
   });
 
   const validateMutation = useMutation({
@@ -113,17 +131,22 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
       setValidationResult(result);
       setFixSummary(null);
 
-      if (result.valid && result.errors.length === 0 && result.warnings.length === 0) {
-        toast({ title: "✅ Best Approach Validated", description: "All Kubernetes manifests follow best practices!" });
+      const hasIssues = !result.valid || result.errors.length > 0 || result.warnings.length > 0;
+
+      if (!hasIssues) {
+        toast({ title: "Best Approach Validated", description: "All Kubernetes manifests follow best practices!" });
       } else {
         const total = result.errors.length + result.warnings.length;
         toast({
-          title: "⚠️ Issues Found",
+          title: "Issues Found",
           description: `Found ${total} issue(s). Click "Fix" to apply automatic fixes.`,
           variant: "destructive",
         });
       }
       onValidationComplete?.();
+
+      // Report whether issues exist so pipeline can pause/advance
+      onValidationResult?.(hasIssues);
     },
     onError: (error: any) => {
       toast({
@@ -132,13 +155,18 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
         variant: "destructive",
       });
       onValidationComplete?.();
+      onValidationResult?.(false);
     },
   });
 
   const triggerValidate = (resetFixFlag = true) => {
     onValidationStart?.();
     setValidationResult(null);
-    if (resetFixFlag) setFixSummary(null);
+    if (resetFixFlag) {
+      setFixSummary(null);
+      setFixApplied(false);
+      setChangesApproved(false);
+    }
     validateMutation.mutate();
   };
 
@@ -149,8 +177,21 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
   const handleFix = () => {
     if (!validationResult) return;
     setIsFixing(true);
+    onFixStart?.();
     const allIssues = [...validationResult.errors, ...validationResult.warnings];
     fixMutation.mutate(allIssues);
+  };
+
+  const handleApprove = () => {
+    setChangesApproved(true);
+    // Fixes are already persisted server-side when "Fix" ran (see /fix-kubernetes-validation).
+    // Refresh the editor, then advance the pipeline — do not run Best Practices again here,
+    // so the next stage (Security scan) starts immediately after approval.
+    onFixesApproved?.();
+    setFixSummary(null);
+    setFixApplied(false);
+    setValidationResult(null);
+    onFixCycleComplete?.();
   };
 
   // ── Loading states ────────────────────────────────────────────────────────
@@ -192,6 +233,10 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
             </div>
           </div>
 
+          <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+            Manifests are saved when you run <strong>Fix</strong>. <strong>Approve</strong> accepts those changes and continues the pipeline to Security scan (no second analysis run).
+          </p>
+
           {fixSummary.updatedFiles && fixSummary.updatedFiles.length > 0 && (
             <div className="space-y-1">
               <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">
@@ -219,10 +264,23 @@ const KubernetesValidator = forwardRef<KubernetesValidatorRef, KubernetesValidat
           )}
         </div>
 
-        <Button variant="outline" size="sm" onClick={() => triggerValidate()}>
-          <RefreshCw className="w-4 h-4 mr-2" />
-          Re-Run Analysis
-        </Button>
+        <div className="flex gap-2">
+          {fixApplied && !changesApproved && (
+            <Button
+              size="sm"
+              onClick={handleApprove}
+              data-testid="btn-approve-k8s-validation"
+              className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold shadow-lg"
+            >
+              <ThumbsUp className="w-4 h-4 mr-2" />
+              Approve Changes
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={() => triggerValidate()}>
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Re-Run Analysis
+          </Button>
+        </div>
       </div>
     );
   }

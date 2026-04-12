@@ -2,6 +2,10 @@ import type { Express } from "express";
 import { storage } from "../storage";
 import { mcpClient, type MCPProvider } from "../mcp-client";
 import { openaiService } from "../openai-service";
+import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { sessionIdParams } from "@shared/api-contracts/common";
+import { analyzeCostBody } from "@shared/api-contracts/cost-analysis";
 import { getCachedPricing, setCachedPricing } from "../utils/pricing-cache";
 import {
   HOURS_PER_MONTH,
@@ -48,7 +52,7 @@ function repairJson(jsonText: string): string {
 
 export function registerCostAnalysisRoutes(app: Express): void {
   // Analyze cost for Terraform resources
-  app.post("/api/sessions/:id/analyze-cost", async (req, res) => {
+  app.post("/api/sessions/:id/analyze-cost", optionalAuth, validateRequest({ params: sessionIdParams, body: analyzeCostBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
 
     console.log(`\n💰 ========== COST ANALYSIS REQUEST ==========`);
@@ -63,6 +67,10 @@ export function registerCostAnalysisRoutes(app: Express): void {
           error: 'Session not found',
           details: `Session ${sessionId} does not exist`
         });
+      }
+      if (!session.userId || session.userId !== req.userId) {
+        console.warn(`[SECURITY] Cost analysis session access denied: sessionId=${sessionId} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+        return res.status(403).json({ error: 'Access denied to this session' });
       }
 
       // CRITICAL: Fetch files from SESSION STORAGE (not repository)
@@ -217,9 +225,19 @@ export function registerCostAnalysisRoutes(app: Express): void {
       // Step 1: Use AI to analyze Terraform files and extract resource information
       console.log(`\n🤖 Step 1: Analyzing Terraform files...`);
 
-      // Get cloud provider from session
-      const cloudProvider = session.cloudProvider || 'azure';
-      console.log(`   📋 Cloud provider: ${cloudProvider}`);
+      // Get cloud provider from session (with ArchMe fallback)
+      let cloudProvider = session.cloudProvider || 'azure';
+      if (!session.cloudProvider && session.archMeAnalysis) {
+        try {
+          const archAnalysis = JSON.parse(session.archMeAnalysis as string);
+          if (archAnalysis.cloudProvider && archAnalysis.cloudProvider !== 'multi' && archAnalysis.cloudProvider !== 'hybrid') {
+            cloudProvider = archAnalysis.cloudProvider;
+          } else if (archAnalysis.detectedProviders?.length === 1) {
+            cloudProvider = archAnalysis.detectedProviders[0];
+          }
+        } catch { /* ignore parse errors */ }
+      }
+      console.log(`   📋 Cloud provider: ${cloudProvider}${!session.cloudProvider && session.archMeAnalysis ? ' (from ArchMe analysis)' : ''}`);
 
       const filesContent = terraformFiles.map(f => ({
         path: f.fileName,
@@ -251,8 +269,9 @@ export function registerCostAnalysisRoutes(app: Express): void {
           // Process resources based on cloud provider
           const isAzureResource = resourceType.startsWith('azurerm_') || resourceType.startsWith('azapi_');
           const isAWSResource = resourceType.startsWith('aws_');
+          const isGCPResource = resourceType.startsWith('google_');
 
-          if ((cloudProvider === 'azure' && isAzureResource) || (cloudProvider === 'aws' && isAWSResource)) {
+          if ((cloudProvider === 'azure' && isAzureResource) || (cloudProvider === 'aws' && isAWSResource) || (cloudProvider === 'gcp' && isGCPResource)) {
             // Find matching closing brace (handle nested braces)
             let braceCount = 1;
             let pos = openBracePos + 1;
@@ -1225,7 +1244,6 @@ Remember: Return ONLY the JSON object, no other text.`;
               confidenceScore = Math.min(confidenceScore, CONFIDENCE_THRESHOLDS.PENALTY_BROAD_FILTER);
               status = 'estimated';
             }
-
             const confidenceLabel: CostResource['confidenceLabel'] =
               confidenceScore >= CONFIDENCE_THRESHOLDS.HIGH
                 ? 'high'

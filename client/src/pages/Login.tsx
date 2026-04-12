@@ -8,8 +8,11 @@ import GlassCard from '@/components/ui/GlassCard';
 import InputField from '@/components/auth/InputField';
 import PasswordField from '@/components/auth/PasswordField';
 import SubmitButton from '@/components/auth/SubmitButton';
+import MicrosoftSignInButton from '@/components/auth/MicrosoftSignInButton';
+import AwsSignInButton from '@/components/auth/AwsSignInButton';
 import { useFormValidation, type LoginFormData } from '@/hooks/auth/useFormValidation';
-import { login } from '@/lib/api/auth';
+import { login, persistAuthToken } from '@/lib/api/auth';
+import { queryClient } from '@/lib/queryClient';
 
 export default function Login() {
   const [, setLocation] = useLocation();
@@ -39,18 +42,17 @@ export default function Login() {
   const loginMutation = useMutation({
     mutationFn: login,
     onSuccess: (data) => {
-      if (formData.rememberMe) {
-        localStorage.setItem('token', data.token);
-      } else {
-        sessionStorage.setItem('token', data.token);
-      }
-      
+      persistAuthToken(data.token, formData.rememberMe);
+
+      // Clear stale cache from any previous user's session
+      queryClient.clear();
+
       toast({
         title: "Welcome back!",
         description: `Logged in as ${data.user.username}`,
         variant: "default",
       });
-      
+
       setLocation('/');
     },
     onError: (error: Error) => {
@@ -106,31 +108,31 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-end relative overflow-hidden px-4 md:px-12">
+    <div className="h-[100dvh] min-h-[100dvh] w-full flex flex-col md:flex-row items-stretch justify-center md:justify-end relative overflow-hidden">
       <VideoBackground clarityMode="high" fallbackGradient={false} />
-      
-      <motion.div 
-        className="relative z-10 w-full max-w-lg px-4 py-12"
+
+      <motion.div
+        className="relative z-10 w-full max-w-lg flex min-h-0 flex-1 flex-col items-stretch justify-center md:justify-end md:max-w-[min(100%,32rem)] md:pr-6 lg:pr-10 px-3 py-3 sm:px-5 sm:py-4 overflow-y-auto overscroll-contain"
         initial="hidden"
         animate="visible"
         variants={containerVariants}
       >
-        <GlassCard>
-          <motion.div className="text-center mb-8" variants={itemVariants}>
-            <motion.div 
-              className="text-5xl mb-2 inline-block"
+        <GlassCard className="!p-6 sm:!p-8 md:!p-9 my-auto shrink-0">
+          <motion.div className="text-center mb-5 sm:mb-6" variants={itemVariants}>
+            <motion.div
+              className="text-4xl sm:text-5xl mb-1.5 sm:mb-2 inline-block"
               animate={{ rotate: [0, 5, -5, 0] }}
               transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
             >
               🚀
             </motion.div>
-            <h1 className="text-3xl font-bold text-white mb-2 tracking-tight">
+            <h1 className="text-2xl sm:text-3xl font-bold text-white mb-1 sm:mb-2 tracking-tight">
               AI-Driven Devops
             </h1>
-            <p className="text-white/70">Welcome Back</p>
+            <p className="text-white/70 text-sm sm:text-base">Welcome Back</p>
           </motion.div>
 
-          <form onSubmit={handleSubmit} className="space-y-6">
+          <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-5" data-testid="login-form">
             <motion.div variants={itemVariants}>
               <InputField
                 label="Username or Email"
@@ -142,6 +144,7 @@ export default function Login() {
                 icon="👤"
                 required
                 autoComplete="username"
+                testId="login-username-input"
               />
             </motion.div>
 
@@ -154,6 +157,7 @@ export default function Login() {
                 placeholder="Enter your password"
                 required
                 autoComplete="current-password"
+                testId="login-password-input"
               />
             </motion.div>
 
@@ -164,14 +168,16 @@ export default function Login() {
                     type="checkbox"
                     checked={formData.rememberMe}
                     onChange={(e) => handleChange('rememberMe', e.target.checked)}
+                    data-testid="login-remember-me"
                     className="w-4 h-4 rounded border-white/30 bg-white/5 text-cyan-400 focus:ring-cyan-400 focus:ring-offset-0 focus:ring-2 transition-all cursor-pointer"
                   />
                 </div>
                 <span className="text-white/60 text-sm group-hover:text-white/80 transition-colors">Remember me</span>
               </label>
-              
+
               <a
                 href="/forgot-password"
+                data-testid="login-forgot-password"
                 onClick={(e) => {
                   e.preventDefault();
                   toast({
@@ -186,9 +192,10 @@ export default function Login() {
             </motion.div>
 
             {errors.submit && (
-              <motion.div 
-                className="text-red-400 text-sm text-center bg-red-400/10 py-2 rounded-md border border-red-400/20" 
+              <motion.div
+                className="text-red-400 text-sm text-center bg-red-400/10 py-2 rounded-md border border-red-400/20"
                 role="alert"
+                data-testid="login-error-alert"
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
               >
@@ -196,22 +203,39 @@ export default function Login() {
               </motion.div>
             )}
 
-            <motion.div variants={itemVariants} className="pt-2">
+            <motion.div variants={itemVariants} className="pt-1">
               <SubmitButton
                 type="submit"
                 loading={loginMutation.isPending}
                 disabled={loginMutation.isPending}
+                testId="login-submit"
               >
                 Login
               </SubmitButton>
             </motion.div>
           </form>
 
-          <motion.div className="mt-8 text-center" variants={itemVariants}>
+          {/* ── SSO Divider ── */}
+          <motion.div variants={itemVariants} className="mt-4 sm:mt-5">
+            <div className="relative flex items-center gap-3">
+              <div className="flex-1 h-px bg-white/10" />
+              <span className="text-white/40 text-xs font-medium shrink-0">or continue with</span>
+              <div className="flex-1 h-px bg-white/10" />
+            </div>
+          </motion.div>
+
+          {/* ── SSO Buttons ── */}
+          <motion.div variants={itemVariants} className="mt-3 sm:mt-4 space-y-2.5 sm:space-y-3">
+            <MicrosoftSignInButton label="Sign in with Microsoft" testId="login-microsoft-sso" />
+            <AwsSignInButton label="Sign in with AWS" testId="login-aws-sso" />
+          </motion.div>
+
+          <motion.div className="mt-4 sm:mt-5 text-center" variants={itemVariants}>
             <p className="text-white/60 text-sm">
               Don't have an account?{' '}
               <a
                 href="/signup"
+                data-testid="login-signup-link"
                 onClick={(e) => {
                   e.preventDefault();
                   setLocation('/signup');

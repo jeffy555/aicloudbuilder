@@ -2,10 +2,41 @@
  * Helm Deep Analyzer
  * Multi-pass specialist AI analysis for Helm chart production-readiness scoring.
  * Runs 5 domain-expert passes in parallel; each returns issues with YAML fix snippets.
+ * A final meta-analysis AI call determines dynamic weights, overall score, and grade.
  */
-import OpenAI from 'openai';
+import { aiChatCompletion } from '../utils/ai-client.js';
+import { z } from 'zod';
+import { sanitizeContent } from '../utils/sanitize-prompt.js';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// ─── Zod schemas for AI response validation ─────────────────────────────────
+
+const aiPassIssueSchema = z.object({
+  id: z.string().optional().default(''),
+  severity: z.enum(['critical', 'high', 'medium', 'low']).catch('medium'),
+  title: z.string().optional().default('Unknown issue'),
+  description: z.string().optional().default(''),
+  file: z.string().optional(),
+  fixSnippet: z.string().optional(),
+});
+const aiPassResponseSchema = z.object({
+  passedChecks: z.number().catch(0),
+  totalChecks: z.number().catch(0),
+  issues: z.array(aiPassIssueSchema).catch([]),
+});
+
+const aiMetaWeightsSchema = z.object({
+  security: z.number().catch(20),
+  reliability: z.number().catch(20),
+  resources: z.number().catch(20),
+  helmStructure: z.number().catch(20),
+  operations: z.number().catch(20),
+});
+const aiMetaResponseSchema = z.object({
+  weights: aiMetaWeightsSchema,
+  overallScore: z.number().min(0).max(100),
+  grade: z.enum(['A', 'B', 'C', 'D', 'F']),
+  reasoning: z.string().optional().default(''),
+});
 
 export interface DeepIssue {
   id: string;
@@ -34,7 +65,6 @@ export interface DeepAnalysisResult {
 
 interface PassDefinition {
   key: keyof DeepAnalysisResult['categoryScores'];
-  weight: number;
   name: string;
   useRendered: boolean; // true = rendered templates; false = raw helm files
   systemPrompt: string;
@@ -43,7 +73,6 @@ interface PassDefinition {
 const PASSES: PassDefinition[] = [
   {
     key: 'security',
-    weight: 25,
     name: 'Security Hardening',
     useRendered: true,
     systemPrompt: `You are a Kubernetes security expert performing a thorough security audit of Helm chart rendered manifests.
@@ -80,7 +109,6 @@ Return ONLY this JSON (no markdown fencing):
   },
   {
     key: 'reliability',
-    weight: 25,
     name: 'Reliability & HA',
     useRendered: true,
     systemPrompt: `You are a Kubernetes site-reliability expert auditing Helm chart rendered manifests for production reliability.
@@ -119,7 +147,6 @@ Return ONLY this JSON:
   },
   {
     key: 'resources',
-    weight: 20,
     name: 'Resource Management',
     useRendered: true,
     systemPrompt: `You are a Kubernetes resource management expert auditing rendered manifests for correct resource configuration.
@@ -156,7 +183,6 @@ Return ONLY this JSON:
   },
   {
     key: 'helmStructure',
-    weight: 15,
     name: 'Helm Structure',
     useRendered: false, // raw helm source files
     systemPrompt: `You are a Helm chart expert auditing raw chart source files for structural correctness and authoring best practices.
@@ -195,7 +221,6 @@ Return ONLY this JSON:
   },
   {
     key: 'operations',
-    weight: 15,
     name: 'Operational Readiness',
     useRendered: true,
     systemPrompt: `You are a Kubernetes platform engineer auditing rendered manifests for operational readiness and day-2 operations.
@@ -234,16 +259,9 @@ Return ONLY this JSON:
   },
 ];
 
-function scoreToGrade(score: number): 'A' | 'B' | 'C' | 'D' | 'F' {
-  if (score >= 90) return 'A';
-  if (score >= 75) return 'B';
-  if (score >= 60) return 'C';
-  if (score >= 45) return 'D';
-  return 'F';
-}
-
 /**
  * Run all 5 specialist passes in parallel and aggregate into a scored result.
+ * A final meta-analysis AI call determines dynamic weights, overall score, and grade.
  *
  * @param helmFiles  Raw helm source files (Chart.yaml, values.yaml, templates/*, etc.)
  * @param renderedTemplates  Output of `helm template` split by ---
@@ -274,16 +292,16 @@ export async function deepAnalyzeHelmChart(
       const content = (!pass.useRendered || !hasRendered) ? rawFilesContent : renderedContent;
 
       if (!content.trim()) {
-        return { key: pass.key, weight: pass.weight, passedChecks: 5, totalChecks: 10, issues: [] as DeepIssue[] };
+        return { key: pass.key, passedChecks: 0, totalChecks: 0, issues: [] as DeepIssue[] };
       }
 
       console.log(`   🔍 Running ${pass.name} pass...`);
 
-      const completion = await openai.chat.completions.create({
+      const completion = await aiChatCompletion({
         model: 'gpt-4o-mini',
         messages: [
-          { role: 'system', content: pass.systemPrompt },
-          { role: 'user', content: `Analyse this Helm chart:\n\n${content}` },
+          { role: 'system' as const, content: pass.systemPrompt },
+          { role: 'user' as const, content: `Analyse this Helm chart:\n\n${sanitizeContent(content)}` },
         ],
         temperature: 0.1,
         max_tokens: 3000,
@@ -291,36 +309,40 @@ export async function deepAnalyzeHelmChart(
       });
 
       const raw = completion.choices[0]?.message?.content?.trim() || '{}';
-      let parsed: any = {};
-      try { parsed = JSON.parse(raw); } catch { /* use defaults */ }
+      let rawParsed: any = {};
+      try { rawParsed = JSON.parse(raw); } catch { /* use defaults */ }
 
-      const issues: DeepIssue[] = (parsed.issues || []).map((issue: any, i: number) => ({
+      const passResult = aiPassResponseSchema.safeParse(rawParsed);
+      if (!passResult.success) {
+        console.warn(`[helm-deep-analyzer] ${pass.name} pass AI response validation failed:`, passResult.error.message);
+        return { key: pass.key, passedChecks: 0, totalChecks: 0, issues: [] as DeepIssue[] };
+      }
+
+      const parsedPass = passResult.data;
+
+      const issues: DeepIssue[] = parsedPass.issues.map((issue, i) => ({
         id: issue.id || `${pass.key.slice(0, 3).toUpperCase()}-${String(i + 1).padStart(3, '0')}`,
-        category: pass.key,
-        severity: (['critical', 'high', 'medium', 'low'].includes(issue.severity)
-          ? issue.severity
-          : 'medium') as DeepIssue['severity'],
-        title: issue.title || 'Unknown issue',
-        description: issue.description || '',
+        category: pass.key as DeepIssue['category'],
+        severity: issue.severity,
+        title: issue.title,
+        description: issue.description,
         file: issue.file,
         fixSnippet: issue.fixSnippet,
       }));
 
-      const passedChecks = Number(parsed.passedChecks) || 0;
-      const totalChecks = Number(parsed.totalChecks) || Math.max(issues.length + passedChecks, 8);
+      const passedChecks = parsedPass.passedChecks;
+      const totalChecks = parsedPass.totalChecks || Math.max(issues.length + passedChecks, 8);
 
       console.log(`   ✅ ${pass.name}: ${passedChecks}/${totalChecks} passed, ${issues.length} issue(s)`);
 
-      return { key: pass.key, weight: pass.weight, passedChecks, totalChecks, issues };
+      return { key: pass.key, passedChecks, totalChecks, issues };
     })
   );
 
-  // Aggregate
+  // Aggregate category scores and issues
   const allIssues: DeepIssue[] = [];
   let totalPassedChecks = 0;
   let totalAllChecks = 0;
-  let weightedScore = 0;
-  let totalWeight = 0;
 
   const categoryScores: DeepAnalysisResult['categoryScores'] = {
     security: 0,
@@ -339,20 +361,100 @@ export async function deepAnalyzeHelmChart(
       allIssues.push(...issues);
       totalPassedChecks += passedChecks;
       totalAllChecks += totalChecks;
-      const catScore = totalChecks > 0 ? Math.round((passedChecks / totalChecks) * 100) : 50;
+      const catScore = totalChecks > 0 ? Math.round((passedChecks / totalChecks) * 100) : 0;
       categoryScores[pass.key] = catScore;
-      weightedScore += catScore * pass.weight;
-      totalWeight += pass.weight;
     } else {
       console.warn(`   ⚠️  ${pass.name} pass failed:`, (passResults[i] as PromiseRejectedResult).reason?.message);
-      categoryScores[pass.key] = 50;
-      weightedScore += 50 * pass.weight;
-      totalWeight += pass.weight;
+      categoryScores[pass.key] = 0;
     }
   }
 
-  const overallScore = totalWeight > 0 ? Math.round(weightedScore / totalWeight) : 50;
-  const grade = scoreToGrade(overallScore);
+  // Meta-analysis AI call to determine dynamic weights, overall score, and grade
+  let overallScore: number;
+  let grade: DeepAnalysisResult['grade'];
+
+  try {
+    console.log(`   🧠 Running meta-analysis for dynamic weighting...`);
+
+    const metaCompletion = await aiChatCompletion({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system' as const,
+          content: `You are a Kubernetes Helm chart quality assessor. Given these 5 category scores (security, reliability, best-practices, resource-management, observability), determine appropriate weights for each category based on the chart's purpose and assign a final weighted score and grade (A/B/C/D/F).
+
+The weights must sum to 100. Consider the chart content when weighting — for example, a security-sensitive chart should weight security higher, while a stateful workload should weight reliability higher.
+
+Return ONLY this JSON (no markdown fencing):
+{
+  "weights": {
+    "security": <number 0-100>,
+    "reliability": <number 0-100>,
+    "resources": <number 0-100>,
+    "helmStructure": <number 0-100>,
+    "operations": <number 0-100>
+  },
+  "overallScore": <number 0-100>,
+  "grade": "A|B|C|D|F",
+  "reasoning": "<brief explanation of weight choices>"
+}`,
+        },
+        {
+          role: 'user' as const,
+          content: `Here are the 5 category scores for this Helm chart analysis:
+
+- Security: ${categoryScores.security}/100
+- Reliability: ${categoryScores.reliability}/100
+- Resource Management: ${categoryScores.resources}/100
+- Helm Structure: ${categoryScores.helmStructure}/100
+- Operational Readiness: ${categoryScores.operations}/100
+
+Total issues found: ${allIssues.length}
+Chart files analyzed: ${helmFiles.map(f => f.path).join(', ')}
+
+Determine appropriate weights for each category and compute the final weighted score and grade.`,
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 500,
+      response_format: { type: 'json_object' },
+    });
+
+    const metaRaw = metaCompletion.choices[0]?.message?.content?.trim() || '{}';
+    const metaResult = aiMetaResponseSchema.safeParse(JSON.parse(metaRaw));
+
+    if (!metaResult.success) {
+      console.warn('[helm-deep-analyzer] Meta-analysis AI response validation failed:', metaResult.error.message);
+      throw new Error('Invalid meta-analysis response structure');
+    }
+
+    const { weights, overallScore: rawScore, grade: parsedGrade, reasoning } = metaResult.data;
+    overallScore = Math.round(rawScore);
+    grade = parsedGrade;
+    console.log(`   🧠 Meta-analysis weights: sec=${weights.security}, rel=${weights.reliability}, res=${weights.resources}, hlm=${weights.helmStructure}, ops=${weights.operations}`);
+    if (reasoning) {
+      console.log(`   🧠 Reasoning: ${reasoning}`);
+    }
+  } catch (metaError: any) {
+    console.warn(`   ⚠️  Meta-analysis AI call failed: ${metaError?.message ?? 'unknown error'} — using equal weights fallback`);
+
+    // Fallback: equal weights (20 each), simple average
+    const equalWeight = 20;
+    const weightedSum =
+      categoryScores.security * equalWeight +
+      categoryScores.reliability * equalWeight +
+      categoryScores.resources * equalWeight +
+      categoryScores.helmStructure * equalWeight +
+      categoryScores.operations * equalWeight;
+    overallScore = Math.round(weightedSum / 100);
+
+    // Derive grade from score thresholds as fallback
+    if (overallScore >= 90) grade = 'A';
+    else if (overallScore >= 75) grade = 'B';
+    else if (overallScore >= 60) grade = 'C';
+    else if (overallScore >= 45) grade = 'D';
+    else grade = 'F';
+  }
 
   console.log(`\n   📊 Score: ${overallScore}/100 (${grade}) | ${allIssues.length} total issues`);
   console.log('==========================================\n');

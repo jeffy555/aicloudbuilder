@@ -4,11 +4,35 @@
  */
 
 import type { Express, Response } from "express";
-import OpenAI from 'openai';
+import { aiChatCompletion } from '../utils/ai-client.js';
 import { storage } from "../storage";
 import { mcpClient, type MCPProvider } from "../mcp-client";
 import { openaiService } from "../openai-service";
 import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { aiMediumLimiter } from "../middleware/rate-limit";
+import { sessionIdParams } from "@shared/api-contracts/common";
+import {
+  generateK8sManifestsBody,
+  commitK8sBody,
+  scanK8sBody,
+  validateK8sBody,
+  fixK8sValidationBody,
+  validateHelmBody,
+  generateK8sDiagramBody,
+  k8sFixBody,
+  k8sFixVerifyBody,
+  k8sFixBatchBody,
+  scanRepoForHelmBody,
+  analyzeRepoBody,
+  generateHelmChartBody,
+  uploadHelmChartBody,
+  buildKustomizeBody,
+  securityScoreBody,
+  policyCheckBody,
+  rightsizeK8sBody,
+  estimateK8sCostBody,
+} from "@shared/api-contracts/kubernetes";
 import { resolveRepositoryCredentials } from "../utils/credentials";
 import { generateKubernetesManifests } from "../kubernetes/manifest-generator";
 import { validateHelmChart } from "../kubernetes/helm-validation-service";
@@ -21,6 +45,7 @@ import { scoreSecurityContexts } from "../kubernetes/security-scorer";
 import { checkPolicyHints } from "../kubernetes/policy-hints";
 import { estimateKubernetesCost } from "../kubernetes/cost-estimator";
 import { generateK8sRightsizingRecommendations } from "../kubernetes/resource-rightsizing";
+import { getFixGuidance } from "../checkov-fix-guidance";
 import { createRequire } from "module";
 import * as fs from "fs";
 import * as path from "path";
@@ -29,9 +54,7 @@ import * as os from "os";
 const _require = createRequire(import.meta.url);
 const formidable = _require("formidable");
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+
 
 /**
  * Register Kubernetes-specific routes
@@ -42,6 +65,8 @@ export function registerKubernetesRoutes(app: Express) {
     req: AuthenticatedRequest,
     res: Response
   ): boolean => {
+    // Anonymous sessions (no userId) are accessible to anyone.
+    // Owned sessions require matching userId.
     if (session?.userId && session.userId !== req.userId) {
       res.status(403).json({ error: "Forbidden: session does not belong to the current user" });
       return false;
@@ -50,7 +75,7 @@ export function registerKubernetesRoutes(app: Express) {
   };
 
   // Generate Kubernetes manifests
-  app.post("/api/sessions/:id/generate-kubernetes-manifests", async (req, res) => {
+  app.post("/api/sessions/:id/generate-kubernetes-manifests", aiMediumLimiter, validateRequest({ params: sessionIdParams, body: generateK8sManifestsBody }), async (req, res) => {
     try {
       const { description, options } = req.body;
       const sessionId = req.params.id;
@@ -137,7 +162,7 @@ export function registerKubernetesRoutes(app: Express) {
   });
 
   // Commit Kubernetes files to repository
-  app.post("/api/sessions/:id/commit-kubernetes", async (req, res) => {
+  app.post("/api/sessions/:id/commit-kubernetes", validateRequest({ params: sessionIdParams, body: commitK8sBody }), async (req, res) => {
     const sessionId = req.params.id;
     let session: any = null;
     
@@ -225,7 +250,7 @@ export function registerKubernetesRoutes(app: Express) {
   });
 
   // Scan Kubernetes resources with Checkov
-  app.post("/api/sessions/:id/scan-kubernetes", async (req, res) => {
+  app.post("/api/sessions/:id/scan-kubernetes", validateRequest({ params: sessionIdParams, body: scanK8sBody }), async (req, res) => {
     try {
       const sessionId = req.params.id;
       const session = await storage.getSession(sessionId);
@@ -342,9 +367,10 @@ export function registerKubernetesRoutes(app: Express) {
       const failedChecks = checkovResult.checks.map(check => {
         // Ensure reason is always present and meaningful
         const reason = check.message || check.guideline || `Security check ${check.checkId} failed for resource ${check.resource}`;
-        
+        const guidance = getFixGuidance(check.checkId, check.checkName);
+
         console.log(`📋 Formatted check: ${check.checkId} - Reason: ${reason.substring(0, 80)}...`);
-        
+
         return {
           checkId: check.checkId,
           checkName: check.checkName,
@@ -352,6 +378,10 @@ export function registerKubernetesRoutes(app: Express) {
           file: check.file,
           guideline: check.guideline,
           reason: reason,
+          severity: guidance?.severity || null,
+          autoFixable: guidance?.autoFixable ?? false,
+          fixComplexity: guidance?.fixComplexity || 'moderate',
+          complianceStandards: guidance?.complianceStandards || [],
         };
       });
 
@@ -402,7 +432,7 @@ export function registerKubernetesRoutes(app: Express) {
           : files
               .filter(f => f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml'))
               .map(f => ({ path: f.fileName, content: f.content }));
-        const fallback = runKubernetesSecurityScanFallback(plainFiles);
+        const fallback = await runKubernetesSecurityScanFallback(plainFiles);
         const fbTotal = fallback.passed + fallback.failed;
         console.log(`   TS fallback: passed=${fallback.passed}, failed=${fallback.failed}, total=${fbTotal}`);
         if (fbTotal > 0) {
@@ -447,7 +477,7 @@ export function registerKubernetesRoutes(app: Express) {
   });
 
   // Validate Kubernetes YAML files (Schema + Best Practices)
-  app.post("/api/sessions/:id/validate-kubernetes", async (req, res) => {
+  app.post("/api/sessions/:id/validate-kubernetes", validateRequest({ params: sessionIdParams, body: validateK8sBody }), async (req, res) => {
     try {
       const sessionId = req.params.id;
       const session = await storage.getSession(sessionId);
@@ -587,7 +617,7 @@ export function registerKubernetesRoutes(app: Express) {
   });
 
   // Fix Kubernetes validation issues (best practices + schema)
-  app.post("/api/sessions/:id/fix-kubernetes-validation", async (req, res) => {
+  app.post("/api/sessions/:id/fix-kubernetes-validation", validateRequest({ params: sessionIdParams, body: fixK8sValidationBody }), async (req, res) => {
     try {
       const sessionId = req.params.id;
       const { issues } = req.body;
@@ -653,7 +683,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
 
           console.log(`   🔧 Fixing ${file.fileName} (${fileIssues.length} targeted issues)...`);
 
-          const completion = await openai.chat.completions.create({
+          const completion = await aiChatCompletion({
             model: 'gpt-4o-mini',
             messages: [
               { role: 'system', content: systemPrompt },
@@ -726,7 +756,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // Validate Helm chart
-  app.post("/api/sessions/:id/validate-helm-chart", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/validate-helm-chart", optionalAuth, validateRequest({ params: sessionIdParams, body: validateHelmBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const { options } = req.body;
       const sessionId = req.params.id;
@@ -793,7 +823,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // Generate Kubernetes diagram from manifests
-  app.post("/api/sessions/:id/generate-kubernetes-diagram", async (req, res) => {
+  app.post("/api/sessions/:id/generate-kubernetes-diagram", aiMediumLimiter, validateRequest({ params: sessionIdParams, body: generateK8sDiagramBody }), async (req, res) => {
     try {
       const sessionId = req.params.id;
       const useAI = req.body.useAI !== false; // Default to true
@@ -889,7 +919,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // Get fix for Kubernetes security issue (RAG-based retrieval)
-  app.post("/api/sessions/:id/kubernetes-fix", async (req, res) => {
+  app.post("/api/sessions/:id/kubernetes-fix", aiMediumLimiter, validateRequest({ params: sessionIdParams, body: k8sFixBody }), async (req, res) => {
     try {
       const { checkId, checkName, resourceKind, guideline, currentYaml } = req.body;
       const sessionId = req.params.id;
@@ -964,7 +994,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // Verify Kubernetes fix worked (updates confidence)
-  app.post("/api/sessions/:id/kubernetes-fix/verify", async (req, res) => {
+  app.post("/api/sessions/:id/kubernetes-fix/verify", validateRequest({ params: sessionIdParams, body: k8sFixVerifyBody }), async (req, res) => {
     try {
       const { checkId, resourceKind, fix, success } = req.body;
       const sessionId = req.params.id;
@@ -1034,7 +1064,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // Get all Kubernetes fixes for a scan result (batch retrieval)
-  app.post("/api/sessions/:id/kubernetes-fixes/batch", async (req, res) => {
+  app.post("/api/sessions/:id/kubernetes-fixes/batch", aiMediumLimiter, validateRequest({ params: sessionIdParams, body: k8sFixBatchBody }), async (req, res) => {
     try {
       const { checks } = req.body;
       const sessionId = req.params.id;
@@ -1116,7 +1146,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // ─── Scan selected repo + auto-analyse for Helm chart generation ──────────
-  app.post("/api/sessions/:id/scan-repo-for-helm", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/scan-repo-for-helm", optionalAuth, validateRequest({ params: sessionIdParams, body: scanRepoForHelmBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
@@ -1136,7 +1166,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
       console.log(`\n🔍 Scanning repo "${repoName}" (${provider}) for Helm analysis...`);
 
       const { credentials } = await resolveRepositoryCredentials(provider as MCPProvider, req.userId);
-      const appFiles = await mcpClient.scanRepositoryAppFiles(
+      const { files: appFiles, totalRepoFiles } = await mcpClient.scanRepositoryAppFiles(
         provider as MCPProvider,
         repoName,
         branch,
@@ -1144,7 +1174,12 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
       );
 
       if (appFiles.length === 0) {
-        // Empty / brand-new repo — return a signal so frontend shows "new project" form
+        if (totalRepoFiles > 0) {
+          // Repo has files but no recognisable application code
+          console.log(`   ⚠️ Repo has ${totalRepoFiles} file(s) but no app code detected`);
+          return res.json({ isEmpty: false, noAppCode: true, analysis: null });
+        }
+        // Truly empty / brand-new repo
         return res.json({ isEmpty: true, analysis: null });
       }
 
@@ -1164,7 +1199,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // ─── Analyse repository files for Helm chart generation ───────────────────
-  app.post("/api/sessions/:id/analyze-repo", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/analyze-repo", optionalAuth, validateRequest({ params: sessionIdParams, body: analyzeRepoBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
@@ -1191,7 +1226,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // ─── Helm Chart Generator ──────────────────────────────────────────────────
-  app.post("/api/sessions/:id/generate-helm-chart", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/generate-helm-chart", optionalAuth, aiMediumLimiter, validateRequest({ params: sessionIdParams, body: generateHelmChartBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
@@ -1263,7 +1298,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // ─── D1: Upload Helm Chart ─────────────────────────────────────────────────
-  app.post("/api/sessions/:id/upload-helm-chart", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/upload-helm-chart", optionalAuth, validateRequest({ params: sessionIdParams, body: uploadHelmChartBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
@@ -1318,7 +1353,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // ─── D4: Build Kustomize Overlay ──────────────────────────────────────────
-  app.post("/api/sessions/:id/build-kustomize", async (req, res) => {
+  app.post("/api/sessions/:id/build-kustomize", validateRequest({ params: sessionIdParams, body: buildKustomizeBody }), async (req, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
@@ -1363,7 +1398,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // ─── E1: Security Context Score ──────────────────────────────────────────
-  app.post("/api/sessions/:id/security-score", async (req, res) => {
+  app.post("/api/sessions/:id/security-score", validateRequest({ params: sessionIdParams, body: securityScoreBody }), async (req, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
@@ -1379,10 +1414,10 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
       }
 
       const manifests = yamlFiles.map(f => f.content);
-      const score = scoreSecurityContexts(manifests);
+      const score = await scoreSecurityContexts(manifests);
 
       // Also run policy hints
-      const policyResults = checkPolicyHints(manifests);
+      const policyResults = await checkPolicyHints(manifests);
 
       res.json({ success: true, score, policyResults });
     } catch (error: any) {
@@ -1394,15 +1429,16 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   // ─── E3: Policy Hints (list static library) ──────────────────────────────
   app.get("/api/kubernetes/policy-hints", async (_req, res) => {
     try {
-      const { POLICY_HINTS } = await import('../kubernetes/policy-hints');
-      res.json({ success: true, hints: POLICY_HINTS });
+      // Policy hints are now AI-generated per-manifest, not a static library.
+      // Return empty array for the listing endpoint; use POST /policy-check for actual analysis.
+      res.json({ success: true, hints: [] });
     } catch (error: any) {
       res.status(500).json({ error: 'Failed to load policy hints', details: error.message });
     }
   });
 
   // ─── E3: Check policy hints against session files ─────────────────────────
-  app.post("/api/sessions/:id/policy-check", async (req, res) => {
+  app.post("/api/sessions/:id/policy-check", validateRequest({ params: sessionIdParams, body: policyCheckBody }), async (req, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
@@ -1417,7 +1453,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
         return res.status(400).json({ error: 'No YAML files found in session' });
       }
 
-      const results = checkPolicyHints(manifests);
+      const results = await checkPolicyHints(manifests);
       res.json({ success: true, totalViolations: results.reduce((s, r) => s + r.violations.length, 0), results });
     } catch (error: any) {
       console.error('❌ Policy check failed:', error);
@@ -1426,7 +1462,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // K8s resource rightsizing
-  app.post("/api/sessions/:id/rightsize-kubernetes", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/rightsize-kubernetes", optionalAuth, validateRequest({ params: sessionIdParams, body: rightsizeK8sBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const session = await storage.getSession(sessionId);
@@ -1441,7 +1477,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
         return res.json({ success: true, result: { recommendations: [], totalContainersAnalysed: 0, totalWorkloadsAnalysed: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 } });
       }
 
-      const result = generateK8sRightsizingRecommendations(yamlFiles);
+      const result = await generateK8sRightsizingRecommendations(yamlFiles);
       res.json({ success: true, result });
     } catch (error: any) {
       console.error('K8s rightsizing error:', error);
@@ -1450,7 +1486,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
   });
 
   // K8s cost estimation
-  app.post("/api/sessions/:id/estimate-k8s-cost", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/estimate-k8s-cost", optionalAuth, validateRequest({ params: sessionIdParams, body: estimateK8sCostBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const session = await storage.getSession(sessionId);
@@ -1463,7 +1499,7 @@ Return ONLY the fixed YAML. No explanations, no code blocks.`;
         .filter(f => f.fileName.endsWith('.yaml') || f.fileName.endsWith('.yml'))
         .map(f => ({ fileName: f.fileName, content: f.content }));
 
-      const result = estimateKubernetesCost(yamlFiles);
+      const result = await estimateKubernetesCost(yamlFiles);
       res.json({ success: true, result });
     } catch (error: any) {
       console.error('K8s cost estimation error:', error);

@@ -7,6 +7,7 @@ interface SubmitButtonProps {
   loading?: boolean;
   disabled?: boolean;
   onClick?: () => void;
+  testId?: string;
 }
 
 export default function SubmitButton({
@@ -15,12 +16,14 @@ export default function SubmitButton({
   loading = false,
   disabled = false,
   onClick,
+  testId,
 }: SubmitButtonProps) {
   return (
     <button
       type={type}
       onClick={onClick}
       disabled={disabled || loading}
+      data-testid={testId}
       className={cn(
         "w-full py-3 px-4 rounded-lg",
         "bg-gradient-to-r from-cyan-500 to-blue-600",

@@ -4,12 +4,9 @@
  * Generates infrastructure code (Terraform, ARM, Helm, YAML) for each component
  */
 
-import OpenAI from 'openai';
+import { aiChatCompletion } from '../utils/ai-client.js';
 import type { ExtractedComponent } from './component-extractor';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { sanitizeField, sanitizeContent } from '../utils/sanitize-prompt.js';
 
 export interface GeneratedCode {
   componentName: string;
@@ -216,22 +213,22 @@ IMPORTANT GUIDELINES:
 
   const userPrompt = `Generate ${component.codeType} code for:
 
-COMPONENT: ${component.name}
-TYPE: ${component.type}
-PROVIDER: ${component.provider}
-CATEGORY: ${component.category}
-DESCRIPTION: ${component.description}
-${component.metadata?.serviceType ? `SERVICE TYPE: ${component.metadata.serviceType}` : ''}
+COMPONENT: ${sanitizeField(component.name)}
+TYPE: ${sanitizeField(component.type)}
+PROVIDER: ${sanitizeField(component.provider)}
+CATEGORY: ${sanitizeField(component.category)}
+DESCRIPTION: ${sanitizeContent(component.description)}
+${component.metadata?.serviceType ? `SERVICE TYPE: ${sanitizeField(component.metadata.serviceType)}` : ''}
 
-DEPENDENCIES: ${dependencyInfo || 'None'}
+DEPENDENCIES: ${dependencyInfo ? sanitizeContent(dependencyInfo) : 'None'}
 
 REPOSITORY TYPE: ${repositoryType}
 
 Generate complete, production-ready ${component.codeType} code for this component.`;
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1',
+    const completion = await aiChatCompletion({
+      model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
@@ -305,7 +302,7 @@ function getFileName(component: ExtractedComponent, codeType: string): string {
     case 'arm':
       return `${sanitizedName}.json`;
     case 'helm':
-      return `values.yaml`; // Helm charts have specific structure
+      return `charts/${sanitizedName}/values.yaml`;
     case 'yaml':
     case 'kubernetes':
       return `${sanitizedName}.yaml`;
@@ -324,23 +321,29 @@ export async function generateAllComponentCode(
   console.log(`\n🚀 ========== GENERATING CODE FOR ALL COMPONENTS ==========`);
   console.log(`📦 Components: ${components.length}`);
   console.log(`📁 Repository: ${repositoryType}`);
-  
+
+  const CONCURRENCY = 3;
   const results: GeneratedCode[] = [];
-  
-  // Generate code for each component sequentially (to avoid rate limits)
-  for (const component of components) {
-    try {
-      const code = await generateComponentCode(component, components, repositoryType);
-      results.push(code);
-      
-      // Small delay between requests
-      await new Promise(resolve => setTimeout(resolve, 500));
-    } catch (error: any) {
-      console.error(`   ❌ Failed for ${component.name}: ${error.message}`);
-      // Continue with other components even if one fails
+
+  // Process in batches of CONCURRENCY for parallel generation
+  for (let i = 0; i < components.length; i += CONCURRENCY) {
+    const batch = components.slice(i, i + CONCURRENCY);
+    console.log(`   🔄 Batch ${Math.floor(i / CONCURRENCY) + 1}: generating ${batch.map(c => c.name).join(', ')}`);
+
+    const batchResults = await Promise.allSettled(
+      batch.map(component => generateComponentCode(component, components, repositoryType))
+    );
+
+    for (let j = 0; j < batchResults.length; j++) {
+      const result = batchResults[j];
+      if (result.status === 'fulfilled') {
+        results.push(result.value);
+      } else {
+        console.error(`   ❌ Failed for ${batch[j].name}: ${result.reason?.message || result.reason}`);
+      }
     }
   }
-  
+
   console.log(`\n✅ Generated code for ${results.length}/${components.length} components`);
   return results;
 }

@@ -51,8 +51,8 @@ export function generateMermaidSyntax(
   // Add Resource Groups at the top (no subgraph)
   for (const resource of resourceGroups) {
     const nodeId = getNodeId(resource);
-    const label = formatResourceLabel(resource, showLabels, costMap);
-    syntax += `    ${nodeId}[${label}]\n`;
+    const label = formatResourceLabel(resource, showLabels, costMap).replace(/\n/g, ' - ');
+    syntax += `    ${nodeId}["${label}"]\n`;
   }
 
   if (resourceGroups.length > 0 && otherResources.length > 0) {
@@ -67,8 +67,8 @@ export function generateMermaidSyntax(
       syntax += `    subgraph "${category}"\n`;
       for (const resource of resources) {
         const nodeId = getNodeId(resource);
-        const label = formatResourceLabel(resource, showLabels, costMap);
-        syntax += `        ${nodeId}[${label}]\n`;
+        const label = formatResourceLabel(resource, showLabels, costMap).replace(/\n/g, ' - ');
+        syntax += `        ${nodeId}["${label}"]\n`;
       }
       syntax += `    end\n\n`;
     }
@@ -76,8 +76,8 @@ export function generateMermaidSyntax(
     // Add all resources without grouping
     for (const resource of otherResources) {
       const nodeId = getNodeId(resource);
-      const label = formatResourceLabel(resource, showLabels, costMap);
-      syntax += `    ${nodeId}[${label}]\n`;
+      const label = formatResourceLabel(resource, showLabels, costMap).replace(/\n/g, ' - ');
+      syntax += `    ${nodeId}["${label}"]\n`;
     }
     syntax += '\n';
   }
@@ -245,15 +245,44 @@ function formatResourceLabel(
   costMap: Record<string, number> = {}
 ): string {
   const typeName = getResourceTechnology(resource.type);
+  const displayName = getResourceDisplayName(resource);
   const costKey = `${resource.type}.${resource.name}`;
   const cost = costMap[costKey];
-  const costTag = cost !== undefined && cost > 0 ? `<br/>[$${cost.toFixed(0)}/mo]` : '';
+  const costTag = cost !== undefined && cost > 0 ? ` [$${cost.toFixed(0)}/mo]` : '';
 
   if (showDetails) {
-    return `${typeName}<br/>${resource.name}${costTag}`;
+    if (displayName !== resource.name) {
+      return `${typeName} - ${displayName} (${resource.name})${costTag}`;
+    }
+    return `${typeName} - ${displayName}${costTag}`;
   }
 
-  return `${resource.name}${costTag}`;
+  return `${displayName}${costTag}`;
+}
+
+/**
+ * Prefer configured resource names from Terraform body (e.g. name = "prod-rg")
+ * over internal Terraform block labels (e.g. rg_main) for diagram readability.
+ */
+function getResourceDisplayName(resource: TerraformResource): string {
+  const attrs = resource.attributes || {};
+  const candidateKeys = ['name', 'account_name', 'server_name', 'workspace_name', 'cluster_name'];
+  const configuredName = candidateKeys
+    .map((key) => attrs[key])
+    .find((value) => typeof value === 'string' && value.trim().length > 0) as string | undefined;
+
+  if (configuredName) {
+    return configuredName.trim();
+  }
+
+  // For module calls in aggregated-root flows, source path gives meaningful context.
+  if (attrs.isModule && typeof attrs.source === 'string' && attrs.source.trim()) {
+    const source = attrs.source.replace(/\\/g, '/');
+    const sourceName = source.split('/').filter(Boolean).pop() || source;
+    return `${resource.name} (${sourceName})`;
+  }
+
+  return resource.name;
 }
 
 /**

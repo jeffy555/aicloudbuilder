@@ -4,7 +4,9 @@ import {
   sessions,
   messages,
   generatedFiles,
-  userActivities
+  userActivities,
+  architectureVersions,
+  buildHistory,
 } from '@shared/schema';
 import { eq, and, desc, sql } from 'drizzle-orm';
 import type { IStorage } from './storage';
@@ -18,9 +20,14 @@ import type {
   InsertMessage,
   InsertGeneratedFile,
   UserActivity,
-  InsertUserActivity
+  InsertUserActivity,
+  ArchitectureVersion,
+  InsertArchitectureVersion,
+  BuildHistory,
+  InsertBuildHistory,
 } from '@shared/schema';
 import { randomUUID } from 'crypto';
+import { dedupeGeneratedFilesKeepNewest } from './utils/generated-files-dedupe';
 
 export class PostgresStorage implements IStorage {
   // User methods
@@ -67,6 +74,56 @@ export class PostgresStorage implements IStorage {
 
   async getUserById(id: string): Promise<User | undefined> {
     return this.getUser(id);
+  }
+
+  async getUserByMicrosoftId(microsoftId: string): Promise<User | undefined> {
+    try {
+      const result = await db.select().from(users)
+        .where(eq(users.microsoftId, microsoftId))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error('Error getting user by Microsoft ID:', error);
+      throw error;
+    }
+  }
+
+  async updateUserMicrosoftId(userId: string, microsoftId: string): Promise<User> {
+    try {
+      const [updated] = await db.update(users)
+        .set({ microsoftId, authProvider: 'microsoft', updatedAt: new Date() })
+        .where(eq(users.id, userId))
+        .returning();
+      return updated;
+    } catch (error) {
+      console.error('Error updating user Microsoft ID:', error);
+      throw error;
+    }
+  }
+
+  async getUserByAwsSub(awsSub: string): Promise<User | undefined> {
+    try {
+      const result = await db.select().from(users)
+        .where(eq((users as any).awsSub, awsSub))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error('Error getting user by AWS sub:', error);
+      throw error;
+    }
+  }
+
+  async updateUserAwsSub(userId: string, awsSub: string): Promise<User> {
+    try {
+      const [updated] = await db.update(users)
+        .set({ awsSub, authProvider: 'aws', updatedAt: new Date() } as any)
+        .where(eq(users.id, userId))
+        .returning();
+      return updated;
+    } catch (error) {
+      console.error('Error updating user AWS sub:', error);
+      throw error;
+    }
   }
 
   // Session methods
@@ -228,7 +285,16 @@ export class PostgresStorage implements IStorage {
       const result = await db.select().from(generatedFiles)
         .where(eq(generatedFiles.sessionId, sessionId))
         .orderBy(generatedFiles.fileName);
-      return result;
+      const { kept, removeIds } = dedupeGeneratedFilesKeepNewest(result);
+      for (const id of removeIds) {
+        await db.delete(generatedFiles).where(eq(generatedFiles.id, id));
+      }
+      if (removeIds.length > 0) {
+        console.warn(
+          `[generated_files] Removed ${removeIds.length} duplicate row(s) for session ${sessionId} (kept newest per filename).`
+        );
+      }
+      return kept;
     } catch (error) {
       console.error('Error getting files by session:', error);
       throw error;
@@ -358,6 +424,115 @@ export class PostgresStorage implements IStorage {
       return result;
     } catch (error) {
       console.error('Error getting user activities:', error);
+      throw error;
+    }
+  }
+
+  // Architecture version history methods
+  async createArchitectureVersion(insert: InsertArchitectureVersion): Promise<ArchitectureVersion> {
+    try {
+      const id = randomUUID();
+      const result = await db.insert(architectureVersions).values({
+        id,
+        ...insert,
+      }).returning();
+      return result[0];
+    } catch (error) {
+      console.error('Error creating architecture version:', error);
+      throw error;
+    }
+  }
+
+  async getArchitectureVersions(sessionId: string): Promise<ArchitectureVersion[]> {
+    try {
+      return await db.select().from(architectureVersions)
+        .where(eq(architectureVersions.sessionId, sessionId))
+        .orderBy(architectureVersions.version);
+    } catch (error) {
+      console.error('Error getting architecture versions:', error);
+      throw error;
+    }
+  }
+
+  async getArchitectureVersion(id: string): Promise<ArchitectureVersion | undefined> {
+    try {
+      const result = await db.select().from(architectureVersions)
+        .where(eq(architectureVersions.id, id)).limit(1);
+      return result[0];
+    } catch (error) {
+      console.error('Error getting architecture version:', error);
+      throw error;
+    }
+  }
+
+  // Build history methods
+  async createBuildHistory(insert: InsertBuildHistory): Promise<BuildHistory> {
+    try {
+      const [result] = await db.insert(buildHistory).values({
+        ...insert,
+        id: randomUUID(),
+      }).returning();
+      return result;
+    } catch (error) {
+      console.error('Error creating build history:', error);
+      throw error;
+    }
+  }
+
+  async getBuildHistory(options: { userId?: string; sessionId?: string; module?: string; limit?: number; offset?: number }): Promise<BuildHistory[]> {
+    try {
+      const conditions = [];
+      if (options.userId) conditions.push(eq(buildHistory.userId, options.userId));
+      if (options.sessionId) conditions.push(eq(buildHistory.sessionId, options.sessionId));
+      if (options.module) conditions.push(eq(buildHistory.module, options.module));
+
+      const query = db.select().from(buildHistory);
+      const withWhere = conditions.length > 0
+        ? query.where(conditions.length === 1 ? conditions[0] : and(...conditions))
+        : query;
+
+      return await withWhere
+        .orderBy(desc(buildHistory.createdAt))
+        .limit(options.limit ?? 50)
+        .offset(options.offset ?? 0);
+    } catch (error) {
+      console.error('Error getting build history:', error);
+      throw error;
+    }
+  }
+
+  async getBuildById(id: string): Promise<BuildHistory | undefined> {
+    try {
+      const result = await db.select().from(buildHistory)
+        .where(eq(buildHistory.id, id)).limit(1);
+      return result[0];
+    } catch (error) {
+      console.error('Error getting build by id:', error);
+      throw error;
+    }
+  }
+
+  async getBuildByBuildId(buildId: string): Promise<BuildHistory | undefined> {
+    try {
+      const result = await db.select().from(buildHistory)
+        .where(eq(buildHistory.buildId, buildId)).limit(1);
+      return result[0];
+    } catch (error) {
+      console.error('Error getting build by buildId:', error);
+      throw error;
+    }
+  }
+
+  async updateBuildHistory(id: string, updates: Partial<InsertBuildHistory>): Promise<BuildHistory> {
+    try {
+      const [result] = await db.update(buildHistory)
+        .set(updates)
+        .where(eq(buildHistory.id, id))
+        .returning();
+      if (!result) throw new Error(`Build ${id} not found`);
+      return result;
+    } catch (error) {
+      console.error('Error updating build history:', error);
       throw error;
     }
   }

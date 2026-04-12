@@ -1,333 +1,202 @@
 /**
- * Recommendation Engine for Valuation Module
+ * AI-Powered Recommendation Engine for Valuation Module
  *
- * Generates cost optimization recommendations based on resource SKU/tier and usage metrics.
- *   - With metrics: High-confidence usage-based recommendations
- *   - Without metrics: Low/medium-confidence rule-based recommendations
- *
- * All thresholds and savings percentages are imported from
- * server/config/recommendation-thresholds.ts — nothing is hardcoded here.
+ * Uses GPT-4o-mini to dynamically analyze each resource's usage metrics,
+ * SKU/tier, and cost — replacing all hardcoded threshold maps and savings percentages.
  */
 
+import { aiChatCompletion } from '../utils/ai-client.js';
+import { z } from 'zod';
 import type { ValuationResource, RemediationPlan, UsageMetrics } from '@shared/schema';
-import {
-  MIN_METRICS_SAMPLE_COUNT,
-  VM_CPU_LOW_THRESHOLD,
-  VM_MEMORY_LOW_THRESHOLD,
-  VM_CPU_BURSTABLE_AVG_THRESHOLD,
-  VM_CPU_BURSTABLE_MAX_THRESHOLD,
-  SQL_DTU_LOW_THRESHOLD,
-  APP_SERVICE_CPU_LOW_THRESHOLD,
-  APP_SERVICE_MEMORY_LOW_THRESHOLD,
-  STORAGE_COOL_TIER_THRESHOLD_GB,
-  SAVINGS_ESTIMATES,
-  VM_DOWNSIZE_MAP,
-  VM_DOWNSIZE_FALLBACK,
-  VM_BURSTABLE_RECOMMENDATION,
-  SQL_TIER_DOWNGRADE_MAP,
-  SQL_TIER_DOWNGRADE_FALLBACK,
-  APP_SERVICE_PLAN_DOWNGRADE_MAP,
-  APP_SERVICE_PLAN_DOWNGRADE_FALLBACK,
-} from '../config/recommendation-thresholds.js';
+import { sanitizeJsonForPrompt } from '../utils/sanitize-prompt.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('Valuation');
+
+// ─── Zod schemas for AI response validation ─────────────────────────────────
+
+const aiRecommendationSchema = z.object({
+  resourceName: z.string(),
+  recommended_sku: z.string(),
+  recommended_tier: z.string().optional(),
+  savings_monthly: z.number().catch(0),
+  savings_percent: z.number().catch(0),
+  reason: z.string().catch(''),
+  confidence: z.enum(['high', 'medium', 'low']).catch('medium'),
+  action_required: z.string().catch(''),
+});
+const aiRecommendationResponseSchema = z.object({
+  recommendations: z.array(aiRecommendationSchema).catch([]),
+});
+
+const BATCH_SIZE = 20;
 
 /**
- * Generates cost optimization recommendation for a resource.
- * Returns null if resource is already optimized.
+ * Generates AI-powered cost optimization recommendations for a batch of resources.
+ * Returns a Map keyed by resource name.
  */
-export function generateRecommendation(
-  resource: ValuationResource,
-  currentCost: number,
-  usageMetrics?: UsageMetrics
-): RemediationPlan | null {
+export async function generateAIRecommendations(
+  resources: Array<{
+    resource: ValuationResource;
+    monthlyCost: number;
+    metrics?: UsageMetrics;
+  }>,
+  currency: string
+): Promise<Map<string, RemediationPlan>> {
+  const result = new Map<string, RemediationPlan>();
 
-  // Metrics available → usage-based (high confidence)
-  if (usageMetrics && usageMetrics.statistics) {
-    const recommendation = generateUsageBasedRecommendation(resource, currentCost, usageMetrics);
-    if (recommendation) return recommendation;
+  if (resources.length === 0) return result;
+
+  // Batch into groups of BATCH_SIZE to fit context window
+  const batches: typeof resources[] = [];
+  for (let i = 0; i < resources.length; i += BATCH_SIZE) {
+    batches.push(resources.slice(i, i + BATCH_SIZE));
   }
 
-  // Fallback → rule-based (low / medium confidence)
-  return generateRuleBasedRecommendation(resource, currentCost);
+  // Process batches in parallel
+  const batchResults = await Promise.allSettled(
+    batches.map(batch => processRecommendationBatch(batch, currency))
+  );
+
+  for (const batchResult of batchResults) {
+    if (batchResult.status === 'fulfilled') {
+      const entries = Array.from(batchResult.value.entries());
+      for (const [name, plan] of entries) {
+        result.set(name, plan);
+      }
+    } else {
+      log.warn('AI recommendation batch failed', { reason: String(batchResult.reason) });
+    }
+  }
+
+  return result;
 }
 
-// ---------------------------------------------------------------------------
-// Usage-based recommendations (requires Azure Monitor metrics)
-// ---------------------------------------------------------------------------
+async function processRecommendationBatch(
+  resources: Array<{
+    resource: ValuationResource;
+    monthlyCost: number;
+    metrics?: UsageMetrics;
+  }>,
+  currency: string
+): Promise<Map<string, RemediationPlan>> {
+  const result = new Map<string, RemediationPlan>();
 
-function generateUsageBasedRecommendation(
-  resource: ValuationResource,
-  currentCost: number,
-  metrics: UsageMetrics
-): RemediationPlan | null {
+  const resourceData = resources.map(r => ({
+    name: r.resource.name,
+    azureType: r.resource.azureType,
+    currentSku: r.resource.currentSku,
+    currentTier: r.resource.currentTier,
+    location: r.resource.location,
+    resourceGroup: r.resource.resourceGroup,
+    monthlyCost: r.monthlyCost,
+    metricsAvailable: !!r.metrics,
+    metrics: r.metrics ? {
+      avgCpuPercent: r.metrics.statistics?.avgCpuPercent,
+      maxCpuPercent: r.metrics.statistics?.maxCpuPercent,
+      avgMemoryPercent: r.metrics.statistics?.avgMemoryPercent,
+      avgDtuPercent: r.metrics.statistics?.avgDtuPercent,
+      avgStorageUsedGB: r.metrics.statistics?.avgStorageUsedGB,
+      sampleCount: r.metrics.statistics?.sampleCount,
+    } : null,
+  }));
 
-  const stats  = metrics.statistics!;
-  const tfType = resource.terraformType;
+  const systemPrompt = `You are an Azure cloud cost optimization expert following Azure Well-Architected Framework and FinOps Foundation best practices.
 
-  // ── Virtual Machines ────────────────────────────────────────────────────
-  if (tfType?.includes('virtual_machine')) {
-    const avgCpu = stats.avgCpuPercent ?? 100;
-    const avgMem = stats.avgMemoryPercent ?? 100;
-    const maxCpu = stats.maxCpuPercent ?? 100;
-    const currentSize = resource.currentSku;
+Analyze each resource's actual usage metrics (CPU%, Memory%, DTU%, Storage GB, etc.) and current SKU/tier. For EACH resource, determine if it needs right-sizing, tier change, generation upgrade, or is already optimal.
 
-    // High confidence: consistently under-utilised for full observation window
-    if (
-      avgCpu < VM_CPU_LOW_THRESHOLD &&
-      avgMem < VM_MEMORY_LOW_THRESHOLD &&
-      stats.sampleCount >= MIN_METRICS_SAMPLE_COUNT
-    ) {
-      const recommendedSize = VM_DOWNSIZE_MAP[currentSize] ?? VM_DOWNSIZE_FALLBACK;
-      return {
-        recommended_sku: recommendedSize,
-        recommended_tier: resource.currentTier || 'Standard',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.VM_DOWNSIZE,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.VM_DOWNSIZE * 100),
-        reason: `Usage analysis over 7 days shows consistently low resource utilisation ` +
-                `(Avg CPU: ${avgCpu.toFixed(1)}%, Avg Memory: ${avgMem.toFixed(1)}%). ` +
-                `VM is significantly over-provisioned.`,
-        confidence: 'high',
-        action_required: `Resize from ${currentSize} to ${recommendedSize}. ` +
-                         `Schedule during maintenance window (requires reboot).`,
-      };
+Consider:
+- Over-provisioning (low CPU/memory utilisation)
+- Idle resources (near-zero usage)
+- Outdated SKU generations (e.g. v3 when v5 exists)
+- Burstable candidates (low baseline CPU with occasional spikes)
+- Storage tier optimization (Hot→Cool, Premium→Standard, GRS→LRS)
+- Orphaned resources (disks, IPs with no attachments)
+- Dev/test auto-shutdown candidates
+- Redis/SQL tier downgrades when premium features are unused
+
+For each resource, provide:
+- recommended_sku: exact Azure SKU name (not generic)
+- recommended_tier: target tier
+- savings_percent: estimated percentage savings (integer)
+- savings_monthly: estimated monthly savings in the given currency
+- reason: detailed explanation referencing actual metrics/SKU
+- confidence: "high" (with metrics proving over-provisioning), "medium" (strong heuristic without full metrics), or "low" (speculative)
+- action_required: step-by-step implementation guide including risk mitigation
+
+If a resource is already optimally sized or you cannot confidently recommend a change, omit it from the array.
+
+Return JSON:
+{
+  "recommendations": [
+    {
+      "resourceName": "exact resource name from input",
+      "recommended_sku": "Standard_B2ms",
+      "recommended_tier": "Burstable",
+      "savings_monthly": 1500.00,
+      "savings_percent": 45,
+      "reason": "detailed explanation",
+      "confidence": "high",
+      "action_required": "step-by-step instructions"
+    }
+  ]
+}`;
+
+  const userPrompt = `Resources to analyze (currency: ${currency}):\n${resourceData.map(r => JSON.stringify(sanitizeJsonForPrompt(r))).join('\n')}`;
+
+  try {
+    const completion = await aiChatCompletion({
+      model: 'gpt-4o-mini',
+      temperature: 0.3,
+      max_tokens: 8000,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    });
+
+    const content = completion.choices[0]?.message?.content;
+    if (!content) {
+      log.warn('AI returned empty response for recommendations');
+      return result;
     }
 
-    // Medium confidence: low baseline with occasional spikes — burstable fits
-    if (
-      avgCpu < VM_CPU_BURSTABLE_AVG_THRESHOLD &&
-      maxCpu < VM_CPU_BURSTABLE_MAX_THRESHOLD &&
-      !currentSize.startsWith('Standard_B')
-    ) {
-      return {
-        recommended_sku: VM_BURSTABLE_RECOMMENDATION,
-        recommended_tier: 'Burstable',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.VM_TO_BURSTABLE,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.VM_TO_BURSTABLE * 100),
-        reason: `Low baseline CPU usage (${avgCpu.toFixed(1)}%) with moderate peaks ` +
-                `(${maxCpu.toFixed(1)}%). Burstable B-series VMs are ideal for this workload pattern.`,
-        confidence: 'high',
-        action_required: 'Migrate to B-series during low-traffic period. Monitor burst credits for first week.',
-      };
+    const zodResult = aiRecommendationResponseSchema.safeParse(JSON.parse(content));
+    if (!zodResult.success) {
+      log.warn('AI response validation failed', { error: zodResult.error.message });
+      return result;
     }
+
+    // Map AI recommendations back to resources by name
+    for (const rec of zodResult.data.recommendations) {
+      // Find the matching resource (case-insensitive match as fallback)
+      const matchingResource = resources.find(
+        r => r.resource.name === rec.resourceName
+      ) || resources.find(
+        r => r.resource.name.toLowerCase() === rec.resourceName.toLowerCase()
+      );
+
+      if (!matchingResource) continue;
+
+      const plan: RemediationPlan = {
+        recommended_sku: rec.recommended_sku,
+        recommended_tier: rec.recommended_tier,
+        savings_monthly: rec.savings_monthly,
+        savings_percent: rec.savings_percent,
+        reason: rec.reason,
+        confidence: rec.confidence,
+        action_required: rec.action_required,
+      };
+
+      result.set(matchingResource.resource.name, plan);
+    }
+
+    return result;
+  } catch (error: any) {
+    log.error('AI recommendation call failed', { error: error.message });
+    return result;
   }
-
-  // ── SQL Database (DTU model) ─────────────────────────────────────────────
-  if (tfType === 'azurerm_mssql_database') {
-    const avgDtu = stats.avgDtuPercent ?? 100;
-
-    if (avgDtu < SQL_DTU_LOW_THRESHOLD && stats.sampleCount >= MIN_METRICS_SAMPLE_COUNT) {
-      const currentSku     = resource.currentSku;
-      const recommendedSku = SQL_TIER_DOWNGRADE_MAP[currentSku] ?? SQL_TIER_DOWNGRADE_FALLBACK;
-
-      return {
-        recommended_sku: recommendedSku,
-        recommended_tier: 'Standard',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.SQL_PREMIUM_TO_STANDARD,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.SQL_PREMIUM_TO_STANDARD * 100),
-        reason: `Database DTU usage is very low (${avgDtu.toFixed(1)}% average over 7 days). ` +
-                `Current tier is over-provisioned for the workload.`,
-        confidence: 'high',
-        action_required: `Downgrade from ${currentSku} to ${recommendedSku}. Backup database before tier change.`,
-      };
-    }
-  }
-
-  // ── App Service Plan ─────────────────────────────────────────────────────
-  if (tfType === 'azurerm_app_service_plan' || tfType === 'azurerm_service_plan') {
-    const avgCpu = stats.avgCpuPercent ?? 100;
-    const avgMem = stats.avgMemoryPercent ?? 100;
-
-    if (
-      avgCpu < APP_SERVICE_CPU_LOW_THRESHOLD &&
-      avgMem < APP_SERVICE_MEMORY_LOW_THRESHOLD &&
-      stats.sampleCount >= MIN_METRICS_SAMPLE_COUNT
-    ) {
-      const currentSku     = resource.currentSku;
-      const recommendedSku = APP_SERVICE_PLAN_DOWNGRADE_MAP[currentSku]
-                             ?? APP_SERVICE_PLAN_DOWNGRADE_FALLBACK;
-
-      return {
-        recommended_sku: recommendedSku,
-        recommended_tier: 'Standard',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.APP_SERVICE_DOWNGRADE,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.APP_SERVICE_DOWNGRADE * 100),
-        reason: `App Service Plan shows low utilisation ` +
-                `(CPU: ${avgCpu.toFixed(1)}%, Memory: ${avgMem.toFixed(1)}%). Can safely downsize.`,
-        confidence: 'high',
-        action_required: `Scale down from ${currentSku} to ${recommendedSku}. No downtime required.`,
-      };
-    }
-  }
-
-  // ── Storage Account ───────────────────────────────────────────────────────
-  if (tfType === 'azurerm_storage_account') {
-    const usedGB = stats.avgStorageUsedGB ?? 0;
-
-    if (usedGB < STORAGE_COOL_TIER_THRESHOLD_GB && resource.currentSku.includes('Hot')) {
-      return {
-        recommended_sku: resource.currentSku.replace('Hot', 'Cool'),
-        recommended_tier: 'Cool',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.STORAGE_HOT_TO_COOL,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.STORAGE_HOT_TO_COOL * 100),
-        reason: `Storage usage is minimal (${usedGB.toFixed(1)} GB). ` +
-                `Cool tier is more cost-effective for infrequently accessed data.`,
-        confidence: 'medium',
-        action_required: 'Change access tier to Cool. Higher access costs apply if data is frequently accessed.',
-      };
-    }
-  }
-
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Rule-based recommendations (no metrics — lower confidence)
-// ---------------------------------------------------------------------------
-
-function generateRuleBasedRecommendation(
-  resource: ValuationResource,
-  currentCost: number
-): RemediationPlan | null {
-  const tfType = resource.terraformType;
-  if (!tfType) return null;
-
-  // ── Storage Account ───────────────────────────────────────────────────────
-  if (tfType === 'azurerm_storage_account') {
-    if (resource.currentSku.includes('Premium')) {
-      return {
-        recommended_sku: resource.currentSku.replace('Premium', 'Standard'),
-        recommended_tier: 'Standard',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.STORAGE_PREMIUM_TO_STD,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.STORAGE_PREMIUM_TO_STD * 100),
-        reason: 'Premium Storage is over-provisioned for most workloads. ' +
-                'Standard tier provides sufficient performance for general-purpose storage.',
-        confidence: 'medium',
-        action_required: 'Change SKU from Premium to Standard in Azure Portal (Storage Account → Configuration)',
-      };
-    }
-
-    if (resource.currentSku.includes('GRS') || resource.currentSku.includes('RAGRS')) {
-      return {
-        recommended_sku: resource.currentSku.replace('RAGRS', 'LRS').replace('GRS', 'LRS'),
-        recommended_tier: resource.currentTier,
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.STORAGE_GRS_TO_LRS,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.STORAGE_GRS_TO_LRS * 100),
-        reason: 'Geo-redundant storage (GRS/RA-GRS) provides cross-region replication. ' +
-                'If this data is not mission-critical, consider Locally Redundant Storage (LRS).',
-        confidence: 'low',
-        action_required: 'Change replication from GRS/RA-GRS to LRS if cross-region redundancy is not required',
-      };
-    }
-  }
-
-  // ── SQL Database ──────────────────────────────────────────────────────────
-  if (tfType === 'azurerm_mssql_database') {
-    if (['P1', 'P2', 'P3'].includes(resource.currentSku)) {
-      return {
-        recommended_sku: 'S3',
-        recommended_tier: 'Standard',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.SQL_PREMIUM_TO_STANDARD,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.SQL_PREMIUM_TO_STANDARD * 100),
-        reason: 'Premium tier provides guaranteed DTUs and advanced features. ' +
-                'Consider Standard tier if consistent performance is not critical for your workload.',
-        confidence: 'medium',
-        action_required: 'Downgrade from Premium to Standard tier (requires brief downtime)',
-      };
-    }
-
-    if (resource.currentSku.includes('BC_')) {
-      return {
-        recommended_sku: resource.currentSku.replace('BC_', 'GP_'),
-        recommended_tier: 'General Purpose',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.SQL_BC_TO_GP,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.SQL_BC_TO_GP * 100),
-        reason: 'Business Critical tier offers highest resilience and performance. ' +
-                'General Purpose tier is sufficient for most applications.',
-        confidence: 'low',
-        action_required: 'Downgrade from Business Critical to General Purpose tier',
-      };
-    }
-  }
-
-  // ── Virtual Machines (conservative — no metrics) ──────────────────────────
-  if (tfType.includes('virtual_machine')) {
-    const size = resource.currentSku ?? '';
-
-    if (/D(16|32|48|64)/.test(size)) {
-      return {
-        recommended_sku: size.replace(/D\d+/, 'D8'),
-        recommended_tier: resource.currentTier,
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.VM_RULE_BASED_LARGE,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.VM_RULE_BASED_LARGE * 100),
-        reason: 'Large VM size detected. Consider downsizing if CPU/memory usage is consistently low. ' +
-                'Recommendation requires actual usage metrics for high confidence.',
-        confidence: 'low',
-        action_required: 'Review Azure Monitor metrics (CPU/Memory) before resizing. ' +
-                         'Resize in Azure Portal during maintenance window.',
-      };
-    }
-
-    if (size.startsWith('Standard_D') || size.startsWith('Standard_E')) {
-      return {
-        recommended_sku: VM_BURSTABLE_RECOMMENDATION,
-        recommended_tier: 'Burstable',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.VM_RULE_BASED_BURSTABLE,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.VM_RULE_BASED_BURSTABLE * 100),
-        reason: 'Standard-series VMs are always-on compute. ' +
-                'If workload has low baseline CPU with occasional spikes, consider Burstable B-series.',
-        confidence: 'low',
-        action_required: 'Analyse CPU metrics over 30 days. If avg CPU < 20%, consider B-series.',
-      };
-    }
-  }
-
-  // ── Redis Cache ───────────────────────────────────────────────────────────
-  if (tfType === 'azurerm_redis_cache') {
-    if (resource.currentSku.startsWith('P')) {
-      return {
-        recommended_sku: resource.currentSku.replace('P', 'C'),   // e.g. P1 → C1
-        recommended_tier: 'Standard',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.REDIS_PREMIUM_TO_STD,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.REDIS_PREMIUM_TO_STD * 100),
-        reason: "Premium Redis provides persistence and clustering. " +
-                "Standard tier is sufficient if you don't need data persistence or multi-shard clusters.",
-        confidence: 'medium',
-        action_required: 'Downgrade from Premium to Standard (data loss may occur — backup first)',
-      };
-    }
-  }
-
-  // ── App Service Plan ──────────────────────────────────────────────────────
-  if (tfType === 'azurerm_app_service_plan' || tfType === 'azurerm_service_plan') {
-    if (resource.currentSku.startsWith('P')) {
-      const premiumNumber = resource.currentSku.match(/P(\d+)/)?.[1] ?? '1';
-      return {
-        recommended_sku: `S${premiumNumber}`,
-        recommended_tier: 'Standard',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.APP_SERVICE_RULE_BASED,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.APP_SERVICE_RULE_BASED * 100),
-        reason: 'Premium App Service Plan provides auto-scaling and staging slots. ' +
-                'Standard tier may be sufficient if these features are not critical.',
-        confidence: 'low',
-        action_required: 'Verify auto-scaling and staging slot requirements before downgrading',
-      };
-    }
-
-    if (resource.currentSku.startsWith('S')) {
-      const stdNumber = resource.currentSku.match(/S(\d+)/)?.[1] ?? '1';
-      return {
-        recommended_sku: `B${stdNumber}`,
-        recommended_tier: 'Basic',
-        savings_monthly: currentCost * SAVINGS_ESTIMATES.APP_SERVICE_STD_TO_BASIC,
-        savings_percent: Math.round(SAVINGS_ESTIMATES.APP_SERVICE_STD_TO_BASIC * 100),
-        reason: 'Standard plan provides custom domains and SSL. ' +
-                'Basic tier may suffice for development or non-production apps.',
-        confidence: 'low',
-        action_required: 'Downgrade to Basic tier for dev/test environments only',
-      };
-    }
-  }
-
-  return null;
 }
 
 // ---------------------------------------------------------------------------

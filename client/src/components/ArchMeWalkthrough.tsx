@@ -550,13 +550,13 @@ function SlideCommitSuccess() {
 }
 
 const slides: Slide[] = [
-  { step: 1, title: "Describe Architecture", subtitle: "Chat panel + live diagram generation (diagram step)", icon: Network, content: <SlideDescribeArchitecture /> },
-  { step: 2, title: "Select Repository", subtitle: "Provider selection + empty repo validation (repository step)", icon: GitBranch, content: <SlideRepoSelection /> },
-  { step: 3, title: "Components & Layers", subtitle: "Intent preview + extracted components (components step)", icon: Code, content: <SlideComponentsWithIntent /> },
-  { step: 4, title: "Code + Activities + Commit", subtitle: "CodeEditor, ActivityPanel, README, commit (code step)", icon: FileCode, content: <SlideCodeReviewCommit /> },
-  { step: 5, title: "Security Scan", subtitle: "Checkov scans for Terraform & K8s misconfigurations", icon: Shield, content: <SlideSecurityScan /> },
-  { step: 6, title: "Cost Analysis", subtitle: "Monthly and yearly cost estimates for Azure resources", icon: DollarSign, content: <SlideCostAnalysis /> },
-  { step: 7, title: "Committed", subtitle: "All infrastructure code pushed to repository", icon: CheckCircle2, content: <SlideCommitSuccess /> },
+  { step: 1, title: "Describe in Plain English", subtitle: "Type your requirements — AI renders a cloud-native architecture diagram in real time as you type", icon: Network, content: <SlideDescribeArchitecture /> },
+  { step: 2, title: "Connect Your Repository", subtitle: "Link GitHub or Azure DevOps — all generated code commits straight to your own branch", icon: GitBranch, content: <SlideRepoSelection /> },
+  { step: 3, title: "Components Extracted Automatically", subtitle: "AI identifies every service, database, network, and dependency — grouped by layer, ready for code generation", icon: Code, content: <SlideComponentsWithIntent /> },
+  { step: 4, title: "Full Infrastructure Code Generated", subtitle: "Terraform, K8s manifests, automation scripts, and README — all in one workflow from a single description", icon: FileCode, content: <SlideCodeReviewCommit /> },
+  { step: 5, title: "Security Scan Included", subtitle: "Checkov validates every Terraform and K8s file the moment they're generated — one-click AI auto-fix", icon: Shield, content: <SlideSecurityScan /> },
+  { step: 6, title: "Know the Cost Before You Build", subtitle: "Live Azure pricing per resource — monthly and yearly estimates so no surprise invoices on day one", icon: DollarSign, content: <SlideCostAnalysis /> },
+  { step: 7, title: "Architecture to Production — One Workflow", subtitle: "Diagram approved → code generated → scanned → committed — no copy-paste, no context switching", icon: CheckCircle2, content: <SlideCommitSuccess /> },
 ];
 
 const SLIDE_DURATION = 5000;

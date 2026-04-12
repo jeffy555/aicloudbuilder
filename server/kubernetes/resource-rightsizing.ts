@@ -1,7 +1,8 @@
 /**
  * Kubernetes Resource Rightsizing
- * Static rules that flag over/under-provisioned containers without AI calls.
+ * Uses GPT-4o-mini to analyze container resource specs and identify rightsizing opportunities.
  */
+import { aiChatCompletion } from '../utils/ai-client.js';
 
 export type RightsizingSeverity = 'critical' | 'high' | 'medium' | 'low';
 
@@ -112,131 +113,88 @@ function extractContainerRecords(yamlContent: string): ContainerRecord[] {
   return results;
 }
 
-// ─── Rule evaluators ───────────────────────────────────────────────────────────
+// ─── AI-driven evaluation ───────────────────────────────────────────────────
 
-function evaluate(c: ContainerRecord): K8sRightsizingRecommendation[] {
-  const recs: K8sRightsizingRecommendation[] = [];
-  const id = `${c.workload} / ${c.container}`;
+async function evaluateWithAI(containers: ContainerRecord[]): Promise<K8sRightsizingRecommendation[]> {
+  if (containers.length === 0) return [];
 
-  // Rule 1: No resource block at all
-  if (!c.hasResources) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'high', rule: 'missing-resources-block',
-      message: `${id}: No resources block defined`,
-      suggestion: 'Add a resources block with both requests and limits for cpu and memory.',
+  const containerSpecs = containers.map(c => ({
+    workload: c.workload,
+    container: c.container,
+    cpuRequestMillicores: c.cpuRequest,
+    memRequestMiB: Math.round(c.memRequest * 100) / 100,
+    cpuLimitMillicores: c.cpuLimit,
+    memLimitMiB: Math.round(c.memLimit * 100) / 100,
+    hasResourcesBlock: c.hasResources,
+  }));
+
+  try {
+    const response = await aiChatCompletion({
+      model: 'gpt-4o-mini',
+      temperature: 0.3,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system' as const,
+          content: `You are a Kubernetes resource optimization expert. Analyze these container resource specifications and identify rightsizing opportunities. Consider over-provisioning, missing limits, burst ratios, QoS class implications, and bin-packing efficiency.
+
+Return JSON with this exact shape:
+{
+  "recommendations": [
+    {
+      "workload": "<workload name from input>",
+      "container": "<container name from input>",
+      "severity": "<critical|high|medium|low>",
+      "rule": "<short-kebab-case-rule-id>",
+      "message": "<description of the issue>",
+      "suggestion": "<actionable fix>"
+    }
+  ]
+}
+
+Only include recommendations where there is a genuine issue. If a container's resources look well-configured, do not generate a recommendation for it. Cap output to at most 30 recommendations, prioritizing higher severity items.`,
+        },
+        {
+          role: 'user' as const,
+          content: JSON.stringify({ containers: containerSpecs }),
+        },
+      ],
     });
-    return recs; // further rules redundant without data
-  }
 
-  // Rule 2: Missing CPU request
-  if (c.cpuRequest === 0) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'high', rule: 'missing-cpu-request',
-      message: `${id}: CPU request not set`,
-      suggestion: 'Set resources.requests.cpu to the typical utilisation (e.g. "100m").',
-    });
-  }
+    const parsed = JSON.parse(response.choices[0].message.content ?? '{}');
+    if (!Array.isArray(parsed.recommendations)) return [];
 
-  // Rule 3: Missing memory request
-  if (c.memRequest === 0) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'high', rule: 'missing-mem-request',
-      message: `${id}: Memory request not set`,
-      suggestion: 'Set resources.requests.memory to avoid OOM-kill on node pressure.',
-    });
+    const validSeverities = new Set(['critical', 'high', 'medium', 'low']);
+    return parsed.recommendations
+      .filter((r: any) => r && typeof r.workload === 'string' && typeof r.container === 'string')
+      .map((r: any) => ({
+        workload: String(r.workload),
+        container: String(r.container),
+        severity: (validSeverities.has(r.severity) ? r.severity : 'medium') as RightsizingSeverity,
+        rule: String(r.rule || 'ai-recommendation'),
+        message: String(r.message || ''),
+        suggestion: String(r.suggestion || ''),
+      }));
+  } catch (err) {
+    console.warn('Resource rightsizing AI call failed, returning empty recommendations:', err);
+    return [];
   }
-
-  // Rule 4: Missing CPU limit
-  if (c.cpuLimit === 0) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'medium', rule: 'missing-cpu-limit',
-      message: `${id}: CPU limit not set`,
-      suggestion: 'Set resources.limits.cpu to prevent CPU starvation of neighbours.',
-    });
-  }
-
-  // Rule 5: Missing memory limit
-  if (c.memLimit === 0) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'high', rule: 'missing-mem-limit',
-      message: `${id}: Memory limit not set`,
-      suggestion: 'Set resources.limits.memory to prevent unbounded memory growth.',
-    });
-  }
-
-  // Rule 6: CPU request very high (> 2 vCPU / 2000m)
-  if (c.cpuRequest > 2000) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'medium', rule: 'high-cpu-request',
-      message: `${id}: CPU request is ${c.cpuRequest}m (> 2 vCPU)`,
-      suggestion: 'Verify this is intentional; most apps need < 500m. Oversized requests reduce scheduling density.',
-    });
-  }
-
-  // Rule 7: Memory request very high (> 4 GiB)
-  if (c.memRequest > 4096) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'medium', rule: 'high-mem-request',
-      message: `${id}: Memory request is ${Math.round(c.memRequest / 1024 * 100) / 100} GiB (> 4 GiB)`,
-      suggestion: 'Verify this is intentional; large requests reduce bin-packing efficiency.',
-    });
-  }
-
-  // Rule 8: CPU limit > 4× request (burst ratio)
-  if (c.cpuRequest > 0 && c.cpuLimit > 0 && c.cpuLimit > c.cpuRequest * 4) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'low', rule: 'cpu-limit-burst-ratio',
-      message: `${id}: CPU limit (${c.cpuLimit}m) is ${Math.round(c.cpuLimit / c.cpuRequest)}× the request`,
-      suggestion: 'Keep limit/request ratio ≤ 4× to reduce noisy-neighbour risk.',
-    });
-  }
-
-  // Rule 9: Memory limit > 4× request
-  if (c.memRequest > 0 && c.memLimit > 0 && c.memLimit > c.memRequest * 4) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'low', rule: 'mem-limit-burst-ratio',
-      message: `${id}: Memory limit (${Math.round(c.memLimit)}Mi) is ${Math.round(c.memLimit / c.memRequest)}× the request`,
-      suggestion: 'Keep memory limit/request ratio ≤ 4× for predictable QoS class.',
-    });
-  }
-
-  // Rule 10: CPU limit equals request exactly (Guaranteed QoS — possibly over-provisioned)
-  if (c.cpuRequest > 0 && c.cpuLimit > 0 && c.cpuRequest === c.cpuLimit && c.cpuRequest > 500) {
-    recs.push({
-      workload: c.workload, container: c.container,
-      severity: 'low', rule: 'guaranteed-qos-high-cpu',
-      message: `${id}: CPU request === limit (${c.cpuLimit}m) creates Guaranteed QoS — potential waste`,
-      suggestion: 'Consider lowering the request if average utilisation is < 50% of the limit.',
-    });
-  }
-
-  return recs;
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
-export function generateK8sRightsizingRecommendations(
+export async function generateK8sRightsizingRecommendations(
   yamlFiles: Array<{ fileName: string; content: string }>
-): K8sRightsizingResult {
+): Promise<K8sRightsizingResult> {
   const allContent = yamlFiles.map(f => f.content).join('\n---\n');
   const containers = extractContainerRecords(allContent);
 
-  const allRecs: K8sRightsizingRecommendation[] = [];
   const seenWorkloads = new Set<string>();
-
   for (const c of containers) {
     seenWorkloads.add(c.workload);
-    allRecs.push(...evaluate(c));
   }
+
+  const allRecs = await evaluateWithAI(containers);
 
   const criticalCount = allRecs.filter(r => r.severity === 'critical').length;
   const highCount     = allRecs.filter(r => r.severity === 'high').length;

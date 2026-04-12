@@ -1130,6 +1130,7 @@ export default function ArchMeWorkflow() {
                 size="sm"
                 onClick={handleRefresh}
                 disabled={isAnalyzing || analyzeMutation.isPending}
+                data-testid="archme-btn-refresh"
               >
                 <RefreshCw className="w-4 h-4 mr-2" />
                 Refresh
@@ -1138,6 +1139,7 @@ export default function ArchMeWorkflow() {
                 variant="outline"
                 size="sm"
                 onClick={handleGoHome}
+                data-testid="archme-btn-home"
               >
                 <Home className="w-4 h-4 mr-2" />
                 Home
@@ -1262,6 +1264,7 @@ export default function ArchMeWorkflow() {
                           onClick={handleApproveDiagram}
                           className="w-full"
                           size="lg"
+                          data-testid="archme-btn-generate-diagram"
                         >
                           <CheckCircle2 className="w-4 h-4 mr-2" />
                           Approve Diagram & Continue
@@ -1298,6 +1301,7 @@ export default function ArchMeWorkflow() {
                     <Card
                       className="cursor-pointer hover:shadow-lg transition-all border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/50"
                       onClick={() => handleProviderSelect('github')}
+                      data-testid="archme-card-provider-github"
                     >
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2 text-green-900 dark:text-green-100">
@@ -1316,6 +1320,7 @@ export default function ArchMeWorkflow() {
                     <Card
                       className="cursor-pointer hover:shadow-lg transition-all border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/50"
                       onClick={() => handleProviderSelect('azure')}
+                      data-testid="archme-card-provider-azure"
                     >
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2 text-blue-900 dark:text-blue-100">
@@ -1476,6 +1481,7 @@ export default function ArchMeWorkflow() {
                 className="w-full"
                 size="lg"
                 disabled={generateCodeMutation.isPending}
+                data-testid="archme-btn-generate-code"
               >
                 {generateCodeMutation.isPending ? (
                   <>
@@ -1604,6 +1610,7 @@ export default function ArchMeWorkflow() {
                   onChange={(e) => setCommitMessage(e.target.value)}
                   placeholder="Enter commit message..."
                   rows={3}
+                  data-testid="archme-input-commit-message"
                 />
               </div>
               <Button
@@ -1611,6 +1618,7 @@ export default function ArchMeWorkflow() {
                 className="w-full"
                 size="lg"
                 disabled={commitMutation.isPending || !commitMessage.trim()}
+                data-testid="archme-btn-commit"
               >
                 {commitMutation.isPending ? (
                   <>

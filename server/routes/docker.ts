@@ -1,22 +1,51 @@
 import type { Express } from "express";
-import OpenAI from "openai";
+import { aiChatCompletion } from '../utils/ai-client.js';
 import { storage } from "../storage";
 import { mcpClient, type MCPProvider } from "../mcp-client";
 import { optionalAuth, type AuthenticatedRequest } from "../middleware/auth";
+import { validateRequest } from "../middleware/validate";
+import { aiMediumLimiter, aiLightLimiter } from "../middleware/rate-limit";
+import { sessionIdParams } from "@shared/api-contracts/common";
+import {
+  dockerScanBody,
+  generateDockerfileBody,
+  scanDockerBody,
+  dockerBestPracticesBody,
+  dockerFixBPBody,
+  generateComposeBody,
+  imageSizeEstimateBody,
+  commitDockerBody,
+  generateDockerDiagramBody,
+} from "@shared/api-contracts/docker";
 import { resolveRepositoryCredentials } from "../utils/credentials";
+import { getFixGuidance } from "../checkov-fix-guidance";
+
+/**
+ * Verify the requesting user owns the session (or session is unowned).
+ * Returns false and sends 403 if access is denied.
+ */
+function ensureDockerSessionOwnership(session: any, req: AuthenticatedRequest, res: any): boolean {
+  if (!session.userId || session.userId !== req.userId) {
+    console.warn(`[SECURITY] Docker session access denied: sessionId=${session.id} sessionOwner=${session.userId} requesterId=${req.userId ?? 'anonymous'} ip=${req.ip}`);
+    res.status(403).json({ error: 'Access denied to this session' });
+    return false;
+  }
+  return true;
+}
 
 /**
  * Docker routes
  */
 export function registerDockerRoutes(app: Express): void {
   // Scan repository metadata for Docker info
-  app.post("/api/sessions/:id/docker-scan", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/sessions/:id/docker-scan", optionalAuth, validateRequest({ params: sessionIdParams, body: dockerScanBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: "Session not found" });
       }
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       const repoName = session.repositoryName;
       const provider = session.provider as MCPProvider | undefined;
@@ -220,7 +249,7 @@ export function registerDockerRoutes(app: Express): void {
   });
 
   // Generate Dockerfile
-  app.post("/api/sessions/:id/generate-dockerfile", async (req, res) => {
+  app.post("/api/sessions/:id/generate-dockerfile", optionalAuth, aiMediumLimiter, validateRequest({ params: sessionIdParams, body: generateDockerfileBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     
     try {
@@ -238,6 +267,7 @@ export function registerDockerRoutes(app: Express): void {
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       if (session.activeModule && session.activeModule !== 'docker') {
         return res.status(403).json({
@@ -357,16 +387,17 @@ export function registerDockerRoutes(app: Express): void {
   });
 
   // Scan Dockerfile
-  app.post("/api/sessions/:id/scan-docker", async (req, res) => {
+  app.post("/api/sessions/:id/scan-docker", optionalAuth, aiLightLimiter, validateRequest({ params: sessionIdParams, body: scanDockerBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       console.log(`\n🔍 ========== DOCKER SCAN REQUEST ==========`);
       console.log(`Session ID: ${sessionId}`);
-      
+
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       // Get Dockerfile from session storage
       const files = await storage.getFilesBySession(sessionId);
@@ -387,9 +418,9 @@ export function registerDockerRoutes(app: Express): void {
       // Create temp directory and write Dockerfile
       const fs = await import('fs/promises');
       const path = await import('path');
-      const { exec } = await import('child_process');
+      const { execFile } = await import('child_process');
       const { promisify } = await import('util');
-      const execAsync = promisify(exec);
+      const execFileAsync = promisify(execFile);
       
       const projectRoot = process.cwd();
       const tempBaseDir = path.join(projectRoot, '.temp-checkov-docker');
@@ -539,13 +570,13 @@ export function registerDockerRoutes(app: Express): void {
           const commandStr = `${cmd} ${args.join(' ')}`;
           console.log(`   🔧 Trying: ${commandStr}`);
           
-          const { stdout, stderr } = await execAsync(commandStr, {
+          const { stdout, stderr } = await execFileAsync(cmd, args, {
             timeout: 120000, // 2 minute timeout
             cwd: tempDir,
           });
           checkovOutput = stdout || stderr;
           commandWorked = true;
-          successfulCommand = commandStr;
+          successfulCommand = `${cmd} ${args.join(' ')}`;
           console.log(`   ✅ Command succeeded`);
           break;
         } catch (error: any) {
@@ -823,7 +854,17 @@ export function registerDockerRoutes(app: Express): void {
           total,
           passPercentage
         },
-        failedChecks: checks,
+        failedChecks: checks.map((check: any) => {
+          const checkId = check.check_id || check.checkId;
+          const guidance = getFixGuidance(checkId, check.check_name || check.checkName);
+          return {
+            ...check,
+            severity: check.severity || guidance?.severity || null,
+            autoFixable: guidance?.autoFixable ?? false,
+            fixComplexity: guidance?.fixComplexity || 'moderate',
+            complianceStandards: guidance?.complianceStandards || [],
+          };
+        }),
         passedChecks: passedChecks
       });
 
@@ -850,13 +891,14 @@ export function registerDockerRoutes(app: Express): void {
   });
 
   // Docker Best Practices Validation
-  app.post("/api/sessions/:id/docker-best-practices", async (req, res) => {
+  app.post("/api/sessions/:id/docker-best-practices", optionalAuth, aiLightLimiter, validateRequest({ params: sessionIdParams, body: dockerBestPracticesBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: "Session not found" });
       }
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       const files = await storage.getFilesBySession(sessionId);
       const dockerfile = files.find(
@@ -872,23 +914,22 @@ export function registerDockerRoutes(app: Express): void {
         });
       }
 
-      console.log(`\n🔍 ========== DOCKER BEST PRACTICES ==========`);
+      console.log(`\n🔍 ========== DOCKER BEST PRACTICES (AI) ==========`);
       console.log(`Session: ${sessionId}`);
       const content = dockerfile.content;
       const lines = content.split("\n");
 
-      // ── Official / verified base image check ──
-      const officialPrefixes = [
-        "node", "python", "golang", "ruby", "php", "openjdk", "amazoncorretto",
-        "eclipse-temurin", "maven", "gradle", "rust", "alpine", "ubuntu",
-        "debian", "centos", "fedora", "busybox", "nginx", "httpd", "redis",
-        "postgres", "mysql", "mongo", "memcached", "traefik", "haproxy",
-        "consul", "vault", "envoy", "caddy", "mcr.microsoft.com/",
-        "docker.io/library/", "ghcr.io/", "gcr.io/", "registry.access.redhat.com/",
-      ];
-      const fromLines = lines.filter((l) =>
-        l.trim().toUpperCase().startsWith("FROM")
+      // Gather context for AI analysis
+      const fromLines = lines.filter((l) => l.trim().toUpperCase().startsWith("FROM"));
+      const baseImages = fromLines.map((l) => {
+        const m = l.match(/FROM\s+(?:--platform=\S+\s+)?(\S+)/i);
+        return m ? m[1] : "unknown";
+      });
+      const isMultiStage = fromLines.length > 1;
+      const dockerignoreFile = files.find(
+        (f) => f.fileName.toLowerCase() === ".dockerignore"
       );
+      const dockerignoreContent = dockerignoreFile?.content ?? null;
 
       interface Finding {
         id: string;
@@ -898,190 +939,84 @@ export function registerDockerRoutes(app: Express): void {
         line?: number;
         fix?: string;
       }
-      const findings: Finding[] = [];
 
-      for (const fromLine of fromLines) {
-        const match = fromLine.match(/FROM\s+(\S+)/i);
-        if (!match) continue;
-        let image = match[1];
-        // Strip --platform= prefix
-        if (image.startsWith("--")) {
-          const imgMatch = fromLine.match(/FROM\s+\S+\s+(\S+)/i);
-          if (imgMatch) image = imgMatch[1];
-        }
+      let findings: Finding[] = [];
 
-        const imageBase = image.split(":")[0].split("@")[0].toLowerCase();
-        const isOfficial = officialPrefixes.some(
-          (p) => imageBase === p || imageBase.startsWith(p + "/") || imageBase.startsWith(p)
-        );
-        const hasTag = image.includes(":") || image.includes("@");
-        const usesLatest = image.endsWith(":latest");
-        const isSlimOrAlpine =
-          image.includes("alpine") || image.includes("slim") || image.includes("distroless");
+      try {
 
-        if (!isOfficial && !imageBase.includes("/")) {
-          // single-name images without a namespace are Docker Hub official
-          // e.g. "node", "python" — these are fine
-        } else if (!isOfficial) {
-          findings.push({
-            id: "DOCKER_BP_001",
-            severity: "FAILED",
-            title: "Non-official base image",
-            description: `Image "${image}" is not a recognized official or verified publisher image. Use official images from Docker Hub or trusted registries (mcr.microsoft.com, gcr.io, ghcr.io).`,
-            line: lines.indexOf(fromLine) + 1,
-            fix: `Replace with an official image, e.g. node:20-alpine, python:3.12-slim`,
-          });
-        } else {
-          findings.push({
-            id: "DOCKER_BP_001",
-            severity: "PASSED",
-            title: "Official base image",
-            description: `Image "${image}" is from an official or verified publisher.`,
-            line: lines.indexOf(fromLine) + 1,
-          });
-        }
+        const systemPrompt = `You are a Docker security and best practices expert. Analyze this Dockerfile against production best practices. For each finding, provide: id (DOCKER_BP_xxx), title, severity (PASSED/WARNING/FAILED), description explaining WHY this matters, and a specific fix suggestion with code example. Check for: official base images, version pinning, slim/alpine variants, multi-stage builds, non-root USER, HEALTHCHECK, .dockerignore, COPY vs ADD, environment optimization, OCI labels, layer caching order, secret handling, and any other relevant best practices.
 
-        if (usesLatest) {
-          findings.push({
-            id: "DOCKER_BP_002",
-            severity: "FAILED",
-            title: "Using :latest tag",
-            description: `Image "${image}" uses the :latest tag. Pin to a specific version for reproducible builds.`,
-            line: lines.indexOf(fromLine) + 1,
-            fix: `Pin the image version, e.g. node:20.11-alpine instead of node:latest`,
-          });
-        } else if (!hasTag) {
-          findings.push({
-            id: "DOCKER_BP_002",
-            severity: "WARNING",
-            title: "No version tag specified",
-            description: `Image "${image}" has no explicit tag — this defaults to :latest. Pin a specific version.`,
-            line: lines.indexOf(fromLine) + 1,
-            fix: `Add a version tag, e.g. ${image}:20-alpine`,
-          });
-        } else {
-          findings.push({
-            id: "DOCKER_BP_002",
-            severity: "PASSED",
-            title: "Version pinned",
-            description: `Image "${image}" has a pinned version tag.`,
-            line: lines.indexOf(fromLine) + 1,
-          });
-        }
+Return valid JSON with this shape:
+{
+  "findings": [
+    {
+      "id": "DOCKER_BP_001",
+      "title": "string",
+      "severity": "PASSED" | "WARNING" | "FAILED",
+      "description": "string explaining why this matters",
+      "fix": "string with specific code suggestion (omit for PASSED findings)"
+    }
+  ]
+}
 
-        if (!isSlimOrAlpine) {
-          findings.push({
-            id: "DOCKER_BP_003",
-            severity: "WARNING",
-            title: "Consider slim/alpine variant",
-            description: `Image "${image}" is not using an alpine or slim variant. Smaller base images reduce attack surface and image size.`,
-            line: lines.indexOf(fromLine) + 1,
-            fix: `Use ${imageBase}:<version>-alpine or ${imageBase}:<version>-slim`,
-          });
-        } else {
-          findings.push({
-            id: "DOCKER_BP_003",
-            severity: "PASSED",
-            title: "Minimal base image",
-            description: `Image "${image}" uses a minimal variant (alpine/slim/distroless).`,
-            line: lines.indexOf(fromLine) + 1,
-          });
-        }
+Use sequential IDs starting at DOCKER_BP_001. Severity meanings:
+- PASSED: The Dockerfile follows this best practice correctly.
+- WARNING: A recommendation that would improve the image but isn't critical.
+- FAILED: A significant security or reliability issue that should be fixed before production.
+
+Be context-aware: consider the base image, the application type, and the build pattern when assigning severity. Include PASSED findings for practices the Dockerfile already follows correctly.`;
+
+        const userPrompt = `Analyze this Dockerfile for best practices:
+
+\`\`\`dockerfile
+${content}
+\`\`\`
+
+Context:
+- Base image(s): ${baseImages.join(", ")}
+- Multi-stage build: ${isMultiStage ? `Yes (${fromLines.length} stages)` : "No"}
+- .dockerignore present: ${dockerignoreContent ? "Yes" : "No"}${dockerignoreContent ? `\n- .dockerignore contents:\n\`\`\`\n${dockerignoreContent}\n\`\`\`` : ""}`;
+
+        const response = await aiChatCompletion({
+          model: "gpt-4o-mini",
+          temperature: 0.3,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system" as const, content: systemPrompt },
+            { role: "user" as const, content: userPrompt },
+          ],
+        });
+
+        const rawContent = response.choices[0]?.message?.content;
+        if (!rawContent) throw new Error("Empty AI response");
+
+        const parsed = JSON.parse(rawContent) as { findings: Finding[] };
+        if (!Array.isArray(parsed.findings)) throw new Error("Invalid AI response shape");
+
+        // Validate and sanitize each finding
+        findings = parsed.findings.map((f: any, idx: number) => {
+          const severity = (["PASSED", "WARNING", "FAILED"].includes(f.severity) ? f.severity : "WARNING") as Finding["severity"];
+          return {
+            id: f.id || `DOCKER_BP_${String(idx + 1).padStart(3, "0")}`,
+            title: String(f.title || "Untitled check"),
+            severity,
+            description: String(f.description || ""),
+            ...(f.fix ? { fix: String(f.fix) } : {}),
+            ...(f.line ? { line: Number(f.line) } : {}),
+          };
+        });
+
+        console.log(`🤖 AI returned ${findings.length} findings`);
+      } catch (aiError: any) {
+        console.error("AI best practices analysis failed, returning safe defaults:", aiError.message);
+        res.json({
+          success: true,
+          summary: { passed: 0, warnings: 0, failed: 0, total: 0 },
+          findings: [],
+          error: "AI analysis unavailable",
+        });
+        return;
       }
-
-      // ── Multi-stage build ──
-      if (fromLines.length > 1) {
-        findings.push({
-          id: "DOCKER_BP_004",
-          severity: "PASSED",
-          title: "Multi-stage build",
-          description: `Dockerfile uses ${fromLines.length} stages for optimized layering.`,
-        });
-      } else {
-        findings.push({
-          id: "DOCKER_BP_004",
-          severity: "WARNING",
-          title: "Single-stage build",
-          description: "Consider using multi-stage builds to separate build dependencies from the runtime image.",
-          fix: "Add a builder stage and copy only required artifacts to the final stage.",
-        });
-      }
-
-      // ── Non-root user ──
-      const hasUser = lines.some((l) => l.trim().toUpperCase().startsWith("USER"));
-      findings.push(
-        hasUser
-          ? { id: "DOCKER_BP_005", severity: "PASSED", title: "Non-root user", description: "Dockerfile sets a non-root USER." }
-          : { id: "DOCKER_BP_005", severity: "FAILED", title: "Running as root", description: "No USER directive found. Container will run as root, which is a security risk.", fix: "Add `RUN addgroup -S app && adduser -S app -G app` and `USER app`." }
-      );
-
-      // ── HEALTHCHECK ──
-      const hasHealthcheck = lines.some((l) => l.trim().toUpperCase().startsWith("HEALTHCHECK"));
-      findings.push(
-        hasHealthcheck
-          ? { id: "DOCKER_BP_006", severity: "PASSED", title: "Health check configured", description: "HEALTHCHECK instruction is present." }
-          : { id: "DOCKER_BP_006", severity: "WARNING", title: "Missing HEALTHCHECK", description: "No HEALTHCHECK instruction. Orchestrators cannot verify container health.", fix: "Add `HEALTHCHECK --interval=30s CMD wget -qO- http://localhost:PORT/ || exit 1`." }
-      );
-
-      // ── .dockerignore ──
-      const hasDockerignore = files.some(
-        (f) => f.fileName.toLowerCase() === ".dockerignore"
-      );
-      findings.push(
-        hasDockerignore
-          ? { id: "DOCKER_BP_007", severity: "PASSED", title: ".dockerignore present", description: "A .dockerignore file exists to exclude unnecessary files from the build context." }
-          : { id: "DOCKER_BP_007", severity: "WARNING", title: "Missing .dockerignore", description: "No .dockerignore file. This may include node_modules, .git, and other files in the image.", fix: "Create a .dockerignore with: node_modules, .git, dist, *.log, .env" }
-      );
-
-      // ── COPY vs ADD ──
-      const addLines = lines.filter(
-        (l) => l.trim().toUpperCase().startsWith("ADD") && !l.trim().toUpperCase().startsWith("ADDGROUP") && !l.trim().toUpperCase().startsWith("ADDUSER")
-      );
-      if (addLines.length > 0) {
-        findings.push({
-          id: "DOCKER_BP_008",
-          severity: "WARNING",
-          title: "Using ADD instead of COPY",
-          description: `Found ${addLines.length} ADD instruction(s). Use COPY unless you need ADD's tar-extraction or URL features.`,
-          fix: "Replace ADD with COPY for local file copies.",
-        });
-      } else {
-        findings.push({
-          id: "DOCKER_BP_008",
-          severity: "PASSED",
-          title: "COPY used correctly",
-          description: "Dockerfile uses COPY instead of ADD.",
-        });
-      }
-
-      // ── ENV NODE_ENV=production ──
-      const hasNodeEnv = content.includes("NODE_ENV=production");
-      const isNode = content.toLowerCase().includes("node") || content.toLowerCase().includes("npm");
-      if (isNode && !hasNodeEnv) {
-        findings.push({
-          id: "DOCKER_BP_009",
-          severity: "WARNING",
-          title: "NODE_ENV not set",
-          description: "Node.js app detected but NODE_ENV=production is not set.",
-          fix: "Add `ENV NODE_ENV=production` for optimized runtime.",
-        });
-      }
-
-      // ── OCI / Docker labels ──
-      const hasOciLabels =
-        content.includes("org.opencontainers.image.") ||
-        content.toUpperCase().includes("LABEL");
-      findings.push(
-        hasOciLabels
-          ? { id: "DOCKER_BP_010", severity: "PASSED" as const, title: "Image labels present", description: "Dockerfile includes LABEL / OCI image labels for metadata." }
-          : {
-              id: "DOCKER_BP_010",
-              severity: "WARNING" as const,
-              title: "Missing image labels",
-              description: "No LABEL instructions found. Add OCI image labels for maintainability.",
-              fix: 'Add labels: LABEL org.opencontainers.image.title="<app>" org.opencontainers.image.version="1.0" org.opencontainers.image.authors="<team>"',
-            }
-      );
 
       // ── Summary ──
       const passed = findings.filter((f) => f.severity === "PASSED").length;
@@ -1105,7 +1040,7 @@ export function registerDockerRoutes(app: Express): void {
   });
 
   // Fix Dockerfile based on best practices findings
-  app.post("/api/sessions/:id/docker-fix-best-practices", async (req, res) => {
+  app.post("/api/sessions/:id/docker-fix-best-practices", optionalAuth, aiMediumLimiter, validateRequest({ params: sessionIdParams, body: dockerFixBPBody }), async (req: AuthenticatedRequest, res) => {
     try {
       const sessionId = req.params.id;
       const { findings } = req.body as {
@@ -1127,6 +1062,7 @@ export function registerDockerRoutes(app: Express): void {
       if (!session) {
         return res.status(404).json({ error: "Session not found" });
       }
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       const files = await storage.getFilesBySession(sessionId);
       const dockerfile = files.find(
@@ -1148,8 +1084,7 @@ export function registerDockerRoutes(app: Express): void {
         .map((f) => `- [${f.id}] ${f.title}: ${f.description}${f.fix ? ` (Suggested: ${f.fix})` : ""}`)
         .join("\n");
 
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const completion = await openai.chat.completions.create({
+      const completion = await aiChatCompletion({
         model: "gpt-4o-mini",
         messages: [
           {
@@ -1219,11 +1154,12 @@ Return ONLY the fixed Dockerfile content.`,
   });
 
   // Generate docker-compose.yml
-  app.post("/api/sessions/:id/generate-compose", async (req, res) => {
+  app.post("/api/sessions/:id/generate-compose", optionalAuth, aiMediumLimiter, validateRequest({ params: sessionIdParams, body: generateComposeBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
       if (!session) return res.status(404).json({ error: "Session not found" });
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       const files = await storage.getFilesBySession(sessionId);
       const dockerfile = files.find(
@@ -1270,11 +1206,12 @@ Return ONLY the fixed Dockerfile content.`,
   });
 
   // Estimate image sizes from Dockerfile
-  app.post("/api/sessions/:id/image-size-estimate", async (req, res) => {
+  app.post("/api/sessions/:id/image-size-estimate", optionalAuth, validateRequest({ params: sessionIdParams, body: imageSizeEstimateBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
       if (!session) return res.status(404).json({ error: "Session not found" });
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       const files = await storage.getFilesBySession(sessionId);
       const dockerfile = files.find(
@@ -1286,7 +1223,7 @@ Return ONLY the fixed Dockerfile content.`,
       }
 
       const { estimateImageSizes } = await import('../docker/compose-generator');
-      const estimates = estimateImageSizes(dockerfile.content);
+      const estimates = await estimateImageSizes(dockerfile.content);
 
       res.json({ success: true, estimates });
     } catch (error: any) {
@@ -1295,15 +1232,16 @@ Return ONLY the fixed Dockerfile content.`,
   });
 
   // Commit Dockerfile
-  app.post("/api/sessions/:id/commit-docker", async (req, res) => {
+  app.post("/api/sessions/:id/commit-docker", optionalAuth, validateRequest({ params: sessionIdParams, body: commitDockerBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     const { message } = req.body;
-    
+
     try {
       const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       if (!session.provider || !session.repositoryName) {
         return res.status(400).json({ 
@@ -1367,11 +1305,12 @@ Return ONLY the fixed Dockerfile content.`,
   });
 
   // Generate architecture diagram for Docker session (Dockerfile → Mermaid)
-  app.post("/api/sessions/:id/generate-docker-diagram", async (req, res) => {
+  app.post("/api/sessions/:id/generate-docker-diagram", optionalAuth, validateRequest({ params: sessionIdParams, body: generateDockerDiagramBody }), async (req: AuthenticatedRequest, res) => {
     const sessionId = req.params.id;
     try {
       const session = await storage.getSession(sessionId);
       if (!session) return res.status(404).json({ error: "Session not found" });
+      if (!ensureDockerSessionOwnership(session, req, res)) return;
 
       const files = await storage.getFilesBySession(sessionId);
       const dockerFiles = files.filter(f =>
@@ -1387,8 +1326,7 @@ Return ONLY the fixed Dockerfile content.`,
 
       const filesContent = dockerFiles.map(f => `=== ${f.fileName} ===\n${f.content}`).join('\n\n');
 
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const response = await openai.chat.completions.create({
+      const response = await aiChatCompletion({
         model: 'gpt-4o-mini',
         messages: [
           {
